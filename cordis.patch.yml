@@ -1,0 +1,6 @@
+# dsh bundle layer: mount the dsh-wechat bridge plugin (dsh/index.js via the
+# package root export). The profile's cordis.patch.yml stays the user's own
+# patch layer; this file ships with the package and is applied as a bundle.
+- insert:
+    - id: dsh-wechat
+      name: 'dsh-wechat'
