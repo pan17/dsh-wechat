@@ -1206,10 +1206,12 @@ export class WeChatDSHBridge {
           await this.sendReply(userId, "📂 暂无工作区。可用 /workspace add <路径> 添加。");
           return;
         }
+        const archived = new Set(this.ops.archivedSessionIds());
         const lines = ["📂 工作区列表（按最近使用排序）"];
         workspaces.forEach((ws, i) => {
           const current = user.cwd === ws.path ? " ◀ 当前" : "";
-          lines.push(`${i + 1}. ${ws.title} — ${ws.path}（${ws.sessionIds.length} 会话）${current}`);
+          const visibleCount = ws.sessionIds.filter((id) => !archived.has(id)).length;
+          lines.push(`${i + 1}. ${ws.title} — ${ws.path}（${visibleCount} 会话）${current}`);
         });
         lines.push("", "切换: /workspace switch <编号|路径>");
         await this.sendReply(userId, lines.join("\n"));
@@ -1348,6 +1350,26 @@ export class WeChatDSHBridge {
         return;
       }
       case "new": {
+        // GUI-equivalent "reuse-or-create its blank session": if the current
+        // session is already blank (created but never spoken to), stay on it;
+        // otherwise reuse the newest blank session in the current cwd; only
+        // when none exists create a fresh one.
+        if (user.sessionId) {
+          const currentActivity = await this.ops.lastUserMessageTime(user.sessionId);
+          if (currentActivity === undefined) {
+            const agent = this.agents.get(user);
+            await this.sendReply(userId, `✅ 已在空白会话（${user.sessionId.slice(0, 12)}）${agent ? `，Agent ${agent.status}` : ""}。`);
+            return;
+          }
+        }
+        const blank = await this.findBlankSession(user.cwd, user.sessionId);
+        if (blank) {
+          user.sessionId = blank;
+          this.state.update(user.userId, { sessionId: user.sessionId });
+          const agent = await this.agents.ensure(user);
+          await this.sendReply(userId, `✅ 已复用空白会话 ${blank.slice(0, 12)}（${user.cwd}）${agent ? `，Agent ${agent.status}` : ""}。`);
+          return;
+        }
         user.sessionId = "";
         this.state.update(user.userId, { sessionId: "" });
         const agent = await this.agents.ensure(user);
@@ -1361,6 +1383,25 @@ export class WeChatDSHBridge {
         return;
       }
     }
+  }
+
+  /**
+   * Find the newest blank (never-spoken-to) session in `cwd`, mirroring the
+   * GUI's "reuse-or-create its blank session" behavior. A blank session is
+   * one with no `user/message` event in its log — created by a previous
+   * "new session" that the user never used. Archived sessions are already
+   * filtered by `listSessions()`. `excludeId` skips the caller's current
+   * session (the caller handles "already blank" separately).
+   */
+  private async findBlankSession(cwd: string, excludeId?: string): Promise<string | undefined> {
+    const sessions = (await this.ops.listSessions())
+      .filter((r) => r.header.cwd === cwd && r.header.id !== excludeId)
+      .sort((a, b) => b.header.createdAt - a.header.createdAt);
+    for (const record of sessions) {
+      const activity = await this.ops.lastUserMessageTime(record.header.id);
+      if (activity === undefined) return record.header.id;
+    }
+    return undefined;
   }
 
   private async handlePresetCommand(userId: string, cmd: PresetCommand): Promise<void> {

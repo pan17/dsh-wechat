@@ -72,6 +72,12 @@ export interface WorkspaceRegistry {
   list(): Workspace[];
   create(path: string, title?: string): Promise<Workspace>;
   resolveByPath(path: string): Promise<Workspace | undefined>;
+  /**
+   * Registry-global archive set (dsh-workspace): sessions hidden from every
+   * grouping surface. Archiving keeps the session's workspace slot; this is
+   * the "hidden from lists" marker the GUI sidebar honors.
+   */
+  readonly archivedSessionIds: readonly string[];
 }
 
 export interface SessionQuery {
@@ -145,6 +151,11 @@ export class DshOps {
     return this.get<WorkspaceRegistry>("workspaceRegistry")?.list() ?? [];
   }
 
+  /** Sessions hidden from every grouping surface (dsh-workspace archive set). */
+  archivedSessionIds(): readonly string[] {
+    return this.get<WorkspaceRegistry>("workspaceRegistry")?.archivedSessionIds ?? [];
+  }
+
   async resolveWorkspaceByPath(path: string): Promise<Workspace | undefined> {
     try {
       return await this.get<WorkspaceRegistry>("workspaceRegistry")?.resolveByPath(path);
@@ -168,8 +179,13 @@ export class DshOps {
     if (!query) return [];
     try {
       const all = await query.listSessions();
-      // Top-level sessions only (no subagent origin).
-      return all.filter((r) => r.header.origin !== "subagent");
+      // Top-level sessions only (no subagent origin), and never archived
+      // sessions — the same "hidden from every grouping surface" rule the
+      // GUI sidebar applies (dsh-workspace archivedSessionIds).
+      const archived = new Set(
+        this.get<WorkspaceRegistry>("workspaceRegistry")?.archivedSessionIds ?? [],
+      );
+      return all.filter((r) => r.header.origin !== "subagent" && !archived.has(r.header.id));
     } catch {
       return [];
     }

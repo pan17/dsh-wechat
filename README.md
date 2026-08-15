@@ -65,8 +65,8 @@ dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除
 |---|---|
 | `/help`（`/h`、`/?`） | 帮助 |
 | `/status` | 当前状态：工作区、会话、Agent、Preset、模型、上下文、权限、静默 |
-| `/workspace (ws) — list \| status \| switch <编号\|路径> \| add <路径>` | 工作区管理（switch 恢复该目录最近会话，无则新建） |
-| `/session (s) — list [current] \| switch <编号> \| new \| status` | 会话管理（list 最近 20 个，标记当前；`current` 只看当前工作目录） |
+| `/workspace (ws) — list \| status \| switch <编号\|路径> \| add <路径>` | 工作区管理（list 显示各工作区会话数，不含已归档；switch 恢复该目录最近会话，无则新建） |
+| `/session (s) — list [current] \| switch <编号> \| new \| status` | 会话管理（list 最近 20 个，标记当前，不显示 GUI 已归档会话；`current` 只看当前工作目录；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建） |
 | `/preset (p) — list \| switch <名称\|编号> \| status` | Preset 管理（默认写入 DSH 设置，与 GUI 同步；当前会话无内容时立即应用） |
 | `/model — list [提供商] \| switch <提供商/模型> \| status` | 模型管理（切换立即作用于当前会话 + 设为默认） |
 | `/perm — status \| list \| switch <名称\|编号> \| default [名称\|编号]` | 权限管理（switch 实时切当前会话；default 写 DSH 设置，新会话生效） |

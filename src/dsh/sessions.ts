@@ -8,6 +8,7 @@
  * `@deepseek-ai/*` packages.
  */
 
+import crypto from "node:crypto";
 import { createUserMessage } from "./messages.js";
 import type { Agent, AgentHandle, ContentBlock, CreateAgentOptions, ResumeAgentOptions } from "./types.js";
 import type { UserState } from "../state.js";
@@ -34,9 +35,14 @@ interface WorkspaceEntity {
   attachSession(sessionId: string): Promise<void>;
 }
 
-/** Mint a durable session id for a WeChat-bound session. */
+/**
+ * Mint a durable session id for a WeChat-bound session — the SAME format the
+ * GUI uses (`session-<uuid>`, dsh-host-apiproxy's session.create). Uniform
+ * ids keep WeChat-created sessions indistinguishable from GUI-created ones
+ * everywhere (lists, workspace accounting, log exports).
+ */
 export function mintSessionId(): string {
-  return `wx-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `session-${crypto.randomUUID()}`;
 }
 
 export class AgentStore {

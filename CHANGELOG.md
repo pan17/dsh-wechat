@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-15
+
+### Added
+
+- `/session new` 复用当前工作区空白会话（与 GUI「新建会话」同款
+  "reuse-or-create its blank session"）：当前会话空白则保持，否则复用该
+  工作区最新空白会话，无空白才新建
+
+### Changed
+
+- 微信创建的会话 id 与 GUI 统一为 `session-<uuid>`（不再用 `wx-` 前缀），
+  新旧会话在列表/工作区/日志导出中完全一致；存量 `wx-` 会话不受影响
+- `/workspace list` 会话数不再统计已归档会话
+
+### Fixed
+
+- `/s list`（及 `/s list current`、`/s switch` 编号）不再显示 GUI 已归档
+  的会话（与 GUI 侧边栏同规则，dsh-workspace `archivedSessionIds`）
+
 ## [0.2.0] - 2026-08-15
 
 ### Added
