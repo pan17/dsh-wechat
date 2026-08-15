@@ -166,8 +166,19 @@ async function convertMediaItem(
     return { type: "text", text: "[收到语音消息 - 无转写]" };
   }
 
-  if (item.type === MessageItemType.VIDEO) {
-    return { type: "text", text: "[收到视频消息]" };
+  if (item.type === MessageItemType.VIDEO && item.video_item?.media) {
+    const media = item.video_item.media;
+    const aesKey = parseAesKey(media);
+    if (!aesKey || !media.encrypt_query_param) return null;
+
+    log("Downloading video from CDN...");
+    const buffer = await downloadAndDecrypt(media.encrypt_query_param, aesKey, cdnBaseUrl);
+    const realPath = saveToTemp(buffer, "video.mp4", tempDir);
+
+    return {
+      type: "text",
+      text: `[收到视频] 文件已保存到: ${realPath}`,
+    };
   }
 
   return null;

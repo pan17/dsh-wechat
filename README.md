@@ -1,37 +1,80 @@
 # dsh-wechat
 
-将微信私聊消息桥接到 DeepSeek Harness (DSH) 的静态 Cordis 插件。
-
-参考 [wechat-opencode](https://github.com/pan17/wechat-opencode)（MIT）开发：
-微信侧（iLink bot 协议）直接移植；OpenCode Server 那一半整体替换为 DSH
-进程内服务调用，因此本插件体积约为参考项目的 1/3。
+让微信成为 DeepSeek Harness (DSH) 的第二客户端：通过腾讯 iLink bot 协议把
+微信私聊桥接到 DSH agent——文本/图片/文件/语音消息双向收发、微信内 slash
+命令管理会话/工作区/Preset/模型/权限、审批与提问卡与 GUI 双端同卡同决策、
+DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，零运行时
+`@deepseek-ai` 依赖，直接调用 DSH 进程内服务。
 
 ## 功能
 
 - **发送** — 微信文本/图片/文件/语音消息 → DSH agent（媒体自动下载解密到
   `~/.dsh-wechat/tempfile/`，本地路径作为附件注入）
 - **接收** — agent 回复文本回微信；`send_wechat` 工具可主动推送文本/文件到微信
-- **微信 slash 命令** — `/help`、`/status`、`/silent`、`/stop`、`/rp`、`/rq`
-  由 bridge 直接处理
-- **审批/提问卡（与 GUI 同卡同决策，完全原生）** — 插件订阅 DSH 官方的
-  `apiProxy.events.mux` 帧流（`approval/requested`、`question/requested` 等，
-  全量会话、打开即重放 pending），**微信弹与 GUI 完全一致的卡**（工具名 +
-  reason + 允许一次/拒绝；提问含选项/多选/自定义）。微信回复通过
-  `apiProxy.respond()` 注入原生 pending 表——**GUI 和微信都弹卡，谁先回复
-  谁生效**（原生 settle 防双决），审计日志照常。任意会话的卡微信都能直接
-  决策，无需切换会话；30 分钟软超时本地移除（可在 GUI 继续处理）。
-  审批触发完全由 DSH 原生决定（沙箱升级审批 `approval.request` 等），
-  插件不设任何自定义触发名单、无自动放行——微信只是 GUI 的镜像渲染端
-- **静默模式** — `/silent on` 后每轮只发送最终文本回复
-- **二维码登录** — 浏览器打开 `http://127.0.0.1:3080/wechat/qr` 扫码；
-  登录态持久化到 `~/.dsh-wechat/auth/token.json`。iLink 的
-  `qrcode_img_content` 是 HTML 页面而非图片，插件在宿主侧用
-  qrcode-generator（MIT，vendored）把 URL 渲染成 SVG 二维码
-  （`/wechat/api/qr-image`），设置页与扫码页共用
-- **设置页 UI** — DSH 设置 → **WeChat** 页面：连接状态、二维码扫码、
-  重新扫码 / 重连 / 退出登录按钮、连接配置表单（保存即生效，
-  网关参数变更自动重连）；配置持久化到 `~/.dsh-wechat/config.json`
+- **微信 slash 命令** — `/workspace`、`/session`、`/preset`、`/model`、
+  `/perm`、`/silent`、`/next`、`/status`、`/stop`、`/rp`、`/rq` 等
+  由 bridge 直接处理（见下方命令表）
+- **审批/提问卡（双端同卡）** — 微信与 GUI 弹一致的原生审批/提问卡，
+  谁先回复谁生效（原生防双决）
+- **静默模式** — `/silent on` 后每轮只发送最终回复
+- **二维码登录** — `http://127.0.0.1:3080/wechat/qr` 扫码登录，设置页内嵌
+- **设置页 UI** — DSH 设置 → **WeChat**：扫码、状态、重连、退出登录、
+  连接配置（保存即生效，存储于 `~/.dsh-wechat/config.json`）
 - **断点续传** — `sync-buf` 与微信会话映射持久化，重启 DSH 后自动恢复会话
+
+## 安装（部署到 DSH profile）
+
+DSH 自带插件管理命令 `dsh plugin`（在 profile 目录转发 pnpm，并自动把
+声明了 `dsh.bundle` 的依赖加入 bundle 层）：
+
+```bash
+# 安装（自动添加依赖 + 注册 bundle 层）
+dsh plugin --profile <profile> add dsh-wechat
+
+# 验证组合配置
+dsh --profile <profile> --dump-config   # 应看到 "- id: dsh-wechat" 行
+
+# 重启 DSH（必须），然后：
+#   - 浏览器打开 设置 → WeChat：扫码登录、查看状态、重连、改配置
+#   - 或直接打开 http://127.0.0.1:3080/wechat/qr 扫码
+```
+
+其他管理命令（同样自动维护 bundle 层）：
+
+```bash
+dsh plugin --profile <profile> update dsh-wechat   # 升级
+dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除）
+```
+
+> **本地开发/改动即时可见**：npm 发布前用 pnpm `workspace:*` + junction
+> 指向本仓库目录替代 npm 安装（pnpm 10 在 Windows 上跨盘 `link:`/`file:`
+> 有 bug，会把绝对路径拼接到 profile 目录后报 ENOENT；junction +
+> `workspace:*` 是已验证的替代，且需手动把 `dsh-wechat` 加进
+> `dsh.profile.bundles`）。插件代码修改后无需重新安装，但**重启 DSH**
+> 才能让改动生效；若 `pnpm install` 后插件消失，重新执行一次即可恢复。
+
+## 微信命令
+
+| 命令 | 说明 |
+|---|---|
+| `/help`（`/h`、`/?`） | 帮助 |
+| `/status` | 当前状态：工作区、会话、Agent、Preset、模型、上下文、权限、静默 |
+| `/workspace (ws) — list \| status \| switch <编号\|路径> \| add <路径>` | 工作区管理（switch 恢复该目录最近会话，无则新建） |
+| `/session (s) — list [current] \| switch <编号> \| new \| status` | 会话管理（list 最近 20 个，标记当前；`current` 只看当前工作目录） |
+| `/preset (p) — list \| switch <名称\|编号> \| status` | Preset 管理（默认写入 DSH 设置，与 GUI 同步；当前会话无内容时立即应用） |
+| `/model — list [提供商] \| switch <提供商/模型> \| status` | 模型管理（切换立即作用于当前会话 + 设为默认） |
+| `/perm — status \| list \| switch <名称\|编号> \| default [名称\|编号]` | 权限管理（switch 实时切当前会话；default 写 DSH 设置，新会话生效） |
+| `/silent on\|off`（`/sl`） | 静默模式（跨重启持久化） |
+| `/stop` | 中断当前任务 |
+| `/next` | 继续发送因微信限制被缓存的消息 |
+| `/rp` / `/rq` | 拒绝所有待处理权限卡 / 提问卡（微信端） |
+
+其他 `/xxx` 命令作为文本转发给 agent；审批/提问卡双端同弹，已在其他端
+处理的卡会提示。
+
+所有命令均直接映射 DSH 原生服务（`workspaceRegistry` / `sessionQuery` /
+`agentPresets` / `agentDefaultModel` / `permissionPresets`），默认值与 GUI
+设置页同源同步。
 
 ## 架构
 
@@ -68,37 +111,6 @@
 > 时微信提示"已在其他端处理"。微信卡 30 分钟软超时是唯一工程差异
 > （GUI 卡无超时、可继续处理）。
 
-## 安装（部署到 DSH profile）
-
-前置：`F:\opencodeproject\dsh-wechat` 已构建（`npm run build`）。
-
-1. 在 profile 的 `package.json` 添加依赖与 bundle（已配置）：
-
-   ```jsonc
-   // C:\Users\Administrator\.dsh\profiles\web\package.json
-   "dependencies": {
-     "dsh-wechat": "link:F:/opencodeproject/dsh-wechat"
-   },
-   "dsh": { "profile": { "bundles": [ /* ... */, "dsh-wechat" ] } }
-   ```
-
-2. 安装并验证组合配置：
-
-   ```bash
-   cd C:\Users\Administrator\.dsh\profiles\web
-   pnpm install
-   dsh --profile web --dump-config   # 应看到 "- id: dsh-wechat" 行
-   ```
-
-3. **重启 DSH**（必须），然后：
-   - 浏览器打开 **设置 → WeChat**：扫码登录、查看状态、重连、改配置
-   - 或直接打开 `http://127.0.0.1:3080/wechat/qr` 扫码
-
-> 注意：`link:` 依赖指向 `F:\opencodeproject\dsh-wechat`，插件代码在该目录
-> 修改后无需重新安装（junction 实时可见）；但**重启 DSH** 才能让改动生效。
-> 若之后在 profile 里跑 `pnpm install` 后插件消失，重新执行 `pnpm install`
-> 即可恢复（依赖声明在 package.json 中，不会被清理）。
-
 ## 设置页（DSH 设置 → WeChat）
 
 客户端半部通过 `dsh.client` + `exports["./client"]` 声明（与 dsh-mcp-manager
@@ -109,7 +121,7 @@
 - **扫码** — 未登录时页面内直接显示二维码，扫码确认后自动进入已登录
 - **操作按钮** — `重新扫码`（清除 token 重新登录）、`重连`（重启长轮询
   监控，token 失效时自动回到扫码）、`退出登录`
-- **连接配置** — baseUrl / cdnBaseUrl / botType / cwd / agentPreset /
+- **连接配置** — baseUrl / cdnBaseUrl / botType / cwd /
   textChunkLimit / cardTimeoutMs；保存即生效，
   网关参数变更自动重连；存储于 `~/.dsh-wechat/config.json`
 
@@ -125,8 +137,7 @@ reconnect|logout`），客户端零 `@deepseek-ai` 依赖。
 # 例：追加到 profile 的 cordis.patch.yml
 - id: dsh-wechat
   config:
-    cwd: 'F:\work'
-    agentPreset: build
+    cwd: 'C:\projects\my-project'
 ```
 
 | 键 | 默认值 | 说明 |
@@ -136,50 +147,19 @@ reconnect|logout`），客户端零 `@deepseek-ai` 依赖。
 | `botType` | `"3"` | iLink bot 类型 |
 | `storageDir` | `~/.dsh-wechat` | token/sync-buf/会话映射/临时文件 |
 | `cwd` | `process.cwd()` | 新会话工作目录 |
-| `agentPreset` | 无 | 新会话 agent preset |
 | `textChunkLimit` | `4000` | 微信单条消息长度上限 |
 | `cardTimeoutMs` | `1800000` | 提问/权限卡软超时（30 分钟） |
 
-## 微信命令
-
-| 命令 | 说明 |
-|---|---|
-| `/help`（`/h`、`/?`） | 帮助 |
-| `/status` | 工作区、会话、agent 状态、模式、模型、静默、待处理权限 |
-| `/workspace list`（`/ws`） | 工作区列表（含会话数，标记当前） |
-| `/workspace status` | 当前工作区 |
-| `/workspace switch <编号\|路径>` | 切换工作区（恢复该目录最近会话，无则新建） |
-| `/workspace add <路径>` | 添加并切换到新工作区 |
-| `/session list`（`/s`） | 最近 20 个会话（标题/工作区/时间/模式，标记当前） |
-| `/session switch <编号>` | 切换到指定会话（自动切换工作区） |
-| `/session new` | 新会话（当前工作区，用当前模式） |
-| `/session status` | 当前会话信息 |
-| `/agent list`（`/a`） | 可用 Agent 模式（preset）列表 |
-| `/agent switch <名称\|编号>` | 切换模式：当前会话无内容时立即应用，否则应用于下一个新会话 |
-| `/agent status` | 当前模式 |
-| `/model list [提供商]` | 提供商列表 / 指定提供商下的模型 |
-| `/model switch <提供商/模型>` | 切换模型（立即作用于当前会话 + 设为默认） |
-| `/model status` | 当前会话模型与默认模型 |
-| `/silent on\|off`（`/sl`） | 静默模式（跨重启持久化） |
-| `/stop` | 中断当前任务（`agent.cancel`） |
-| `/rp` | 拒绝所有待处理权限卡（微信端） |
-| `/rq` | 拒绝所有待处理提问卡（微信端） |
-
-其他 `/xxx` 命令作为文本转发给 agent。审批/提问卡与 GUI 双端同弹，
-微信回复即注入原生决策；已在其他端处理的卡会提示。
-
-映射关系：`/workspace` → `workspaceRegistry`；`/session` →
-`sessionQuery` + 会话重绑定（agent resume）；`/agent` →
-`agentPresets`（`recompose` 仅对无内容会话生效）；`/model` →
-`agentDefaultModel` + `agent/request` 瀑布覆盖当前会话（与 DSH 官方
-`installModelSelection` 同款协作模式）。
+> 新会话的 agent preset 由 DSH 设置文档（`agent-presets` namespace，GUI
+> 设置页或微信 `/preset switch` 修改）决定，插件不再提供 `agentPreset`
+> 配置键。
 
 ## 开发
 
 ```bash
 npm install
 npm run build    # tsc → dist/
-npm test         # vitest（62 个用例：splitText/格式化/解析/帧处理/状态存储/命令解析）
+npm test         # vitest（64 个用例：splitText/格式化/解析/帧处理/状态存储/命令解析）
 ```
 
 ## 与参考项目的差异与已知边界
@@ -193,8 +173,10 @@ npm test         # vitest（62 个用例：splitText/格式化/解析/帧处理/
 - 帧流 `events.mux`/`respond` 是 ApiProxy 正式契约；若 DSH 版本调整帧
   结构，按契约适配即可。
 - `send_wechat` 工具对所有 agent 可见；非微信绑定会话调用会返回错误提示。
-- `/agent switch` 遵循 DSH 约束：只有未产生任何内容的会话才能当场
-  `recompose`；已有内容的会话会提示模式应用于下一个新会话。
+- `/preset switch` 遵循 DSH 约束：只有未产生任何内容的会话才能当场
+  `recompose`；已有内容的会话会提示 Preset 应用于下一个新会话。默认
+  Preset 本身写入 DSH 设置文档（`agent-presets` namespace），GUI 设置
+  页与微信双端读写同一事实源。
 - iLink 通道是腾讯官方 bot 协议，接口可能随官方调整；跟随 wechat-opencode
   上游的 `src/weixin/` 修复即可。
 

@@ -26,6 +26,14 @@ export interface BridgeContext {
   on(event: string, listener: (...args: unknown[]) => unknown): () => void;
 }
 
+/** Minimal workspace entity surface (dsh-workspace). */
+interface WorkspaceEntity {
+  readonly path: string;
+  readonly title: string;
+  readonly sessionIds: readonly string[];
+  attachSession(sessionId: string): Promise<void>;
+}
+
 /** Mint a durable session id for a WeChat-bound session. */
 export function mintSessionId(): string {
   return `wx-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -50,11 +58,9 @@ export class AgentStore {
    * Returns the live agent, or undefined when the agents service is
    * unavailable.
    */
-  async ensure(user: UserState, agentPreset?: string): Promise<Agent | undefined> {
+  async ensure(user: UserState): Promise<Agent | undefined> {
     const agents = this.agents();
     if (!agents) return undefined;
-
-    const setup = agentSetup;
 
     if (user.sessionId) {
       const live = agents.get(user.sessionId);
@@ -62,8 +68,9 @@ export class AgentStore {
       try {
         const handle = await agents.resume({
           resumeSessionId: user.sessionId,
-          setup,
+          setup: agentSetup,
         });
+        await this.attachToWorkspace(user.cwd, user.sessionId);
         return handle.agent;
       } catch (err) {
         console.error(`[dsh-wechat] resume session ${user.sessionId} failed: ${String(err)}`);
@@ -72,21 +79,53 @@ export class AgentStore {
     }
 
     try {
+      // The preset this session will actually run: the deployment default
+      // (settings document first — the same one the GUI edits and /preset
+      // switch writes). Recording it in the header (like the GUI's
+      // composeAgent does) keeps /session list's Preset column populated and
+      // makes a later resume mount the same composition.
+      const rosterDefault = this.ctx.get<{ defaultId?: string }>("agentPresets")?.defaultId;
+      const presetForSession = rosterDefault;
       const sessionId = mintSessionId();
       const handle = await agents.create({
         sessionId,
         meta: {
           cwd: user.cwd,
-          ...(agentPreset ? { agentPreset } : {}),
+          ...(presetForSession ? { agentPreset: presetForSession } : {}),
         },
-        setup,
+        setup: agentSetup,
       });
       // Persist the binding so a later restart resumes this session.
       user.sessionId = sessionId;
+      await this.attachToWorkspace(user.cwd, sessionId);
       return handle.agent;
     } catch (err) {
       console.error(`[dsh-wechat] create session failed: ${String(err)}`);
       return undefined;
+    }
+  }
+
+  /**
+   * Account the session to the workspace owning `cwd` (create it on first
+   * use), exactly like the GUI's session.create remote does via
+   * `workspace.attachSession`. Without this, WeChat-created sessions fall
+   * into the sidebar's "ungrouped" bucket: the workspace registry derives
+   * membership from its durable `sessionIds` records, which only
+   * `attachSession` (or the startup bootstrap) populates.
+   */
+  private async attachToWorkspace(cwd: string, sessionId: string): Promise<void> {
+    const registry = this.ctx.get<{
+      create(path: string, title?: string): Promise<WorkspaceEntity>;
+      resolveByPath(path: string): Promise<WorkspaceEntity | undefined>;
+    }>("workspaceRegistry");
+    if (!registry) return;
+    try {
+      let workspace = await registry.resolveByPath(cwd);
+      if (!workspace) workspace = await registry.create(cwd);
+      await workspace.attachSession(sessionId);
+    } catch (err) {
+      // Non-fatal: the session still works, it just shows ungrouped.
+      console.error(`[dsh-wechat] attach session ${sessionId} to workspace failed: ${String(err)}`);
     }
   }
 
@@ -107,21 +146,112 @@ export class AgentStore {
 /**
  * Agent-scoped composition applied to every WeChat-bound session (fresh
  * create or resume): a system-prompt section tells the model it is chatting
- * through WeChat. Registered on the agent's own scoped context so it never
- * leaks into other sessions — and unlike a per-message text block, it never
- * pollutes user-message content (which the session-title generator reads).
+ * through WeChat, a preset mount joins the agent to its recorded (or
+ * deployment-default) agent preset so the preset's tools and prompt sections
+ * cover it — the same composition the GUI's `composeAgent` installs — and a
+ * model-selection pair of waterfalls keeps the prompt variables and request
+ * routing populated exactly like the GUI does. Registered on the agent's own
+ * scoped context so it never leaks into other sessions — and unlike a
+ * per-message text block, it never pollutes user-message content (which the
+ * session-title generator reads).
  */
-function agentSetup(agentCtx: unknown): void {
-  const systemPrompt = (agentCtx as { get?: <T>(name: string) => T | undefined })?.get?.<{
-    section(section: {
-      name: string;
-      order: number;
-      text: string;
-    }): unknown;
+async function agentSetup(agentCtx: unknown): Promise<void> {
+  const ctx = agentCtx as {
+    agent?: {
+      session?: {
+        header?: { agentPreset?: string };
+        requestHeader?: () =>
+          | {
+              config?: {
+                provider?: string;
+                model?: string;
+                reasoningEffort?: string;
+              };
+            }
+          | undefined;
+      };
+    };
+    get?: <T = unknown>(name: string) => T | undefined;
+    on?: (event: string, listener: (...args: unknown[]) => unknown) => void;
+  };
+
+  const systemPrompt = ctx.get?.<{
+    section(section: { name: string; order: number; text: string }): unknown;
   }>("systemPrompt");
   systemPrompt?.section?.({
     name: "dsh-wechat-surface",
     order: 50,
     text: "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（纯文本、适度使用 emoji、避免过长的表格）。",
   });
+
+  // Preset mount — the GUI's composeAgent equivalent. The session's recorded
+  // preset (header.agentPreset, written at creation) decides its tools and
+  // prompt; an absent one falls back to the roster default (`mount` with no
+  // id). Without this, WeChat-created sessions lack the preset's tools
+  // (pwsh, fs, web, skill, …) and prompt sections entirely.
+  const presets = ctx.get?.<{
+    mount(agentCtx: unknown, id?: string): Promise<unknown>;
+  }>("agentPresets");
+  if (presets) {
+    try {
+      await presets.mount(agentCtx, ctx.agent?.session?.header?.agentPreset);
+    } catch (err) {
+      console.error(`[dsh-wechat] preset mount failed: ${String(err)}`);
+    }
+  }
+
+  // Model selection, GUI-equivalent precedence: the session's own latest
+  // request wins, otherwise the deployment's default model (agentDefaultModel
+  // service — the same fallback the Web surface's `selectionFor` uses).
+  // Without it, agents created/resumed outside the GUI have no model route:
+  // the persona's `{{model}}` variable fails to render and requests cannot
+  // resolve a provider/model. This bridge cannot import `@deepseek-ai/dsh-agent`
+  // at runtime, so the two waterfalls replicate `installModelSelection`'s
+  // cooperative pattern exactly: snapshot the selection into prompt assembly
+  // and apply it to every request config.
+  const logged = ctx.agent?.session?.requestHeader?.()?.config;
+  const defaults = ctx.get?.<{ currentSelection(): ModelSelection }>(
+    "agentDefaultModel",
+  )?.currentSelection();
+  const selected: ModelSelection | undefined =
+    logged?.provider && logged.model
+      ? {
+          provider: logged.provider,
+          model: logged.model,
+          ...(logged.reasoningEffort ? { reasoningEffort: logged.reasoningEffort } : {}),
+        }
+      : defaults;
+  if (!selected?.provider || !selected.model) return;
+
+  ctx.on?.("system-prompt/assemble", async (_assembly, _context, next) => {
+    const assembled = (await (next as () => Promise<{
+      variables?: Record<string, unknown>;
+    }>)()) as { variables?: Record<string, unknown> };
+    return {
+      ...assembled,
+      variables: {
+        ...assembled.variables,
+        provider: selected.provider,
+        model: selected.model,
+      },
+    };
+  });
+  ctx.on?.("agent/request", async (_payload, next) => {
+    const resolved = (await (next as () => Promise<Record<string, unknown>>)()) as Record<string, unknown>;
+    return {
+      ...resolved,
+      provider: selected.provider,
+      model: selected.model,
+      ...(selected.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: selected.reasoningEffort }),
+    };
+  });
+}
+
+/** One resolved model selection (dsh-agent-default-model / request header). */
+interface ModelSelection {
+  provider?: string;
+  model?: string;
+  reasoningEffort?: string;
 }

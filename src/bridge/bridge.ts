@@ -26,15 +26,17 @@ import { formatQuestionForWeChat, parseQuestionReply, buildAnswer } from "../ada
 import { formatApprovalCard, parseApprovalReply } from "../adapter/approval-format.js";
 import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
-import type { AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
+import type { Agent, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
 import { StateStore, type UserState } from "../state.js";
 import type { WeChatDSHConfig } from "../config.js";
 import {
   detectUnknownSlashCommand,
   formatHelp,
-  parseAgentCommand,
   parseHelpCommand,
   parseModelCommand,
+  parseNextCommand,
+  parsePermCommand,
+  parsePresetCommand,
   parseRejectPermissionCommand,
   parseRejectQuestionCommand,
   parseSessionCommand,
@@ -42,15 +44,16 @@ import {
   parseStatusCommand,
   parseStopCommand,
   parseWorkspaceCommand,
-  type AgentCommand,
   type ModelCommand,
+  type PermCommand,
+  type PresetCommand,
   type SessionCommand,
   type WorkspaceCommand,
 } from "./slash.js";
 
 /** WeChat gateway continuous-message limit per user interaction window. */
 const MSG_LIMIT_MAX = 10;
-const MSG_LIMIT_WARN = 5;
+const MSG_LIMIT_WARN = 7;
 
 export interface LoginState {
   phase: "idle" | "waiting-qr" | "scaned" | "logged-in" | "failed";
@@ -153,7 +156,7 @@ export class WeChatDSHBridge {
   /** Full status snapshot for the settings page / QR page. */
   getStatus(): Record<string, unknown> {
     const editable: Record<string, unknown> = {};
-    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "agentPreset", "textChunkLimit", "cardTimeoutMs"] as const) {
+    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "textChunkLimit", "cardTimeoutMs"] as const) {
       editable[key] = this.config[key];
     }
     return {
@@ -310,7 +313,7 @@ export class WeChatDSHBridge {
     }
 
     const editable: Record<string, unknown> = {};
-    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "agentPreset", "textChunkLimit", "cardTimeoutMs"] as const) {
+    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "textChunkLimit", "cardTimeoutMs"] as const) {
       editable[key] = this.config[key];
     }
 
@@ -374,16 +377,24 @@ export class WeChatDSHBridge {
       return;
     }
 
-    // Auto-flush cached outbound on any user message.
+    // Auto-flush cached outbound on any user message — except an explicit
+    // `/next`, which owns the flush below so its result reply is not
+    // duplicated by the auto path.
+    const text = extractText(msg.item_list);
+    const isNext = text !== null && parseNextCommand(text);
     const cached = this.outboundCache.get(userId);
-    if (cached && cached.length > 0) {
+    if (!isNext && cached && cached.length > 0) {
       await this.flushPending(userId);
     }
 
     this.log(`Message from ${userId}: ${this.previewMessage(msg)}`);
 
-    const text = extractText(msg.item_list);
     if (text) {
+      if (isNext) {
+        await this.flushPending(userId);
+        return;
+      }
+
       if (parseHelpCommand(text)) {
         await this.sendReply(userId, formatHelp());
         return;
@@ -397,7 +408,7 @@ export class WeChatDSHBridge {
 
       const status = parseStatusCommand(text);
       if (status) {
-        await this.sendReply(userId, this.formatStatus(user));
+        await this.sendReply(userId, await this.formatStatus(user));
         return;
       }
 
@@ -431,15 +442,21 @@ export class WeChatDSHBridge {
         return;
       }
 
-      const aCmd = parseAgentCommand(text);
-      if (aCmd) {
-        await this.handleAgentCommand(userId, aCmd);
+      const pCmd = parsePresetCommand(text);
+      if (pCmd) {
+        await this.handlePresetCommand(userId, pCmd);
         return;
       }
 
       const mCmd = parseModelCommand(text);
       if (mCmd) {
         await this.handleModelCommand(userId, mCmd);
+        return;
+      }
+
+      const permCmd = parsePermCommand(text);
+      if (permCmd) {
+        await this.handlePermCommand(userId, permCmd);
         return;
       }
 
@@ -454,7 +471,7 @@ export class WeChatDSHBridge {
   }
 
   private async forwardToAgent(user: UserState, msg: WeixinMessage, contextToken: string): Promise<void> {
-    const agent = await this.agents.ensure(user, this.config.agentPreset);
+    const agent = await this.agents.ensure(user);
     if (!agent) {
       await this.sendReply(user.userId, "⚠️ 无法创建/恢复 DSH 会话，请检查 DSH 日志。");
       return;
@@ -1007,10 +1024,21 @@ export class WeChatDSHBridge {
           await this.sendReply(userId, "💬 暂无会话。发送消息即可创建第一个会话。");
           return;
         }
-        const recent = sessions
+        // `/s list current` narrows to sessions of the current working
+        // directory; plain `/s list` shows every session.
+        const scoped = cmd.scope === "current"
+          ? sessions.filter((r) => r.header.cwd === user.cwd)
+          : sessions;
+        if (scoped.length === 0) {
+          await this.sendReply(userId, `💬 当前工作目录（${user.cwd}）下暂无会话。发送消息即可创建第一个会话。`);
+          return;
+        }
+        const recent = scoped
           .sort((a, b) => b.header.createdAt - a.header.createdAt)
           .slice(0, 20);
-        const lines = ["💬 最近会话（/session switch <编号> 切换）"];
+        const lines = [cmd.scope === "current"
+          ? `💬 最近会话（${user.cwd}，/session switch <编号> 切换）`
+          : "💬 最近会话（/session switch <编号> 切换）"];
         for (let i = 0; i < recent.length; i++) {
           const record = recent[i]!;
           const marker = record.header.id === user.sessionId ? " ◀ 当前" : "";
@@ -1018,8 +1046,12 @@ export class WeChatDSHBridge {
             (await this.ops.readSessionTitle(record.header.id)) ?? record.header.id.slice(0, 12),
           );
           const when = new Date(record.header.createdAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-          lines.push(`${i + 1}. ${title}${marker}`);
-          lines.push(`   ${record.header.cwd ?? "?"} · ${when}${record.header.agentPreset ? ` · 模式:${record.header.agentPreset}` : ""}`);
+          // One line per entry: WeChat renders `\n` in BOT text unreliably
+          // (entries collapse together), so every field rides the same line
+          // and each entry stays identifiable by its `N.` prefix.
+          lines.push(
+            `${i + 1}. ${title}${marker} — ${record.header.cwd ?? "?"} · ${when}${record.header.agentPreset ? ` · Preset:${record.header.agentPreset}` : ""}`,
+          );
         }
         await this.sendReply(userId, lines.join("\n"));
         return;
@@ -1039,14 +1071,14 @@ export class WeChatDSHBridge {
           user.cwdExplicit = true;
         }
         this.state.update(user.userId, { sessionId: user.sessionId, cwd: user.cwd, cwdExplicit: user.cwdExplicit });
-        const agent = await this.agents.ensure(user, user.agentPreset ?? this.config.agentPreset);
+        const agent = await this.agents.ensure(user);
         await this.sendReply(userId, `✅ 已切换到会话 ${record.header.id.slice(0, 12)}（${record.header.cwd ?? "?"}）${agent ? `，Agent ${agent.status}` : ""}。`);
         return;
       }
       case "new": {
         user.sessionId = "";
         this.state.update(user.userId, { sessionId: "" });
-        const agent = await this.agents.ensure(user, user.agentPreset ?? this.config.agentPreset);
+        const agent = await this.agents.ensure(user);
         this.state.update(user.userId, { sessionId: user.sessionId });
         await this.sendReply(userId, `✅ 已创建新会话（${user.cwd}）${agent ? "，Agent 就绪" : "，但 Agent 创建失败"}。`);
         return;
@@ -1059,19 +1091,19 @@ export class WeChatDSHBridge {
     }
   }
 
-  private async handleAgentCommand(userId: string, cmd: AgentCommand): Promise<void> {
+  private async handlePresetCommand(userId: string, cmd: PresetCommand): Promise<void> {
     const user = this.state.ensureUser(userId, this.config.cwd);
     switch (cmd.kind) {
       case "list": {
         const presets = (await this.ops.listPresets()).filter((p) => !p.broken);
         if (presets.length === 0) {
-          await this.sendReply(userId, "🤖 暂无可用 Agent 模式。");
+          await this.sendReply(userId, "🤖 暂无可用 Preset。");
           return;
         }
-        const current = user.agentPreset ?? this.config.agentPreset;
-        const lines = ["🤖 可用 Agent 模式（/agent switch <名称|编号>）"];
+        const current = this.ops.defaultPresetId();
+        const lines = ["🤖 可用 Preset（/preset switch <名称|编号>，写入 DSH 默认设置）"];
         presets.forEach((preset, i) => {
-          const marker = preset.id === current ? " ◀ 当前" : "";
+          const marker = preset.id === current ? " ◀ 当前默认" : "";
           lines.push(`${i + 1}. ${preset.name ?? preset.id} — ${preset.id}${marker}`);
           if (preset.description) lines.push(`   ${preset.description}`);
         });
@@ -1091,10 +1123,13 @@ export class WeChatDSHBridge {
         } else {
           preset = presets.find((p) => p.id === cmd.target || p.name === cmd.target);
           if (!preset) {
-            await this.sendReply(userId, `⚠️ 未知模式: ${cmd.target}。用 /agent list 查看。`);
+            await this.sendReply(userId, `⚠️ 未知 Preset: ${cmd.target}。用 /preset list 查看。`);
             return;
           }
         }
+        // Write the DSH settings document — the same default the GUI settings
+        // page edits, so both sides see the same selection.
+        const saved = await this.ops.saveDefaultPreset(preset.id);
         // Apply to the live session only while it has produced nothing.
         const agent = this.agents.get(user);
         const empty = agent ? (agent as { session?: { events?: unknown[] } }).session?.events?.length === 0 : true;
@@ -1106,17 +1141,18 @@ export class WeChatDSHBridge {
           );
           applied = ok ? "（已应用到当前会话）" : "（当前会话应用失败）";
         } else if (agent) {
-          applied = "（当前会话已有内容，模式将应用于下一个新会话）";
+          applied = "（当前会话已有内容，Preset 将应用于下一个新会话）";
         }
-        user.agentPreset = preset.id;
-        this.state.update(user.userId, { agentPreset: preset.id });
-        await this.sendReply(userId, `✅ 已切换模式: ${preset.name ?? preset.id}${applied}。`);
+        const synced = saved ? "" : "⚠️ 无法写入 DSH 设置（仅本次进程内生效）";
+        await this.sendReply(userId, `✅ 默认 Preset 已切换: ${preset.name ?? preset.id}${applied}${synced}。`);
         return;
       }
       case "status": {
         const agent = this.agents.get(user);
-        const preset = user.agentPreset ?? this.config.agentPreset ?? "（默认）";
-        await this.sendReply(userId, `🤖 模式: ${preset}\nAgent: ${agent ? agent.status : "未加载"}`);
+        await this.sendReply(
+          userId,
+          `🤖 Preset: ${await this.resolveEffectivePreset(user)}\nAgent: ${agent ? agent.status : "未加载"}`,
+        );
         return;
       }
     }
@@ -1138,37 +1174,39 @@ export class WeChatDSHBridge {
             return;
           }
           const models = await this.ops.listModels(provider.id);
-          const lines = [`🧠 ${provider.name} 的模型（/model switch ${provider.id}/<模型>）`];
+          const lines = [`🧠 ${provider.id} 的模型（/model switch ${provider.id}/<模型id> 切换）`];
           models.forEach((model, i) => {
-            lines.push(`${i + 1}. ${model.name} — ${model.id}${model.description ? `（${model.description}）` : ""}`);
+            lines.push(`${i + 1}. ${model.id}${model.description ? `（${model.description}）` : ""}`);
           });
           await this.sendReply(userId, lines.join("\n"));
           return;
         }
-        const lines = ["🧠 模型提供商（/model list <提供商> 查看模型）"];
-        providers.forEach((p, i) => lines.push(`${i + 1}. ${p.name} — ${p.id}`));
+        const lines = ["🧠 模型提供商（/model list <提供商id> 查看模型）"];
+        providers.forEach((p, i) => lines.push(`${i + 1}. ${p.id}`));
         await this.sendReply(userId, lines.join("\n"));
         return;
       }
       case "switch": {
         const [provider, model] = cmd.target.split("/");
         const providers = this.ops.listProviders();
-        if (!providers.some((p) => p.id === provider)) {
+        const matchedProvider = providers.find((p) => p.id === provider || p.name === provider);
+        if (!matchedProvider) {
           await this.sendReply(userId, `⚠️ 未知提供商: ${provider}。可用: ${providers.map((p) => p.id).join(", ")}`);
           return;
         }
-        const models = await this.ops.listModels(provider!);
-        if (!models.some((m) => m.id === model)) {
-          await this.sendReply(userId, `⚠️ 未知模型: ${model}。用 /model list ${provider} 查看可用模型。`);
+        const models = await this.ops.listModels(matchedProvider.id);
+        const matchedModel = models.find((m) => m.id === model || m.name === model);
+        if (!matchedModel) {
+          await this.sendReply(userId, `⚠️ 未知模型: ${model}。用 /model list ${matchedProvider.id} 查看可用模型。`);
           return;
         }
         // Apply to the live agent (via agent/request) and as the new default.
         const agent = this.agents.get(user);
         if (agent) {
-          this.modelOverrides.set(agent.id, { provider: provider!, model: model! });
+          this.modelOverrides.set(agent.id, { provider: matchedProvider.id, model: matchedModel.id });
         }
-        const saved = await this.ops.saveDefaultModel({ provider: provider!, model: model! });
-        const lines = [`✅ 已切换到模型: ${provider}/${model}`];
+        const saved = await this.ops.saveDefaultModel({ provider: matchedProvider.id, model: matchedModel.id });
+        const lines = [`✅ 已切换到模型: ${matchedProvider.id}/${matchedModel.id}`];
         if (agent) lines.push("（已应用到当前会话，下一步生效）");
         if (!saved) lines.push("⚠️ 无法更新默认模型（仅当前会话生效）");
         await this.sendReply(userId, lines.join("\n"));
@@ -1176,16 +1214,11 @@ export class WeChatDSHBridge {
       }
       case "status": {
         const agent = this.agents.get(user);
+        const active = this.resolveEffectiveModel(user, agent);
         const defaultModel = this.ops.defaultModelSelection();
-        const override = agent ? this.modelOverrides.get(agent.id) : undefined;
         const lines = ["🧠 模型状态"];
-        if (agent) {
-          const active = override ?? agent.options;
-          if (active?.provider && active?.model) {
-            lines.push(`• 当前会话: ${active.provider}/${active.model}`);
-          } else if (agent.options) {
-            lines.push(`• 当前会话: ${JSON.stringify(agent.options)}`);
-          }
+        if (agent && active?.provider && active?.model) {
+          lines.push(`• 当前会话: ${active.provider}/${active.model}`);
         }
         if (defaultModel) {
           lines.push(`• 默认: ${defaultModel.provider}/${defaultModel.model}`);
@@ -1193,6 +1226,141 @@ export class WeChatDSHBridge {
         await this.sendReply(userId, lines.join("\n"));
         return;
       }
+    }
+  }
+
+  // ─── Permission presets ───
+
+  /**
+   * `/perm` — permission management over the native permissionPresets
+   * service (session-level switches) and the `permission` settings document
+   * (the default for new sessions, shared with the GUI settings page).
+   */
+  private async handlePermCommand(userId: string, cmd: PermCommand): Promise<void> {
+    const user = this.state.ensureUser(userId, this.config.cwd);
+    const service = this.ops.permissionPresets();
+    if (!service) {
+      await this.sendReply(userId, "⚠️ 当前部署未启用权限预设（permissionPresets 服务不可用）。");
+      return;
+    }
+
+    const agent = this.agents.get(user);
+    const current = agent ? this.safeCurrent(service, agent) : undefined;
+
+    switch (cmd.kind) {
+      case "list": {
+        const lines = ["🔐 可用权限预设（/perm switch <名称|编号> 切换当前会话）"];
+        service.names.forEach((name, i) => {
+          const option = service.optionOf(name);
+          const markers = [
+            current === name ? " ◀ 当前会话" : "",
+            name === service.defaultPreset ? "（默认）" : "",
+          ].join("");
+          lines.push(`${i + 1}. ${option.name} — ${name}${markers}`);
+          if (option.description) lines.push(`   ${option.description}`);
+        });
+        await this.sendReply(userId, lines.join("\n"));
+        return;
+      }
+      case "status": {
+        const defaultName = service.defaultPreset;
+        const lines = ["🔐 权限状态"];
+        if (agent && current) {
+          lines.push(`• 当前会话: ${this.describePermission(service, current)}`);
+        } else if (!agent) {
+          lines.push("• 当前会话: （未绑定会话）");
+        }
+        lines.push(`• 新会话默认: ${this.describePermission(service, defaultName)}`);
+        await this.sendReply(userId, lines.join("\n"));
+        return;
+      }
+      case "switch": {
+        if (!agent) {
+          await this.sendReply(userId, "⚠️ 当前没有会话。先发一条消息或 /session new 创建会话，再切换权限。");
+          return;
+        }
+        const name = this.matchPermission(service, cmd.target);
+        if (!name) {
+          await this.sendReply(userId, `⚠️ 未知权限预设: ${cmd.target}。可用: ${service.names.join(", ")}`);
+          return;
+        }
+        try {
+          service.set(agent.session, name);
+        } catch (err) {
+          await this.sendReply(userId, `⚠️ 切换权限失败: ${String(err)}`);
+          return;
+        }
+        const lines = [`✅ 当前会话权限已切换: ${this.describePermission(service, name)}`];
+        if (name === "danger-full-access") {
+          lines.push("⚠️ 完整访问权限：不再有审批提示，请谨慎使用。");
+        }
+        await this.sendReply(userId, lines.join("\n"));
+        return;
+      }
+      case "default": {
+        if (!cmd.target) {
+          await this.sendReply(userId, `🔐 新会话默认权限: ${this.describePermission(service, service.defaultPreset)}`);
+          return;
+        }
+        const name = this.matchPermission(service, cmd.target);
+        if (!name) {
+          await this.sendReply(userId, `⚠️ 未知权限预设: ${cmd.target}。可用: ${service.names.join(", ")}`);
+          return;
+        }
+        const saved = await this.ops.saveDefaultPermission(name);
+        const lines = [`✅ 新会话默认权限已设为: ${this.describePermission(service, name)}`];
+        if (saved) {
+          lines.push("（已写入 DSH 设置，与 GUI 设置页同步，新会话生效）");
+        } else {
+          lines.push("⚠️ 无法写入 DSH 设置（仅本次进程内生效）");
+        }
+        await this.sendReply(userId, lines.join("\n"));
+        return;
+      }
+    }
+  }
+
+  /** `current()` with a guard: session events may be absent on some shapes. */
+  private safeCurrent(
+    service: { current(events: readonly { type: string; data?: unknown }[]): string },
+    agent: Agent,
+  ): string | undefined {
+    try {
+      const events = agent.session?.events ?? [];
+      return service.current(events);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Resolve a preset target by name or list index. */
+  private matchPermission(
+    service: { readonly names: readonly string[] },
+    target: string,
+  ): string | undefined {
+    if (/^\d+$/.test(target)) {
+      const index = parseInt(target, 10);
+      return service.names[index - 1];
+    }
+    return service.names.find((n) => n === target);
+  }
+
+  /** Human-readable preset description: name（sandbox + approval）plus detail. */
+  private describePermission(
+    service: {
+      resolve(name: string): { sandbox: string; approval: string; name?: string; description?: string };
+      optionOf(name: string): { value: string; name: string; description?: string };
+    },
+    name: string,
+  ): string {
+    try {
+      const spec = service.resolve(name);
+      const label = spec.name ?? name;
+      const detail = spec.description ? `（${spec.description}）` : "";
+      return `${label}（${spec.sandbox} + ${spec.approval}）${detail}`;
+    } catch {
+      const option = service.optionOf(name);
+      return `${option.name}（${option.description ?? ""}）`.replace(/（\s*）$/, "");
     }
   }
 
@@ -1207,23 +1375,82 @@ export class WeChatDSHBridge {
     return { ...config, provider: override.provider, model: override.model };
   }
 
-  private formatStatus(user: UserState): string {
+  private async formatStatus(user: UserState): Promise<string> {
     const agent = this.agents.get(user);
-    const override = agent ? this.modelOverrides.get(agent.id) : undefined;
-    const active = override ?? agent?.options;
-    const model = active?.provider && active?.model ? `${active.provider}/${active.model}` : "（默认）";
-    const preset = user.agentPreset ?? this.config.agentPreset ?? "（默认）";
+
+    // 会话标题（sessionQuery 投影），无标题时退回 id 前 12 位。
+    const sessionLabel = user.sessionId
+      ? (await this.ops.readSessionTitle(user.sessionId)) ?? user.sessionId.slice(0, 12)
+      : "（未绑定）";
+
+    // 实际生效的模型：本会话 override（/model switch）> 会话最近请求记录 >
+    // agent 创建选项 > 部署默认模型。与 GUI 的 selectionFor 同款优先级。
+    const active = this.resolveEffectiveModel(user, agent);
+
+    // 当前会话的权限预设（native permissionPresets 折叠），服务缺失时省略。
+    const permissionService = this.ops.permissionPresets();
+    const permission = agent && permissionService ? this.safeCurrent(permissionService, agent) : undefined;
+
+    // 上下文占用（token-meter 的 contextPressure 投影，与 GUI 上下文计量同源）：
+    // 已用 = 下一个请求的预计 prompt 占用，总 = 模型上下文窗口。
+    const pressure = agent ? this.ops.contextPressure(agent.session) : undefined;
+    let contextLabel: string | undefined;
+    if (pressure?.projectedTokens !== undefined && pressure.contextWindow !== undefined) {
+      contextLabel = `• 上下文: ${formatTokens(pressure.projectedTokens)} / ${formatTokens(pressure.contextWindow)}（${Math.round((pressure.projectedTokens / pressure.contextWindow) * 100)}%）`;
+    } else if (pressure?.projectedTokens !== undefined) {
+      contextLabel = `• 上下文: ${formatTokens(pressure.projectedTokens)}（总量未知）`;
+    }
+
     const lines = [
       "📊 当前状态",
       `• 工作区: ${user.cwd}`,
-      `• 会话: ${user.sessionId || "（未绑定）"}`,
+      `• 会话: ${sessionLabel}`,
       `• Agent: ${agent ? agent.status : "（未加载）"}`,
-      `• 模式: ${preset}`,
-      `• 模型: ${model}`,
+      `• Preset: ${await this.resolveEffectivePreset(user)}`,
+      `• 模型: ${active?.provider && active?.model ? `${active.provider}/${active.model}` : "（默认）"}`,
+      ...(contextLabel ? [contextLabel] : []),
+      ...(permission ? [`• 权限: ${permission}`] : []),
       `• 静默模式: ${user.silent ? "on" : "off"}`,
-      "• 权限审批: DSH 原生（GUI 权限卡）",
     ];
     return lines.join("\n");
+  }
+
+  /**
+   * The preset actually composing the user's session: the session header's
+   * recorded preset (fixed at creation), else the roster/settings default.
+   * The settings document (`agent-presets` namespace) is the single source
+   * of truth for the default; the header records what a specific session
+   * actually runs. Falls back to "（默认）" when none is discoverable.
+   */
+  private async resolveEffectivePreset(user: UserState): Promise<string> {
+    let preset: string | undefined;
+    if (user.sessionId) {
+      const sessions = await this.ops.listSessions();
+      preset = sessions.find((r) => r.header.id === user.sessionId)?.header.agentPreset;
+    }
+    if (!preset) {
+      const defaultPreset = this.ops.defaultPresetId();
+      if (defaultPreset) return `${defaultPreset}（默认）`;
+    }
+    return preset ?? "（默认）";
+  }
+
+  /**
+   * The model the user's session actually runs on: this session's override
+   * (`/model switch`) > the session's latest logged request config > the
+   * agent's creation options > the deployment default model. Same precedence
+   * as the GUI's `selectionFor`.
+   */
+  private resolveEffectiveModel(
+    user: UserState,
+    agent: Agent | undefined,
+  ): { provider?: string; model?: string } | undefined {
+    const override = agent ? this.modelOverrides.get(agent.id) : undefined;
+    if (override) return override;
+    const logged = agent?.session?.requestHeader?.()?.config;
+    if (logged?.provider && logged.model) return logged;
+    if (agent?.options?.provider && agent.options.model) return agent.options;
+    return this.ops.defaultModelSelection();
   }
 
   // ─── send-wechat tool ───
@@ -1255,12 +1482,16 @@ export class WeChatDSHBridge {
       if (args.file_path) {
         const buffer = await import("node:fs/promises").then((fs) => fs.readFile(args.file_path!));
         const fileName = args.file_path.split(/[\\/]/).pop() ?? "file";
-        await sendMediaMessage(user.userId, UploadMediaType.FILE, buffer, {
+        // Send images/videos with their native media type so WeChat renders
+        // them inline; everything else goes as a file attachment.
+        const mediaType = mediaTypeForFile(fileName);
+        await sendMediaMessage(user.userId, mediaType, buffer, {
           ...sendOpts,
           cdnBaseUrl: this.config.cdnBaseUrl,
           fileName,
         });
-        return { ok: true, message: `sent file ${fileName}` };
+        const kind = mediaType === UploadMediaType.IMAGE ? "image" : mediaType === UploadMediaType.VIDEO ? "video" : "file";
+        return { ok: true, message: `sent ${kind} ${fileName}` };
       }
       if (args.text) {
         const segments = splitText(args.text, this.config.textChunkLimit);
@@ -1276,7 +1507,6 @@ export class WeChatDSHBridge {
   }
 
   // ─── Outbound sending (WeChat gateway limits) ───
-
   /** Cached-message notice already shown for this user (avoids recursion). */
   private readonly cacheNoticeSent = new Set<string>();
 
@@ -1403,4 +1633,29 @@ function cleanSessionTitle(title: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 28);
+}
+
+/**
+ * Pick the WeChat upload media type for a file name: images and videos use
+ * their native types so the WeChat client renders them inline instead of as
+ * a file attachment that must be opened. Everything else stays a file.
+ */
+function mediaTypeForFile(fileName: string): 1 | 2 | 3 | 4 {
+  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "svg"].includes(ext)) {
+    return UploadMediaType.IMAGE;
+  }
+  if (["mp4", "mov", "avi", "mkv", "webm", "flv", "wmv", "m4v"].includes(ext)) {
+    return UploadMediaType.VIDEO;
+  }
+  return UploadMediaType.FILE;
+}
+
+/** Compact token formatting: 128000 → "128k", 3500 → "3.5k", 900 → "900". */
+function formatTokens(n: number): string {
+  if (n >= 1000) {
+    const k = n / 1000;
+    return `${k >= 100 ? Math.round(k) : k.toFixed(1)}k`;
+  }
+  return String(n);
 }

@@ -7,9 +7,11 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import {
-  parseAgentCommand,
   parseHelpCommand,
   parseModelCommand,
+  parseNextCommand,
+  parsePermCommand,
+  parsePresetCommand,
   parseRejectPermissionCommand,
   parseRejectQuestionCommand,
   parseSessionCommand,
@@ -74,6 +76,9 @@ describe("slash parsers", () => {
 
   it("parseSessionCommand", () => {
     expect(parseSessionCommand("/session list")).toEqual({ kind: "list" });
+    expect(parseSessionCommand("/s list current")).toEqual({ kind: "list", scope: "current" });
+    expect(parseSessionCommand("/session list current")).toEqual({ kind: "list", scope: "current" });
+    expect(parseSessionCommand("/s list foo")).toBeNull();
     expect(parseSessionCommand("/s new")).toEqual({ kind: "new" });
     expect(parseSessionCommand("/session status")).toEqual({ kind: "status" });
     expect(parseSessionCommand("/session switch 3")).toEqual({ kind: "switch", index: 3 });
@@ -81,12 +86,15 @@ describe("slash parsers", () => {
     expect(parseSessionCommand("/session")).toBeNull();
   });
 
-  it("parseAgentCommand", () => {
-    expect(parseAgentCommand("/agent list")).toEqual({ kind: "list" });
-    expect(parseAgentCommand("/a status")).toEqual({ kind: "status" });
-    expect(parseAgentCommand("/agent switch build")).toEqual({ kind: "switch", target: "build" });
-    expect(parseAgentCommand("/a switch 2")).toEqual({ kind: "switch", target: "2" });
-    expect(parseAgentCommand("/agent")).toBeNull();
+  it("parsePresetCommand", () => {
+    expect(parsePresetCommand("/preset list")).toEqual({ kind: "list" });
+    expect(parsePresetCommand("/p status")).toEqual({ kind: "status" });
+    expect(parsePresetCommand("/preset switch build")).toEqual({ kind: "switch", target: "build" });
+    expect(parsePresetCommand("/p switch 2")).toEqual({ kind: "switch", target: "2" });
+    // Legacy aliases still parse.
+    expect(parsePresetCommand("/agent list")).toEqual({ kind: "list" });
+    expect(parsePresetCommand("/a switch build")).toEqual({ kind: "switch", target: "build" });
+    expect(parsePresetCommand("/preset")).toBeNull();
   });
 
   it("parseModelCommand", () => {
@@ -98,14 +106,37 @@ describe("slash parsers", () => {
     expect(parseModelCommand("/model")).toBeNull();
   });
 
+  it("parsePermCommand", () => {
+    expect(parsePermCommand("/perm status")).toEqual({ kind: "status" });
+    expect(parsePermCommand("/perm list")).toEqual({ kind: "list" });
+    expect(parsePermCommand("/perm switch workspace-write")).toEqual({ kind: "switch", target: "workspace-write" });
+    expect(parsePermCommand("/perm switch 2")).toEqual({ kind: "switch", target: "2" });
+    expect(parsePermCommand("/perm default")).toEqual({ kind: "default" });
+    expect(parsePermCommand("/perm default danger-full-access")).toEqual({ kind: "default", target: "danger-full-access" });
+    expect(parsePermCommand("/permission list")).toEqual({ kind: "list" });
+    expect(parsePermCommand("/perm switch")).toBeNull();
+    expect(parsePermCommand("/perm")).toBeNull();
+    expect(parsePermCommand("/perm unknown-sub 1")).toBeNull();
+  });
+
+  it("parseNextCommand", () => {
+    expect(parseNextCommand("/next")).toBe(true);
+    expect(parseNextCommand("  /next  ")).toBe(true);
+    expect(parseNextCommand("/next more")).toBe(false);
+    expect(parseNextCommand("/n")).toBe(false);
+    expect(parseNextCommand("next")).toBe(false);
+  });
+
   it("formatHelp lists the management commands", () => {
     const help = formatHelp();
     expect(help).toContain("/workspace");
     expect(help).toContain("/session");
-    expect(help).toContain("/agent");
+    expect(help).toContain("/preset");
     expect(help).toContain("/model");
+    expect(help).toContain("/perm");
     expect(help).toContain("/silent");
     expect(help).toContain("/stop");
+    expect(help).toContain("/next");
   });
 });
 

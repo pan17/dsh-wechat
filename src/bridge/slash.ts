@@ -57,6 +57,16 @@ export function parseStopCommand(text: string): StopCommand | null {
   return null;
 }
 
+/**
+ * Parse `/next` — the explicit continuation for outbound messages cached by
+ * the WeChat per-window send limit (the limit notices tell the user to send
+ * this). Any ordinary user message also auto-flushes the cache, but `/next`
+ * is recognized so it is not mistaken for an unknown command and forwarded.
+ */
+export function parseNextCommand(text: string): boolean {
+  return text.trim().toLowerCase() === "/next";
+}
+
 /** Parse `/reject-question` (alias `/rq`). */
 export function parseRejectQuestionCommand(text: string): RejectQuestionCommand | null {
   const trimmed = text.trim().toLowerCase();
@@ -90,12 +100,12 @@ export type WorkspaceCommand =
   | { kind: "add"; path: string };
 
 export type SessionCommand =
-  | { kind: "list" }
+  | { kind: "list"; scope?: "current" }
   | { kind: "switch"; index: number }
   | { kind: "new" }
   | { kind: "status" };
 
-export type AgentCommand =
+export type PresetCommand =
   | { kind: "list" }
   | { kind: "switch"; target: string }
   | { kind: "status" };
@@ -104,6 +114,12 @@ export type ModelCommand =
   | { kind: "list"; provider?: string }
   | { kind: "switch"; target: string }
   | { kind: "status" };
+
+export type PermCommand =
+  | { kind: "status" }
+  | { kind: "list" }
+  | { kind: "switch"; target: string }
+  | { kind: "default"; target?: string };
 
 /**
  * Parse `/workspace` (alias `/ws`):
@@ -130,7 +146,7 @@ export function parseWorkspaceCommand(text: string): WorkspaceCommand | null {
 
 /**
  * Parse `/session` (alias `/s`):
- *   list | switch <n> | new | status
+ *   list [current] | switch <n> | new | status
  */
 export function parseSessionCommand(text: string): SessionCommand | null {
   const trimmed = text.trim();
@@ -139,7 +155,11 @@ export function parseSessionCommand(text: string): SessionCommand | null {
   const sub = m[1] as "list" | "switch" | "new" | "status";
   const rest = (m[2] ?? "").trim();
   switch (sub) {
-    case "list":
+    case "list": {
+      if (!rest) return { kind: "list" };
+      if (rest === "current") return { kind: "list", scope: "current" };
+      return null;
+    }
     case "new":
     case "status":
       return { kind: sub };
@@ -151,12 +171,16 @@ export function parseSessionCommand(text: string): SessionCommand | null {
 }
 
 /**
- * Parse `/agent` (alias `/a`):
+ * Parse `/preset` (alias `/p`; legacy aliases `/agent`, `/a` still parse):
  *   list | switch <name|n> | status
+ *
+ * The preset default lives in the DSH settings document (`agent-presets`
+ * namespace), the same one the GUI settings page edits — `/preset switch`
+ * writes that document, so GUI and WeChat stay in sync.
  */
-export function parseAgentCommand(text: string): AgentCommand | null {
+export function parsePresetCommand(text: string): PresetCommand | null {
   const trimmed = text.trim();
-  const m = trimmed.match(/^\/(?:agent|a)\s+(list|switch|status)(?:\s+(.*))?$/);
+  const m = trimmed.match(/^\/(?:preset|p|agent|a)\s+(list|switch|status)(?:\s+(.*))?$/);
   if (!m) return null;
   const sub = m[1] as "list" | "switch" | "status";
   const rest = (m[2] ?? "").trim();
@@ -191,6 +215,34 @@ export function parseModelCommand(text: string): ModelCommand | null {
   }
 }
 
+/**
+ * Parse `/perm` (alias `/permission`):
+ *   status | list | switch <名称|编号> | default [名称|编号]
+ *
+ * Session-level switches (`switch`) go through the native permissionPresets
+ * service and take effect on the current session immediately; `default`
+ * writes the DSH settings document (`permission` namespace) — the same
+ * default the GUI settings page's Permission row edits, so both sides stay
+ * in sync and new sessions pick it up natively.
+ */
+export function parsePermCommand(text: string): PermCommand | null {
+  const trimmed = text.trim();
+  const m = trimmed.match(/^\/(?:perm|permission)\s+(list|status|switch|default)(?:\s+(.*))?$/);
+  if (!m) return null;
+  const sub = m[1] as "list" | "status" | "switch" | "default";
+  const rest = (m[2] ?? "").trim();
+  switch (sub) {
+    case "list":
+    case "status":
+      return { kind: sub };
+    case "switch":
+      if (!rest) return null;
+      return { kind: "switch", target: rest };
+    case "default":
+      return { kind: "default", ...(rest ? { target: rest } : {}) };
+  }
+}
+
 /** The /help reply. */
 export function formatHelp(): string {
   return [
@@ -199,11 +251,13 @@ export function formatHelp(): string {
     "• /help (h, ?) — 显示帮助",
     "• /status — 当前会话、工作区、Agent、模型状态",
     "• /workspace (ws) — list | status | switch <路径|编号> | add <路径>",
-    "• /session (s) — list | switch <编号> | new | status",
-    "• /agent (a) — list | switch <名称|编号> | status",
+    "• /session (s) — list [current] | switch <编号> | new | status",
+    "• /preset (p) — list | switch <名称|编号> | status（改的是 DSH 设置的默认 preset，与 GUI 同步）",
     "• /model — list [提供商] | switch <提供商/模型> | status",
+    "• /perm (permission) — status | list | switch <名称|编号> | default [名称|编号]（会话权限实时切换；默认写入 DSH 设置，与 GUI 同步）",
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
     "• /stop — 中断当前任务",
+    "• /next — 继续发送因微信限制被缓存的消息",
     "• /rp — 拒绝所有待处理权限卡（微信端）",
     "• /rq — 拒绝所有待处理的问题卡（微信端）",
     "",

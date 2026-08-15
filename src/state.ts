@@ -1,6 +1,8 @@
 /**
- * Durable per-user bridge state: session mapping, silent mode, workspace
- * and agent-preset choices.
+ * Durable per-user bridge state: session mapping, silent mode, and workspace
+ * choices. The default preset deliberately lives in the DSH settings
+ * document (`agent-presets` namespace), not here — the GUI settings page and
+ * WeChat's `/preset switch` share that one source of truth.
  *
  * Mirrors the reference project's UserState (wechat-opencode) but keeps
  * ONLY what the DSH bridge needs. Persisted to `~/.dsh-wechat/state.json`
@@ -23,8 +25,6 @@ export interface UserState {
    * default; users without this flag follow the settings default.
    */
   cwdExplicit?: boolean;
-  /** Agent preset selected via /agent switch (applied to new sessions). */
-  agentPreset?: string;
   /** Silent mode: only send the final text of each turn. */
   silent: boolean;
 }

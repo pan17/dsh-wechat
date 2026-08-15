@@ -16,8 +16,6 @@ export interface WeChatDSHConfig {
   storageDir: string;
   /** Working directory for newly created DSH sessions. */
   cwd: string;
-  /** Agent preset id for newly created DSH sessions. */
-  agentPreset?: string;
   /** WeChat single-message length limit (chars). */
   textChunkLimit: number;
   /** Soft timeout for question/permission cards (ms). */
@@ -35,7 +33,6 @@ export function defaultConfig(): WeChatDSHConfig {
     botType: "3",
     storageDir: defaultStorageDir(),
     cwd: process.cwd(),
-    agentPreset: undefined,
     textChunkLimit: 4000,
     cardTimeoutMs: 30 * 60_000,
   };

@@ -15,7 +15,6 @@ export type EditableConfig = Pick<
   | "cdnBaseUrl"
   | "botType"
   | "cwd"
-  | "agentPreset"
   | "textChunkLimit"
   | "cardTimeoutMs"
 >;
@@ -25,7 +24,6 @@ const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "cdnBaseUrl",
   "botType",
   "cwd",
-  "agentPreset",
   "textChunkLimit",
   "cardTimeoutMs",
 ];

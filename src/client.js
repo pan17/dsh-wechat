@@ -31,7 +31,7 @@ window.__ModuleLoader__.load({
 .wx_btn{cursor:pointer;font-size:12px;padding:5px 12px;border-radius:8px;border:1px solid rgba(128,128,128,.5);background:transparent;color:inherit}
 .wx_btn:hover{background:rgba(128,128,128,.12)}
 .wx_btn:disabled{opacity:.5;cursor:default}
-.wx_btn.primary{border-color:transparent;background:var(--dsw-alias-interactive-bg-active,#2563eb);color:#fff}
+.wx_btn.primary{border-color:transparent;background:var(--dsw-alias-button-primary-fill,#2563eb);color:var(--dsw-alias-brand-primary-invert,#fff)}
 .wx_btn.danger{border-color:#c62828;color:#c62828}
 .wx_meta{font-size:12px;color:var(--dsw-alias-label-secondary,#888)}
 .wx_err{color:#c62828;font-size:12px}
@@ -82,7 +82,6 @@ window.__ModuleLoader__.load({
 						cdnBaseUrl: r.body.config?.cdnBaseUrl ?? "",
 						botType: r.body.config?.botType ?? "",
 						cwd: r.body.config?.cwd ?? "",
-						agentPreset: r.body.config?.agentPreset ?? "",
 						textChunkLimit: String(r.body.config?.textChunkLimit ?? ""),
 						cardTimeoutMs: String(r.body.config?.cardTimeoutMs ?? ""),
 					});
@@ -119,7 +118,6 @@ window.__ModuleLoader__.load({
 							cdnBaseUrl: form.cdnBaseUrl.trim(),
 							botType: form.botType.trim(),
 							cwd: form.cwd.trim(),
-							agentPreset: form.agentPreset.trim() || undefined,
 							textChunkLimit: Number(form.textChunkLimit) || undefined,
 							cardTimeoutMs: Number(form.cardTimeoutMs) || undefined,
 						}),
@@ -173,8 +171,6 @@ window.__ModuleLoader__.load({
 							createElement("input", { value: form.botType, onChange: set("botType"), placeholder: "3" })),
 						createElement("label", null, "会话工作目录 cwd（默认；已用 /workspace 切换过的用户保留原样）",
 							createElement("input", { value: form.cwd, onChange: set("cwd"), placeholder: "F:\\work" })),
-						createElement("label", null, "agentPreset（可选）",
-							createElement("input", { value: form.agentPreset, onChange: set("agentPreset"), placeholder: "build" })),
 						createElement("label", null, "单条消息上限 textChunkLimit",
 							createElement("input", { value: form.textChunkLimit, onChange: set("textChunkLimit"), placeholder: "4000" })),
 						createElement("label", null, "卡片超时 cardTimeoutMs",

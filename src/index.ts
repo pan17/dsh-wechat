@@ -24,7 +24,6 @@ export interface PluginConfig {
   botType?: string;
   storageDir?: string;
   cwd?: string;
-  agentPreset?: string;
   textChunkLimit?: number;
   cardTimeoutMs?: number;
 }

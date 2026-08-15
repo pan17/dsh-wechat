@@ -35,6 +35,18 @@ export interface Agent {
   readonly id: string;
   readonly status: "idle" | "running";
   readonly options?: { provider?: string; model?: string };
+  /** Session header access: the latest logged request config (dsh-session). */
+  session?: {
+    /** Durable creation metadata: the recorded agent preset, if any. */
+    header?: { agentPreset?: string };
+    /** The session's durable event log (permission fold / blank check). */
+    events?: readonly { type: string; data?: unknown }[];
+    requestHeader?: () =>
+      | {
+          config?: { provider?: string; model?: string; reasoningEffort?: string };
+        }
+      | undefined;
+  };
   followup(message: UserMessage): void;
   steer(message: UserMessage): void;
   cancel(cause: string, options?: { keepInbox?: boolean }): void;
