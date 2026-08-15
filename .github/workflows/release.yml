@@ -22,7 +22,7 @@ jobs:
       - run: npm run build
       - run: npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM }}
+          NODE_AUTH_TOKEN: ${{ secrets.DSH_WECHAT }}
 
   release:
     needs: publish-npm
