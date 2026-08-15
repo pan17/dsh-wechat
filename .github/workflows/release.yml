@@ -10,22 +10,11 @@ permissions:
   packages: write
 
 jobs:
-  publish-npm:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: 'https://registry.npmjs.org'
-      - run: npm ci
-      - run: npm run build
-      - run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.DSH_WECHAT }}
-
+  # GitHub Release first: the changelog query validates the release notes
+  # (fail fast if the version section is missing) and the Release is created
+  # BEFORE anything is published to npm — if this job fails, publish-npm
+  # never runs, so npm and GitHub can never drift apart.
   release:
-    needs: publish-npm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,3 +29,18 @@ jobs:
         with:
           body: ${{ steps.changelog.outputs.release-notes }}
           draft: false
+
+  publish-npm:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm run build
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.DSH_WECHAT }}
