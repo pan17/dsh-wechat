@@ -192,3 +192,8 @@ npm test         # vitest（64 个用例：splitText/格式化/解析/帧处理/
 MIT。`src/weixin/`、`src/adapter/` 移植自
 [wechat-opencode](https://github.com/pan17/wechat-opencode)（MIT，
 原始来源 `@tencent-weixin/openclaw-weixin`），文件头保留出处注释。
+
+## 免责声明
+
+本项目与 DeepSeek Harness、腾讯微信官方**互不隶属**，非官方项目，
+纯属个人学习用途。使用本项目即表示你自行承担由此产生的一切后果。

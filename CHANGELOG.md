@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-15
+
+### Fixed
+
+- 微信图片保存为真实格式扩展名：iLink 协议不声明图片格式，此前统一保存
+  为 `image.jpg`，PNG/WebP/GIF 原图会出现"扩展名 .jpg 但实际是 PNG"的
+  误标；现在按文件头（magic bytes）检测真实格式（png/jpg/gif/webp）保存
+
 ## [0.3.0] - 2026-08-15
 
 ### Added

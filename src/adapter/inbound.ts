@@ -28,6 +28,32 @@ function saveToTemp(buffer: Buffer, fileName: string, tempDir: string): string {
 }
 
 /**
+ * Detect an image file's real format from its magic bytes. WeChat image
+ * media is often PNG (or WebP/GIF) while the protocol gives no extension,
+ * so a fixed `.jpg` name would leave the agent with a mislabeled file.
+ * Returns the extension WITHOUT the leading dot; falls back to "jpg".
+ */
+export function detectImageExtension(buffer: Buffer): string {
+  if (!buffer || buffer.length < 12) return "jpg";
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    return "png"; // PNG \x89PNG
+  }
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "jpg"; // JPEG SOI
+  }
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) {
+    return "gif"; // GIF8
+  }
+  if (
+    buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
+    buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50
+  ) {
+    return "webp"; // RIFF....WEBP
+  }
+  return "jpg";
+}
+
+/**
  * Extract text body from a WeChat message's item_list.
  */
 export function extractText(itemList?: MessageItem[]): string {
@@ -127,7 +153,8 @@ async function convertMediaItem(
 
     log("Downloading image from CDN...");
     const buffer = await downloadAndDecrypt(media.encrypt_query_param, aesKey, cdnBaseUrl);
-    const realPath = saveToTemp(buffer, "image.jpg", tempDir);
+    const ext = detectImageExtension(buffer);
+    const realPath = saveToTemp(buffer, `image.${ext}`, tempDir);
 
     return {
       type: "text",
