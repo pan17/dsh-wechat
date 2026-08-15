@@ -12,6 +12,7 @@ import {
   parseNextCommand,
   parsePermCommand,
   parsePresetCommand,
+  parseReasoningCommand,
   parseRejectPermissionCommand,
   parseRejectQuestionCommand,
   parseSessionCommand,
@@ -119,6 +120,18 @@ describe("slash parsers", () => {
     expect(parsePermCommand("/perm unknown-sub 1")).toBeNull();
   });
 
+  it("parseReasoningCommand", () => {
+    expect(parseReasoningCommand("/reasoning")).toEqual({ kind: "status" });
+    expect(parseReasoningCommand("/reasoning list")).toEqual({ kind: "list" });
+    expect(parseReasoningCommand("/reasoning default")).toEqual({ kind: "clear" });
+    expect(parseReasoningCommand("/reasoning high")).toEqual({ kind: "switch", target: "high" });
+    expect(parseReasoningCommand("/reasoning 高")).toEqual({ kind: "switch", target: "高" });
+    expect(parseReasoningCommand("/reasoning  thinking")).toEqual({ kind: "switch", target: "thinking" });
+    expect(parseReasoningCommand(" /reasoning  ")).toEqual({ kind: "status" });
+    expect(parseReasoningCommand("/reason")).toBeNull();
+    expect(parseReasoningCommand("reasoning list")).toBeNull();
+  });
+
   it("parseNextCommand", () => {
     expect(parseNextCommand("/next")).toBe(true);
     expect(parseNextCommand("  /next  ")).toBe(true);
@@ -134,6 +147,7 @@ describe("slash parsers", () => {
     expect(help).toContain("/preset");
     expect(help).toContain("/model");
     expect(help).toContain("/perm");
+    expect(help).toContain("/reasoning");
     expect(help).toContain("/silent");
     expect(help).toContain("/stop");
     expect(help).toContain("/next");

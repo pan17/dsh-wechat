@@ -121,6 +121,12 @@ export type PermCommand =
   | { kind: "switch"; target: string }
   | { kind: "default"; target?: string };
 
+export type ReasoningCommand =
+  | { kind: "status" }
+  | { kind: "list" }
+  | { kind: "switch"; target: string }
+  | { kind: "clear" };
+
 /**
  * Parse `/workspace` (alias `/ws`):
  *   list | status | switch <path|n> | add <path>
@@ -243,6 +249,27 @@ export function parsePermCommand(text: string): PermCommand | null {
   }
 }
 
+/**
+ * Parse `/reasoning`:
+ *   (bare) | list | default | <等级>
+ *
+ * The reasoning effort rides the same selection as the model: `/reasoning`
+ * with no argument reports the current/default effort and the current
+ * model's supported levels; `default` clears it (provider/model default);
+ * anything else switches the effort (by id or display name), applying to
+ * the current session immediately and persisting as the new default.
+ */
+export function parseReasoningCommand(text: string): ReasoningCommand | null {
+  const trimmed = text.trim();
+  const m = trimmed.match(/^\/reasoning(?:\s+(.*))?$/);
+  if (!m) return null;
+  const rest = (m[1] ?? "").trim();
+  if (!rest) return { kind: "status" };
+  if (rest === "list") return { kind: "list" };
+  if (rest === "default") return { kind: "clear" };
+  return { kind: "switch", target: rest };
+}
+
 /** The /help reply. */
 export function formatHelp(): string {
   return [
@@ -255,6 +282,7 @@ export function formatHelp(): string {
     "• /preset (p) — list | switch <名称|编号> | status（改的是 DSH 设置的默认 preset，与 GUI 同步）",
     "• /model — list [提供商] | switch <提供商/模型> | status",
     "• /perm (permission) — status | list | switch <名称|编号> | default [名称|编号]（会话权限实时切换；默认写入 DSH 设置，与 GUI 同步）",
+    "• /reasoning — 查看/设置推理等级：/reasoning [list|default|<等级>]",
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
     "• /stop — 中断当前任务",
     "• /next — 继续发送因微信限制被缓存的消息",

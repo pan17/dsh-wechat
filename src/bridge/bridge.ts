@@ -37,6 +37,7 @@ import {
   parseNextCommand,
   parsePermCommand,
   parsePresetCommand,
+  parseReasoningCommand,
   parseRejectPermissionCommand,
   parseRejectQuestionCommand,
   parseSessionCommand,
@@ -47,6 +48,7 @@ import {
   type ModelCommand,
   type PermCommand,
   type PresetCommand,
+  type ReasoningCommand,
   type SessionCommand,
   type WorkspaceCommand,
 } from "./slash.js";
@@ -54,6 +56,13 @@ import {
 /** WeChat gateway continuous-message limit per user interaction window. */
 const MSG_LIMIT_MAX = 10;
 const MSG_LIMIT_WARN = 7;
+
+/** A model selection override for one agent (`/model switch` / `/reasoning`). */
+interface ModelOverride {
+  provider: string;
+  model: string;
+  reasoningEffort?: string;
+}
 
 export interface LoginState {
   phase: "idle" | "waiting-qr" | "scaned" | "logged-in" | "failed";
@@ -128,8 +137,16 @@ export class WeChatDSHBridge {
   private readonly silentBuffers = new Map<string, string[]>();
   private readonly outboundCache = new Map<string, CachedMessage[]>();
   private readonly wechatMsgCount = new Map<string, number>();
-  /** Per-agent model overrides set by `/model switch` (applied via agent/request). */
-  private readonly modelOverrides = new Map<string, { provider: string; model: string }>();
+  /** Per-agent model overrides set by `/model switch` / `/reasoning` (applied via agent/request). */
+  private readonly modelOverrides = new Map<string, ModelOverride>();
+  /**
+   * Sessions whose pending cards were only *notified* (not shown) to a user
+   * because they belonged to a non-current session. Keyed by user id; the
+   * set holds session ids with pending cards the user has been told about.
+   * Clearing happens when the user switches into the session and the cards
+   * are flushed (or reported gone).
+   */
+  private readonly notifiedCardSessions = new Map<string, Set<string>>();
   /** apiProxy for respond() injection; set by attachMux. */
   private apiProxy: ApiProxySurface | null = null;
   private muxAbort: AbortController | null = null;
@@ -460,6 +477,12 @@ export class WeChatDSHBridge {
         return;
       }
 
+      const reasoningCmd = parseReasoningCommand(text);
+      if (reasoningCmd) {
+        await this.handleReasoningCommand(userId, reasoningCmd);
+        return;
+      }
+
       // Unrecognized slash command — hint, then forward to the agent.
       const slashHint = detectUnknownSlashCommand(text);
       if (slashHint) {
@@ -627,11 +650,14 @@ export class WeChatDSHBridge {
         const list = this.pendingApprovals.get(userId) ?? [];
         list.push(card);
         this.pendingApprovals.set(userId, list);
-        void this.sendReply(
-          userId,
-          formatApprovalCard(card, list.length, list.length) +
-            (this.isBoundSession(sessionId) ? "" : `\n\n（会话 ${sessionId.slice(0, 12)} — 未绑定微信，可直接在此处理）`),
-        ).catch(() => {});
+        // Show the card immediately only when it belongs to the user's
+        // current session; otherwise notify once and flush on switch.
+        const userState = this.state.getUser(userId);
+        if (userState?.sessionId === sessionId) {
+          void this.sendApprovalCard(userId, card, list.length).catch(() => {});
+        } else {
+          void this.notifyCardPending(userId, sessionId).catch(() => {});
+        }
         break;
       }
       case "approval/resolved": {
@@ -671,9 +697,13 @@ export class WeChatDSHBridge {
         const list = this.pendingQuestions.get(userId) ?? [];
         list.push(card);
         this.pendingQuestions.set(userId, list);
-        const header =
-          list.length > 1 ? `❓ 提问卡 ${list.length}/${list.length}` : "❓ 提问";
-        void this.sendReply(userId, `${header}\n${formatQuestionForWeChat(questions)}`).catch(() => {});
+        // Same current-session policy as approval cards.
+        const userState = this.state.getUser(userId);
+        if (userState?.sessionId === sessionId) {
+          void this.sendQuestionCard(userId, card, questions, list.length).catch(() => {});
+        } else {
+          void this.notifyCardPending(userId, sessionId).catch(() => {});
+        }
         break;
       }
       case "question/resolved": {
@@ -695,9 +725,94 @@ export class WeChatDSHBridge {
     }
   }
 
+  /**
+   * Session provenance label for a card: which workspace and which session
+   * the request belongs to (`📂 <工作区> · 💬 <会话标题>`), so a card for a
+   * non-current session is identifiable without switching.
+   */
+  private async sessionContextLabel(sessionId: string): Promise<string> {
+    const sessions = await this.ops.listSessions();
+    const record = sessions.find((r) => r.header.id === sessionId);
+    const workspace = record?.header.cwd?.split(/[\\/]/).pop() ?? "?";
+    const title = record
+      ? (await this.ops.readSessionTitle(sessionId)) ?? sessionId.slice(0, 8)
+      : sessionId.slice(0, 8);
+    return `📂 ${workspace} · 💬 ${title}`;
+  }
+
+  /** Send one mirrored approval card with its session provenance header. */
+  private async sendApprovalCard(userId: string, card: PendingApproval, count: number): Promise<void> {
+    const context = await this.sessionContextLabel(card.sessionId);
+    const note = this.isBoundSession(card.sessionId)
+      ? ""
+      : `\n\n（会话 ${card.sessionId.slice(0, 12)} — 未绑定微信，可直接在此处理）`;
+    await this.sendReply(userId, `${context}\n${formatApprovalCard(card, count, count)}${note}`);
+  }
+
+  /** Send one mirrored question card with its session provenance header. */
+  private async sendQuestionCard(
+    userId: string,
+    card: PendingQuestion,
+    questions: AskUserQuestionItem[],
+    count: number,
+  ): Promise<void> {
+    const context = await this.sessionContextLabel(card.sessionId);
+    const header = count > 1 ? `❓ 提问卡 ${count}/${count}` : "❓ 提问";
+    await this.sendReply(userId, `${header}\n${context}\n${formatQuestionForWeChat(questions)}`);
+  }
+
+  /**
+   * Tell the user a non-current session has pending cards, once per session
+   * (a burst of cards for the same session yields a single notice). The
+   * notice names the session; switching into it flushes the cards.
+   */
+  private async notifyCardPending(userId: string, sessionId: string): Promise<void> {
+    const notified = this.notifiedCardSessions.get(userId) ?? new Set<string>();
+    if (notified.has(sessionId)) return;
+    notified.add(sessionId);
+    this.notifiedCardSessions.set(userId, notified);
+    const context = await this.sessionContextLabel(sessionId);
+    const approvals = (this.pendingApprovals.get(userId) ?? []).filter((c) => c.sessionId === sessionId).length;
+    const questions = (this.pendingQuestions.get(userId) ?? []).filter((c) => c.sessionId === sessionId).length;
+    const kinds = [
+      approvals > 0 ? `${approvals} 张权限卡` : "",
+      questions > 0 ? `${questions} 张提问卡` : "",
+    ].filter(Boolean).join("、");
+    await this.sendReply(
+      userId,
+      `${context}\n🔔 有 ${kinds}待处理，发送 /session switch <编号> 切换到该会话后查看。`,
+    );
+  }
+
+  /**
+   * After the user switches into `sessionId`, flush any pending cards for
+   * it: show them if still pending, or — only when the user was notified
+   * about this session earlier — say they are gone (timeout / handled in
+   * the GUI). Ordinary switches without a notification stay silent.
+   */
+  private async flushPendingCardsForSession(userId: string, sessionId: string): Promise<void> {
+    const wasNotified = this.notifiedCardSessions.get(userId)?.has(sessionId) ?? false;
+    const approvals = (this.pendingApprovals.get(userId) ?? []).filter((c) => c.sessionId === sessionId);
+    const questions = (this.pendingQuestions.get(userId) ?? []).filter((c) => c.sessionId === sessionId);
+
+    if (approvals.length > 0 || questions.length > 0) {
+      for (const card of approvals) {
+        void this.sendApprovalCard(userId, card, approvals.length).catch(() => {});
+      }
+      for (const card of questions) {
+        void this.sendQuestionCard(userId, card, card.items, questions.length).catch(() => {});
+      }
+    } else if (wasNotified) {
+      await this.sendReply(userId, "ℹ️ 该会话的待处理卡片已在其他端处理或超时。");
+    }
+
+    // Clear the notice either way: the user has now been shown the cards
+    // (or told they are gone); a new card will notify again.
+    this.notifiedCardSessions.get(userId)?.delete(sessionId);
+  }
+
   /** The WeChat user a card for `sessionId` goes to: its bound user, else the most recent active user. */
-  private recipientForSession(sessionId: string): string | undefined {
-    const bound = this.userForAgent(sessionId);
+  private recipientForSession(sessionId: string): string | undefined {    const bound = this.userForAgent(sessionId);
     if (bound) return bound.userId;
     let latest: { userId: string; time: number } | undefined;
     for (const [userId, token] of this.contextTokens) {
@@ -717,8 +832,19 @@ export class WeChatDSHBridge {
   // ─── Approval replies ───
 
   private async handleApprovalReply(userId: string, text: string): Promise<void> {
-    const list = this.pendingApprovals.get(userId);
-    if (!list || list.length === 0) return;
+    const all = this.pendingApprovals.get(userId) ?? [];
+    // Only the user's current session's cards are answerable from WeChat;
+    // cards of other sessions are flushed when the user switches into them.
+    const userState = this.state.getUser(userId);
+    const list = userState?.sessionId
+      ? all.filter((c) => c.sessionId === userState.sessionId)
+      : all;
+    if (list.length === 0) {
+      if (all.length > 0) {
+        await this.sendReply(userId, "💬 当前会话没有待处理的权限卡（其他会话的卡切换过去后查看）。");
+      }
+      return;
+    }
 
     // Priority commands.
     if (parseRejectPermissionCommand(text)) {
@@ -784,11 +910,15 @@ export class WeChatDSHBridge {
     else this.pendingApprovals.delete(userId);
   }
 
-  /** `/rp` — reject every pending approval card on WeChat. */
+  /** `/rp` — reject every pending approval card of the current session. */
   private async rejectAllApprovals(userId: string): Promise<void> {
-    const list = this.pendingApprovals.get(userId);
-    if (!list || list.length === 0) {
-      await this.sendReply(userId, "✅ 当前没有待处理的权限卡。");
+    const all = this.pendingApprovals.get(userId) ?? [];
+    const userState = this.state.getUser(userId);
+    const list = userState?.sessionId
+      ? all.filter((c) => c.sessionId === userState.sessionId)
+      : all;
+    if (list.length === 0) {
+      await this.sendReply(userId, "✅ 当前会话没有待处理的权限卡。");
       return;
     }
     for (const entry of [...list]) {
@@ -804,8 +934,18 @@ export class WeChatDSHBridge {
   // ─── Question replies ───
 
   private async handleQuestionReply(userId: string, text: string): Promise<void> {
-    const list = this.pendingQuestions.get(userId);
-    if (!list || list.length === 0) return;
+    const all = this.pendingQuestions.get(userId) ?? [];
+    // Only the current session's questions are answerable from WeChat.
+    const userState = this.state.getUser(userId);
+    const list = userState?.sessionId
+      ? all.filter((c) => c.sessionId === userState.sessionId)
+      : all;
+    if (list.length === 0) {
+      if (all.length > 0) {
+        await this.sendReply(userId, "💬 当前会话没有待处理的提问卡（其他会话的卡切换过去后查看）。");
+      }
+      return;
+    }
 
     // Priority commands.
     if (parseRejectQuestionCommand(text)) {
@@ -877,11 +1017,15 @@ export class WeChatDSHBridge {
     }
   }
 
-  /** `/rq` — reject every pending question card on WeChat. */
+  /** `/rq` — reject every pending question card of the current session. */
   private async rejectPendingQuestion(userId: string): Promise<void> {
-    const list = this.pendingQuestions.get(userId);
-    if (!list || list.length === 0) {
-      await this.sendReply(userId, "✅ 当前没有待处理的问题卡。");
+    const all = this.pendingQuestions.get(userId) ?? [];
+    const userState = this.state.getUser(userId);
+    const list = userState?.sessionId
+      ? all.filter((c) => c.sessionId === userState.sessionId)
+      : all;
+    if (list.length === 0) {
+      await this.sendReply(userId, "✅ 当前会话没有待处理的问题卡。");
       return;
     }
     for (const entry of [...list]) {
@@ -1073,6 +1217,9 @@ export class WeChatDSHBridge {
         this.state.update(user.userId, { sessionId: user.sessionId, cwd: user.cwd, cwdExplicit: user.cwdExplicit });
         const agent = await this.agents.ensure(user);
         await this.sendReply(userId, `✅ 已切换到会话 ${record.header.id.slice(0, 12)}（${record.header.cwd ?? "?"}）${agent ? `，Agent ${agent.status}` : ""}。`);
+        // Flush any pending cards for the session just switched into
+        // (notified earlier, or silently when nothing was pending).
+        await this.flushPendingCardsForSession(user.userId, user.sessionId);
         return;
       }
       case "new": {
@@ -1153,6 +1300,128 @@ export class WeChatDSHBridge {
           userId,
           `🤖 Preset: ${await this.resolveEffectivePreset(user)}\nAgent: ${agent ? agent.status : "未加载"}`,
         );
+        return;
+      }
+    }
+  }
+
+  // ─── Reasoning effort ───
+
+  /**
+   * `/reasoning` — view or switch the reasoning effort. The effort rides the
+   * same model selection as the GUI's model picker: the current session's
+   * override or logged config, with the deployment default underneath.
+   * Switching persists via `agentDefaultModel.saveSelection` (same settings
+   * document the GUI edits) and applies to the live agent through the
+   * `agent/request` override.
+   */
+  private async handleReasoningCommand(userId: string, cmd: ReasoningCommand): Promise<void> {
+    const user = this.state.ensureUser(userId, this.config.cwd);
+    const agent = this.agents.get(user);
+    const active = this.resolveEffectiveModel(user, agent);
+
+    if (cmd.kind === "list" || cmd.kind === "switch" || cmd.kind === "clear") {
+      if (!agent || !active?.provider || !active.model) {
+        await this.sendReply(userId, "⚠️ 当前没有可用会话。先发一条消息或 /session new 创建会话。");
+        return;
+      }
+    }
+
+    // The current model's supported effort levels (adapter capability).
+    const reasoning =
+      active?.provider && active.model
+        ? await this.ops.resolveModelReasoning(active.provider, active.model)
+        : undefined;
+
+    const effortName = (id: string): string => {
+      const level = reasoning?.efforts.find((e) => e.id === id);
+      return level?.name ?? id;
+    };
+
+    switch (cmd.kind) {
+      case "list": {
+        if (!reasoning || reasoning.efforts.length === 0) {
+          await this.sendReply(userId, `🧠 当前模型（${active!.provider}/${active!.model}）不支持推理等级。`);
+          return;
+        }
+        const current = active!.reasoningEffort;
+        const lines = [`🧠 ${active!.provider}/${active!.model} 的推理等级（/reasoning <等级> 切换）`];
+        reasoning.efforts.forEach((effort, i) => {
+          const markers = [
+            current === effort.id ? " ◀ 当前" : "",
+            effort.id === reasoning.defaultEffort && current === undefined ? "（模型默认）" : "",
+          ].join("");
+          lines.push(`${i + 1}. ${effort.name} — ${effort.id}${markers}`);
+          if (effort.description) lines.push(`   ${effort.description}`);
+        });
+        if (reasoning.defaultEffort) {
+          lines.push(`默认: ${effortName(reasoning.defaultEffort)}`);
+        }
+        await this.sendReply(userId, lines.join("\n"));
+        return;
+      }
+      case "status": {
+        const defaultModel = this.ops.defaultModelSelection();
+        const lines = ["🧠 推理等级"];
+        if (agent && active?.provider && active.model) {
+          const current = active.reasoningEffort;
+          const label = current ? effortName(current) : "（模型默认）";
+          const source = this.modelOverrides.has(agent.id) && current ? "（本会话设置）" : "";
+          lines.push(`• 当前会话: ${active.provider}/${active.model} — ${label}${source}`);
+        } else if (!agent) {
+          lines.push("• 当前会话: （未绑定会话）");
+        }
+        if (defaultModel) {
+          const label = defaultModel.reasoningEffort ? effortName(defaultModel.reasoningEffort) : "（模型默认）";
+          lines.push(`• 默认: ${defaultModel.provider}/${defaultModel.model} — ${label}`);
+        }
+        if (reasoning && reasoning.efforts.length > 0) {
+          lines.push(`• 可用: ${reasoning.efforts.map((e) => e.name).join(" / ")}`);
+        } else if (active?.provider && active.model) {
+          lines.push("• 当前模型不支持推理等级");
+        }
+        await this.sendReply(userId, lines.join("\n"));
+        return;
+      }
+      case "switch": {
+        if (!reasoning || reasoning.efforts.length === 0) {
+          await this.sendReply(userId, `🧠 当前模型（${active!.provider}/${active!.model}）不支持推理等级。`);
+          return;
+        }
+        const matched = reasoning.efforts.find((e) => e.id === cmd.target || e.name === cmd.target);
+        if (!matched) {
+          await this.sendReply(
+            userId,
+            `⚠️ 未知推理等级: ${cmd.target}。可用: ${reasoning.efforts.map((e) => `${e.name}（${e.id}）`).join(", ")}`,
+          );
+          return;
+        }
+        // Apply to the live agent (via agent/request) and as the new default.
+        const selection = { provider: active!.provider!, model: active!.model!, reasoningEffort: matched.id };
+        if (agent) {
+          this.modelOverrides.set(agent.id, selection);
+        }
+        const saved = await this.ops.saveDefaultModel(selection);
+        const lines = [`✅ 推理等级已切换: ${matched.name}（${matched.id}）`];
+        if (agent) lines.push("（已应用到当前会话，下一步生效）");
+        if (!saved) lines.push("⚠️ 无法更新默认（仅当前会话生效）");
+        await this.sendReply(userId, lines.join("\n"));
+        return;
+      }
+      case "clear": {
+        // Restore the provider/model default: drop the effort from the
+        // override and from the persisted default.
+        if (agent) {
+          const override = this.modelOverrides.get(agent.id);
+          if (override) {
+            const { reasoningEffort: _dropped, ...rest } = override;
+            this.modelOverrides.set(agent.id, rest);
+          }
+        }
+        const saved = await this.ops.saveDefaultModel({ provider: active!.provider!, model: active!.model! });
+        const lines = ["✅ 推理等级已恢复为模型默认"];
+        if (!saved) lines.push("⚠️ 无法更新默认（仅当前会话生效）");
+        await this.sendReply(userId, lines.join("\n"));
         return;
       }
     }
@@ -1367,12 +1636,21 @@ export class WeChatDSHBridge {
   /**
    * Apply the user's model override to a frozen request config. Called from
    * the `agent/request` waterfall listener (registered in index.ts) for
-   * WeChat-bound agents.
+   * WeChat-bound agents. An override without a reasoning effort leaves the
+   * caller's effort untouched (`/model switch` does not clear a set effort).
    */
-  applyModelOverride(config: { provider: string; model: string }, agentId: string): { provider: string; model: string } {
+  applyModelOverride(
+    config: { provider: string; model: string; reasoningEffort?: string },
+    agentId: string,
+  ): { provider: string; model: string; reasoningEffort?: string } {
     const override = this.modelOverrides.get(agentId);
     if (!override) return config;
-    return { ...config, provider: override.provider, model: override.model };
+    return {
+      ...config,
+      provider: override.provider,
+      model: override.model,
+      ...(override.reasoningEffort !== undefined ? { reasoningEffort: override.reasoningEffort } : {}),
+    };
   }
 
   private async formatStatus(user: UserState): Promise<string> {
@@ -1401,13 +1679,21 @@ export class WeChatDSHBridge {
       contextLabel = `• 上下文: ${formatTokens(pressure.projectedTokens)}（总量未知）`;
     }
 
+    // 推理等级名称（当前模型能力），模型行附注用。
+    let effortSuffix = "";
+    if (active?.provider && active.model && active.reasoningEffort) {
+      const reasoning = await this.ops.resolveModelReasoning(active.provider, active.model);
+      const level = reasoning?.efforts.find((e) => e.id === active.reasoningEffort);
+      effortSuffix = `（推理: ${level?.name ?? active.reasoningEffort}）`;
+    }
+
     const lines = [
       "📊 当前状态",
       `• 工作区: ${user.cwd}`,
       `• 会话: ${sessionLabel}`,
       `• Agent: ${agent ? agent.status : "（未加载）"}`,
       `• Preset: ${await this.resolveEffectivePreset(user)}`,
-      `• 模型: ${active?.provider && active?.model ? `${active.provider}/${active.model}` : "（默认）"}`,
+      `• 模型: ${active?.provider && active?.model ? `${active.provider}/${active.model}${effortSuffix}` : "（默认）"}`,
       ...(contextLabel ? [contextLabel] : []),
       ...(permission ? [`• 权限: ${permission}`] : []),
       `• 静默模式: ${user.silent ? "on" : "off"}`,
@@ -1444,7 +1730,7 @@ export class WeChatDSHBridge {
   private resolveEffectiveModel(
     user: UserState,
     agent: Agent | undefined,
-  ): { provider?: string; model?: string } | undefined {
+  ): { provider?: string; model?: string; reasoningEffort?: string } | undefined {
     const override = agent ? this.modelOverrides.get(agent.id) : undefined;
     if (override) return override;
     const logged = agent?.session?.requestHeader?.()?.config;

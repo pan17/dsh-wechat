@@ -56,6 +56,16 @@ export interface AgentPreset {
 export interface ModelSelection {
   provider: string;
   model: string;
+  /** Adapter-owned reasoning effort id; absent = provider/model default. */
+  reasoningEffort?: string;
+}
+
+/** Reasoning-effort capability of one exact model route (dsh-llm). */
+export interface ModelReasoningInfo {
+  /** Supported efforts in adapter-preferred display order. */
+  efforts: readonly { id: string; name: string; description?: string }[];
+  /** Adapter-configured default materialized when callers omit an effort. */
+  defaultEffort?: string;
 }
 
 export interface WorkspaceRegistry {
@@ -72,6 +82,8 @@ export interface SessionQuery {
 export interface LlmService {
   listProviders(): ProviderInfo[];
   listModels(provider: string): Promise<ModelInfo[]>;
+  /** Exact-route metadata: context window, reasoning efforts, etc. */
+  resolveModel(provider: string, model: string): Promise<{ reasoning?: ModelReasoningInfo }>;
 }
 
 export interface AgentPresetsService {
@@ -185,6 +197,18 @@ export class DshOps {
       return await llm.listModels(provider);
     } catch {
       return [];
+    }
+  }
+
+  /** Reasoning-effort capability of one exact model route, or undefined. */
+  async resolveModelReasoning(provider: string, model: string): Promise<ModelReasoningInfo | undefined> {
+    const llm = this.get<LlmService>("llm");
+    if (!llm) return undefined;
+    try {
+      const info = await llm.resolveModel(provider, model);
+      return info.reasoning;
+    } catch {
+      return undefined;
     }
   }
 

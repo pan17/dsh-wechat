@@ -64,6 +64,7 @@ dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除
 | `/preset (p) — list \| switch <名称\|编号> \| status` | Preset 管理（默认写入 DSH 设置，与 GUI 同步；当前会话无内容时立即应用） |
 | `/model — list [提供商] \| switch <提供商/模型> \| status` | 模型管理（切换立即作用于当前会话 + 设为默认） |
 | `/perm — status \| list \| switch <名称\|编号> \| default [名称\|编号]` | 权限管理（switch 实时切当前会话；default 写 DSH 设置，新会话生效） |
+| `/reasoning — [list \| default \| <等级>]` | 推理等级：查看当前/默认与模型支持的等级；`<等级>` 切换（实时 + 写默认）；`default` 恢复模型默认 |
 | `/silent on\|off`（`/sl`） | 静默模式（跨重启持久化） |
 | `/stop` | 中断当前任务 |
 | `/next` | 继续发送因微信限制被缓存的消息 |
