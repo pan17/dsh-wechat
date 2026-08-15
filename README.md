@@ -1,10 +1,16 @@
 # dsh-wechat
 
+[![npm](https://img.shields.io/npm/v/dsh-wechat?style=flat-square&logo=npm)](https://www.npmjs.com/package/dsh-wechat)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-wechat?style=flat-square&logo=npm)](https://www.npmjs.com/package/dsh-wechat)
+[![License](https://img.shields.io/github/license/pan17/dsh-wechat?style=flat-square)](https://github.com/pan17/dsh-wechat)
+
 让微信成为 DeepSeek Harness (DSH) 的第二客户端：通过腾讯 iLink bot 协议把
 微信私聊桥接到 DSH agent——文本/图片/文件/语音消息双向收发、微信内 slash
 命令管理会话/工作区/Preset/模型/权限、审批与提问卡与 GUI 双端同卡同决策、
 DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，零运行时
 `@deepseek-ai` 依赖，直接调用 DSH 进程内服务。
+
+<img src="./resources/发送.jpg" alt="发送" width="49%" /> <img src="./resources/接收.jpg" alt="接收" width="49%" />
 
 ## 功能
 
