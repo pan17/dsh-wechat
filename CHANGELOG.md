@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-15
+
 ### Added
 
 - 微信渠道提示词动态注入：agent 系统提示（runtime context）在微信消息
