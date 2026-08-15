@@ -52,12 +52,8 @@ dsh plugin --profile <profile> update dsh-wechat   # 升级
 dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除）
 ```
 
-> **本地开发/改动即时可见**：npm 发布前用 pnpm `workspace:*` + junction
-> 指向本仓库目录替代 npm 安装（pnpm 10 在 Windows 上跨盘 `link:`/`file:`
-> 有 bug，会把绝对路径拼接到 profile 目录后报 ENOENT；junction +
-> `workspace:*` 是已验证的替代，且需手动把 `dsh-wechat` 加进
-> `dsh.profile.bundles`）。插件代码修改后无需重新安装，但**重启 DSH**
-> 才能让改动生效；若 `pnpm install` 后插件消失，重新执行一次即可恢复。
+> 插件从 npm 官方源安装（`dsh plugin add` 即 `pnpm add dsh-wechat`）。
+> 修改代码后需**重启 DSH** 才能让改动生效。
 
 ## 微信命令
 
