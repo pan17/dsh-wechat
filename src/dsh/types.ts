@@ -38,7 +38,7 @@ export interface Agent {
   /** Session header access: the latest logged request config (dsh-session). */
   session?: {
     /** Durable creation metadata: the recorded agent preset, if any. */
-    header?: { agentPreset?: string };
+    header?: { id?: string; agentPreset?: string };
     /** The session's durable event log (permission fold / blank check). */
     events?: readonly { type: string; data?: unknown }[];
     requestHeader?: () =>

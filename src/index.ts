@@ -138,6 +138,53 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
     });
   }
 
+  // ─── Dynamic WeChat surface prompt (per-message-source) ───
+  // Registered as a GLOBAL RUNTIME CONTEXT (not a prompt section): DSH's
+  // system-prompt assembly applies a "complete-section replacement" pass to
+  // sections (a preset's complete section replaces ALL ordinary sections,
+  // which would drop a section-registered surface prompt — exactly the
+  // failure observed), while CONTEXTS are assembled on an independent path
+  // ("Current runtime context" snapshot) that complete replacement never
+  // touches. The context text is evaluated per assembly: the bridge tracks
+  // the most recent user-message source per session, and the context returns
+  // the WeChat prompt ONLY while the session's last user message came from
+  // WeChat; otherwise it returns "" (empty contexts are filtered out, so
+  // GUI-driven assemblies are untouched). Global registration means EVERY
+  // agent — old or new, GUI- or WeChat-created, live or resumed — gets the
+  // same dynamic context, so the WeChat prompt follows the message source
+  // rather than the session's setup path.
+  if (typeof context.inject === "function") {
+    context.inject(["systemPrompt"], (promptCtx) => {
+      const systemPrompt = (promptCtx as {
+        get<T = unknown>(name: string): T | undefined;
+      }).get<{
+        context(entry: {
+          name: string;
+          order: number;
+          text: string | ((context: unknown) => string);
+        }): unknown;
+      }>("systemPrompt");
+      if (!systemPrompt) {
+        console.warn("[dsh-wechat] systemPrompt unavailable; WeChat surface prompt disabled");
+        return;
+      }
+      systemPrompt.context({
+        name: "dsh-wechat-surface",
+        order: 50,
+        text: (context) => {
+          const agent = (context as { agent?: unknown })?.agent as
+            | { session?: { header?: { id?: string } } }
+            | undefined;
+          const sessionId = agent?.session?.header?.id;
+          const source = sessionId ? bridge.surfaceSourceFor(sessionId) : undefined;
+          return source === "wechat"
+            ? "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（纯文本、适度使用 emoji、避免过长的表格）。"
+            : "";
+        },
+      });
+    });
+  }
+
   // ─── QR page + settings-page API ───
   // The webserver row activates only after `webStartup` resolves (it waits on
   // inject), so `ctx.get('webServer')` at apply time is undefined. Use the

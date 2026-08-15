@@ -25,10 +25,12 @@ function deepFreeze<T>(value: T): T {
 export function createUserMessage(input: {
   content: ContentBlock[];
   source: UserMessageSource;
+  /** Optional explicit id (defaults to a fresh randomUUID). */
+  id?: string;
 }): UserMessage {
   return deepFreeze({
     ...input,
-    id: crypto.randomUUID(),
+    id: input.id ?? crypto.randomUUID(),
     role: "user",
   }) as unknown as UserMessage;
 }

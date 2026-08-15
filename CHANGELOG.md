@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- 微信渠道提示词动态注入：agent 系统提示（runtime context）在微信消息
+  驱动会话时注入"你正在通过微信(WeChat)与用户聊天"，GUI 消息驱动时自动
+  消失——按消息来源（`agent/inbox/spliced` 入队时判定）动态切换，任何
+  会话（GUI/微信创建、新旧）一视同仁
+
+### Fixed
+
+- 微信渠道提示词不再受 preset `complete` section 替换影响（改用
+  `systemPrompt.context()` 注册，sections 的 complete 替换不会波及）
+- GUI 消息后微信提示词残留一轮的问题（来源标记从 `user/message` echo
+  提前到 `agent/inbox/spliced` 入队时，早于 agent 组装系统提示）
+
 ## [0.1.2] - 2026-08-15
 
 ### Added

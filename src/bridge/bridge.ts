@@ -56,6 +56,8 @@ import {
 /** WeChat gateway continuous-message limit per user interaction window. */
 const MSG_LIMIT_MAX = 10;
 const MSG_LIMIT_WARN = 7;
+/** How long a session's message-source marker stays valid without a touch. */
+const SURFACE_TTL_MS = 7 * 24 * 60 * 60_000;
 
 /** A model selection override for one agent (`/model switch` / `/reasoning`). */
 interface ModelOverride {
@@ -154,6 +156,23 @@ export class WeChatDSHBridge {
    * activity (cold after restart) fall back to their creation time.
    */
   private readonly lastActivityBySession = new Map<string, number>();
+  /**
+   * Per-session message-source tracking for the dynamic WeChat surface
+   * prompt: the most recent user-message origin per session ("wechat" when
+   * the last user message was injected from WeChat, "gui" when it came from
+   * the GUI chat box). The global `dsh-wechat-surface` prompt section
+   * consults this via `surfaceSourceFor()` at assembly time, so the WeChat
+   * prompt follows the message source — present exactly while WeChat
+   * messages drive the session, absent while GUI messages do. Entries are
+   * lazily dropped after SURFACE_TTL_MS without a touch.
+   */
+  private readonly sourceBySession = new Map<string, { source: "wechat" | "gui"; at: number }>();
+  /**
+   * Ids of user messages this bridge injected from WeChat (pending their
+   * `user/message` echo), so `handleSessionEvent` can tell WeChat-injected
+   * messages apart from GUI-typed ones. One-shot consumption with a TTL.
+   */
+  private readonly wechatMessageIds = new Map<string, number>();
   /** apiProxy for respond() injection; set by attachMux. */
   private apiProxy: ApiProxySurface | null = null;
   private muxAbort: AbortController | null = null;
@@ -189,6 +208,33 @@ export class WeChatDSHBridge {
       userCount: this.state.all().length,
       config: editable,
     };
+  }
+
+  /**
+   * Message-source marker for one session, consulted by the global
+   * `dsh-wechat-surface` prompt section at assembly time. "wechat" means
+   * the most recent user message came from WeChat (the WeChat prompt is
+   * shown); "gui" (or undefined) means it did not (the prompt is hidden).
+   * Stale markers are dropped lazily.
+   */
+  surfaceSourceFor(sessionId: string): "wechat" | "gui" | undefined {
+    const entry = this.sourceBySession.get(sessionId);
+    if (!entry) return undefined;
+    if (Date.now() - entry.at > SURFACE_TTL_MS) {
+      this.sourceBySession.delete(sessionId);
+      return undefined;
+    }
+    return entry.source;
+  }
+
+  /** Remember one WeChat-injected message id for echo matching. */
+  private markWechatMessage(messageId: string): void {
+    this.wechatMessageIds.set(messageId, Date.now());
+  }
+
+  /** Record that the last user message in `sessionId` came from WeChat. */
+  private markSessionSource(sessionId: string, source: "wechat" | "gui"): void {
+    this.sourceBySession.set(sessionId, { source, at: Date.now() });
   }
 
   /** Start the bridge: resume with a stored token or begin QR login. */
@@ -517,7 +563,12 @@ export class WeChatDSHBridge {
 
     const tempDir = path.join(this.config.storageDir, "tempfile");
     const blocks = await weixinMessageToPrompt(msg, this.config.cdnBaseUrl, (m) => this.log(m), tempDir);
-    this.agents.followup(agent, blocks);
+    // Give the message an explicit id so its `user/message` echo can be
+    // recognized as WeChat-originated (and mark the session's source).
+    const messageId = `wx-msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    this.markWechatMessage(messageId);
+    this.markSessionSource(user.sessionId, "wechat");
+    this.agents.followup(agent, blocks, messageId);
   }
 
   // ─── Outbound: DSH → WeChat ───
@@ -533,15 +584,47 @@ export class WeChatDSHBridge {
    * the message lives in `event.data.message`, NOT at the top level.
    */
   handleSessionEvent(sessionId: string, event: { type: string; [k: string]: unknown }): void {
+    // Mark the message source BEFORE the agent assembles its prompt.
+    // Agent followups (WeChat AND GUI) go through `inbox.append` →
+    // `session.append('agent/inbox/spliced')` — this event is emitted at
+    // ENQUEUE time, i.e. before the agent claims the message and assembles
+    // the system prompt (preStep). WeChat-injected messages carry a
+    // `wx-msg-` id prefix; anything else in a next-turn splice is a GUI
+    // (or other-surface) message, so the surface marker is correct at
+    // assembly time instead of one turn late.
+    if (event.type === "agent/inbox/spliced") {
+      const data = event.data as { target?: string; inserted?: Array<{ id?: string }> };
+      if (data?.target === "next-turn") {
+        const inserted = data.inserted ?? [];
+        if (inserted.length > 0) {
+          const isWechat = inserted.some(
+            (m) => typeof m?.id === "string" && m.id.startsWith("wx-msg-"),
+          );
+          this.markSessionSource(sessionId, isWechat ? "wechat" : "gui");
+        }
+      }
+    }
+
     // Track last user-prompt activity for every session (not only bound
     // ones) — the `/s list` recency source, mirroring the GUI sidebar.
     if (event.type === "user/message") {
-      const data = event.data as { source?: { kind?: string } };
+      const data = event.data as { source?: { kind?: string }; id?: string };
       if (data?.source?.kind === "user") {
         this.lastActivityBySession.set(
           sessionId,
           typeof event.time === "number" ? event.time : Date.now(),
         );
+        // Fallback source marking (the authoritative one happens on
+        // agent/inbox/spliced above; this echo is emitted AFTER assembly,
+        // so it only corrects sessions whose splice event was missed).
+        const id = typeof data.id === "string" ? data.id : undefined;
+        const isWechatEcho = id !== undefined && id.startsWith("wx-msg-");
+        if (isWechatEcho) {
+          // Defensive cleanup; the marker was already set at followup time.
+          this.wechatMessageIds.delete(id);
+        } else {
+          this.markSessionSource(sessionId, "gui");
+        }
       }
     }
 

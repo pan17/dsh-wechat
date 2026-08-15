@@ -130,7 +130,7 @@ export class AgentStore {
   }
 
   /** Queue a user-role message as a follow-up turn on the agent. */
-  followup(agent: Agent, content: ContentBlock[]): void {
+  followup(agent: Agent, content: ContentBlock[], messageId?: string): void {
     agent.followup(
       createUserMessage({
         content,
@@ -138,6 +138,7 @@ export class AgentStore {
         // the WeChat user's messages render as ordinary user messages (a
         // 'plugin' source renders as "context injection" in the GUI).
         source: { kind: "user" },
+        ...(messageId ? { id: messageId } : {}),
       }),
     );
   }
@@ -145,21 +146,26 @@ export class AgentStore {
 
 /**
  * Agent-scoped composition applied to every WeChat-bound session (fresh
- * create or resume): a system-prompt section tells the model it is chatting
- * through WeChat, a preset mount joins the agent to its recorded (or
+ * create or resume): a preset mount joins the agent to its recorded (or
  * deployment-default) agent preset so the preset's tools and prompt sections
  * cover it — the same composition the GUI's `composeAgent` installs — and a
  * model-selection pair of waterfalls keeps the prompt variables and request
  * routing populated exactly like the GUI does. Registered on the agent's own
- * scoped context so it never leaks into other sessions — and unlike a
- * per-message text block, it never pollutes user-message content (which the
- * session-title generator reads).
+ * scoped context so it never leaks into other sessions.
+ *
+ * NOTE: the WeChat surface prompt ("you are chatting through WeChat") is NOT
+ * registered here anymore — it lives in a global dynamic section registered
+ * by index.ts (`dsh-wechat-surface`), whose text is evaluated per assembly
+ * from the bridge's per-session message-source map. That makes the prompt
+ * follow the *message source* (WeChat vs GUI), so any session — old or new,
+ * GUI- or WeChat-created — gets the WeChat prompt exactly while WeChat
+ * messages drive it, and never while GUI messages drive it.
  */
 async function agentSetup(agentCtx: unknown): Promise<void> {
   const ctx = agentCtx as {
     agent?: {
       session?: {
-        header?: { agentPreset?: string };
+        header?: { id?: string; agentPreset?: string };
         requestHeader?: () =>
           | {
               config?: {
@@ -174,15 +180,6 @@ async function agentSetup(agentCtx: unknown): Promise<void> {
     get?: <T = unknown>(name: string) => T | undefined;
     on?: (event: string, listener: (...args: unknown[]) => unknown) => void;
   };
-
-  const systemPrompt = ctx.get?.<{
-    section(section: { name: string; order: number; text: string }): unknown;
-  }>("systemPrompt");
-  systemPrompt?.section?.({
-    name: "dsh-wechat-surface",
-    order: 50,
-    text: "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（纯文本、适度使用 emoji、避免过长的表格）。",
-  });
 
   // Preset mount — the GUI's composeAgent equivalent. The session's recorded
   // preset (header.agentPreset, written at creation) decides its tools and
