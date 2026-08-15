@@ -147,6 +147,13 @@ export class WeChatDSHBridge {
    * are flushed (or reported gone).
    */
   private readonly notifiedCardSessions = new Map<string, Set<string>>();
+  /**
+   * Last user-prompt time per session (from `user/message` events with
+   * source.kind === "user" — the same activity the GUI sidebar uses). Used
+   * for `/s list` ordering and the time column; sessions without a recorded
+   * activity (cold after restart) fall back to their creation time.
+   */
+  private readonly lastActivityBySession = new Map<string, number>();
   /** apiProxy for respond() injection; set by attachMux. */
   private apiProxy: ApiProxySurface | null = null;
   private muxAbort: AbortController | null = null;
@@ -370,9 +377,14 @@ export class WeChatDSHBridge {
 
     const user = this.state.ensureUser(userId, this.config.cwd);
 
-    // Pending approval cards: the next text is (almost always) a decision.
-    const approvals = this.pendingApprovals.get(userId);
-    if (approvals && approvals.length > 0) {
+    // Pending approval cards for the CURRENT session: the next text is
+    // (almost always) a decision. Cards of other sessions do not capture
+    // messages — the user must switch into that session first (a notice
+    // was sent when the card arrived).
+    const approvals = (this.pendingApprovals.get(userId) ?? []).filter(
+      (c) => c.sessionId === user.sessionId,
+    );
+    if (approvals.length > 0) {
       const text = extractText(msg.item_list);
       if (text === null || text === "") {
         await this.sendReply(userId, "⚠️ 当前有权限卡待处理，请用文本回复（1 允许一次 / 2 拒绝，多张卡用 P1=1 P2=2）。");
@@ -382,9 +394,11 @@ export class WeChatDSHBridge {
       return;
     }
 
-    // Pending question cards: the next text is (almost always) the answer.
-    const questions = this.pendingQuestions.get(userId);
-    if (questions && questions.length > 0) {
+    // Pending question cards for the CURRENT session: same policy.
+    const questions = (this.pendingQuestions.get(userId) ?? []).filter(
+      (c) => c.sessionId === user.sessionId,
+    );
+    if (questions.length > 0) {
       const text = extractText(msg.item_list);
       if (text === null || text === "") {
         await this.sendReply(userId, "⚠️ 当前有提问卡待处理，请用文本回复（数字或自定义文字，例如 `Q1=1` 或 `Q1-我的想法`）。");
@@ -519,6 +533,18 @@ export class WeChatDSHBridge {
    * the message lives in `event.data.message`, NOT at the top level.
    */
   handleSessionEvent(sessionId: string, event: { type: string; [k: string]: unknown }): void {
+    // Track last user-prompt activity for every session (not only bound
+    // ones) — the `/s list` recency source, mirroring the GUI sidebar.
+    if (event.type === "user/message") {
+      const data = event.data as { source?: { kind?: string } };
+      if (data?.source?.kind === "user") {
+        this.lastActivityBySession.set(
+          sessionId,
+          typeof event.time === "number" ? event.time : Date.now(),
+        );
+      }
+    }
+
     const user = this.userForAgent(sessionId);
     if (!user) return;
 
@@ -765,10 +791,16 @@ export class WeChatDSHBridge {
    * Tell the user a non-current session has pending cards, once per session
    * (a burst of cards for the same session yields a single notice). The
    * notice names the session; switching into it flushes the cards.
+   *
+   * The dedupe mark is only set when the notice can actually be delivered:
+   * right after a restart there is no context token yet (the bridge cannot
+   * push until the user sends the first message), and marking the session
+   * anyway would swallow every later notice for it.
    */
   private async notifyCardPending(userId: string, sessionId: string): Promise<void> {
     const notified = this.notifiedCardSessions.get(userId) ?? new Set<string>();
     if (notified.has(sessionId)) return;
+    if (!this.token || !this.contextTokens.has(userId)) return;
     notified.add(sessionId);
     this.notifiedCardSessions.set(userId, notified);
     const context = await this.sessionContextLabel(sessionId);
@@ -1177,19 +1209,29 @@ export class WeChatDSHBridge {
           await this.sendReply(userId, `💬 当前工作目录（${user.cwd}）下暂无会话。发送消息即可创建第一个会话。`);
           return;
         }
+        // Cold-start recency recovery: sessions without an in-memory activity
+        // record (e.g. right after a restart) read their last user-prompt
+        // time from the raw log, in parallel; results are cached afterwards.
+        await Promise.all(
+          scoped.map(async (r) => {
+            if (this.lastActivityBySession.has(r.header.id)) return;
+            const t = await this.ops.lastUserMessageTime(r.header.id);
+            if (t !== undefined) this.lastActivityBySession.set(r.header.id, t);
+          }),
+        );
         const recent = scoped
-          .sort((a, b) => b.header.createdAt - a.header.createdAt)
+          .sort((a, b) => this.sessionActivityTime(b) - this.sessionActivityTime(a))
           .slice(0, 20);
         const lines = [cmd.scope === "current"
           ? `💬 最近会话（${user.cwd}，/session switch <编号> 切换）`
-          : "💬 最近会话（/session switch <编号> 切换）"];
+          : "💬 最近会话（按最近活动排序，/session switch <编号> 切换）"];
         for (let i = 0; i < recent.length; i++) {
           const record = recent[i]!;
           const marker = record.header.id === user.sessionId ? " ◀ 当前" : "";
           const title = cleanSessionTitle(
             (await this.ops.readSessionTitle(record.header.id)) ?? record.header.id.slice(0, 12),
           );
-          const when = new Date(record.header.createdAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+          const when = this.formatRelativeTime(this.sessionActivityTime(record));
           // One line per entry: WeChat renders `\n` in BOT text unreliably
           // (entries collapse together), so every field rides the same line
           // and each entry stays identifiable by its `N.` prefix.
@@ -1202,7 +1244,7 @@ export class WeChatDSHBridge {
       }
       case "switch": {
         const sessions = await this.ops.listSessions();
-        const recent = sessions.sort((a, b) => b.header.createdAt - a.header.createdAt);
+        const recent = sessions.sort((a, b) => this.sessionActivityTime(b) - this.sessionActivityTime(a));
         const index = cmd.index;
         if (index < 1 || index > recent.length) {
           await this.sendReply(userId, `⚠️ 编号超出范围（1-${recent.length}）。`);
@@ -1719,6 +1761,24 @@ export class WeChatDSHBridge {
       if (defaultPreset) return `${defaultPreset}（默认）`;
     }
     return preset ?? "（默认）";
+  }
+
+  /**
+   * Recency value for `/s list` ordering and display: the last recorded
+   * user-prompt time, falling back to the session creation time for cold
+   * sessions (no activity observed since this process started).
+   */
+  private sessionActivityTime(record: { header: { id: string; createdAt: number } }): number {
+    return this.lastActivityBySession.get(record.header.id) ?? record.header.createdAt;
+  }
+
+  /** Compact relative time for the `/s list` column (like the GUI sidebar). */
+  private formatRelativeTime(t: number): string {
+    const diff = Date.now() - t;
+    if (diff < 60_000) return "刚刚";
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+    return `${Math.floor(diff / 86_400_000)} 天前`;
   }
 
   /**

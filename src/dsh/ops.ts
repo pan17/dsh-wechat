@@ -77,6 +77,8 @@ export interface WorkspaceRegistry {
 export interface SessionQuery {
   listSessions(): Promise<SessionRecord[]>;
   readTitle(sessionId: string): Promise<{ title?: string } | undefined>;
+  /** Lightweight raw-log event records (ascending seq), for recency recovery. */
+  listEvents(sessionId: string): Promise<{ type: string; time: number }[]>;
 }
 
 export interface LlmService {
@@ -179,6 +181,25 @@ export class DshOps {
     try {
       const snapshot = await query.readTitle(sessionId);
       return snapshot?.title;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Time of the session's last user-prompt event (`user/message`), read from
+   * the raw log. Used to recover recency after a restart, when the in-memory
+   * activity map is empty; undefined when the log holds no user prompt.
+   */
+  async lastUserMessageTime(sessionId: string): Promise<number | undefined> {
+    const query = this.get<SessionQuery>("sessionQuery");
+    if (!query) return undefined;
+    try {
+      const records = await query.listEvents(sessionId);
+      for (let i = records.length - 1; i >= 0; i--) {
+        if (records[i]!.type === "user/message") return records[i]!.time;
+      }
+      return undefined;
     } catch {
       return undefined;
     }
