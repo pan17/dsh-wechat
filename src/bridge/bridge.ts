@@ -32,6 +32,7 @@ import type { WeChatDSHConfig } from "../config.js";
 import {
   detectUnknownSlashCommand,
   formatHelp,
+  parseCompactCommand,
   parseHelpCommand,
   parseModelCommand,
   parseNextCommand,
@@ -45,6 +46,7 @@ import {
   parseStatusCommand,
   parseStopCommand,
   parseWorkspaceCommand,
+  type CompactCommand,
   type ModelCommand,
   type PermCommand,
   type PresetCommand,
@@ -540,6 +542,12 @@ export class WeChatDSHBridge {
       const reasoningCmd = parseReasoningCommand(text);
       if (reasoningCmd) {
         await this.handleReasoningCommand(userId, reasoningCmd);
+        return;
+      }
+
+      const compactCmd = parseCompactCommand(text);
+      if (compactCmd) {
+        await this.handleCompactCommand(userId, user, compactCmd);
         return;
       }
 
@@ -1590,6 +1598,57 @@ export class WeChatDSHBridge {
         await this.sendReply(userId, lines.join("\n"));
         return;
       }
+    }
+  }
+
+  // ─── Compaction ───
+
+  /**
+   * `/compact` — manually trigger one compaction of the current session.
+   *
+   * Dispatches through the global `commands` service so the registered
+   * `dsh-command-compact` handler runs unchanged: this is the same code
+   * path the GUI's command palette uses, with the same `command/run` ↔
+   * `command/done` lifecycle events and the same `ManualCompactionError`
+   * classification. Background: the WeChat slice intentionally reuses the
+   * GUI command surface — sound architectural mirroring, no bridge-owned
+   * error translation to drift out of sync.
+   */
+  private async handleCompactCommand(userId: string, user: UserState, cmd: CompactCommand): Promise<void> {
+    const agent = this.agents.get(user);
+    if (!agent) {
+      await this.sendReply(userId, "⚠️ 当前没有可用会话。先发一条消息或 /session new 创建会话，再 /compact。");
+      return;
+    }
+    // Match the underlying handler's strictness: any trailing input becomes
+    // its usage error message, so the GUI and WeChat render the same reply.
+    if (cmd.extra.length > 0) {
+      await this.sendReply(userId, "⚠️ Usage: /compact (no arguments)");
+      return;
+    }
+    const commands = this.ops.commands();
+    if (!commands) {
+      await this.sendReply(userId, "⚠️ 当前部署未挂载 dsh-command-compact，无法压缩。");
+      return;
+    }
+    const abort = new AbortController();
+    try {
+      const execution = await commands.execute(agent, "/compact", abort.signal);
+      if (!execution) {
+        // `/compact` is a registered name; `execute` returns undefined only on
+        // syntax miss (impossible here) or unknown name. Defensive reply.
+        await this.sendReply(userId, "⚠️ 内部错误: /compact 未注册到 dsh-commands。");
+        return;
+      }
+      const { result } = execution;
+      if (result.kind === "success") {
+        await this.sendReply(userId, `✅ ${result.text ?? "压缩完成"}`);
+      } else {
+        await this.sendReply(userId, `⚠️ ${result.text}`);
+      }
+    } catch (err) {
+      await this.sendReply(userId, `⚠️ 压缩失败: ${String(err)}`);
+      console.error(`[dsh-wechat] /compact failed: ${String(err)}`);
     }
   }
 

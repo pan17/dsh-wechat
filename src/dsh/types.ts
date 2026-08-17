@@ -34,7 +34,7 @@ export interface UserMessage {
 export interface Agent {
   readonly id: string;
   readonly status: "idle" | "running";
-  readonly options?: { provider?: string; model?: string };
+  readonly options: { provider?: string; model?: string };
   /** Session header access: the latest logged request config (dsh-session). */
   session?: {
     /** Durable creation metadata: the recorded agent preset, if any. */
@@ -51,6 +51,13 @@ export interface Agent {
   steer(message: UserMessage): void;
   cancel(cause: string, options?: { keepInbox?: boolean }): void;
   whenIdle(): Promise<void>;
+  /**
+   * Run a non-turn maintenance operation only while the agent is idle. Used by
+   * commands like `/compact` whose handler needs to mutate the surface outside
+   * a turn (the DSH `commands.execute` path forwards the receiving agent to
+   * `ManualCompactAgentContext.runMaintenance`, which goes through this method).
+   */
+  runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;
 }
 
 export interface AgentHandle {

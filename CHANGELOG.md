@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-17
+
+### Added
+
+- `/compact` 微信 slash 命令：手动触发当前会话历史压缩，
+  与 GUI `/compact` 走同一注册 handler（dsh-command-compact），
+  共享 `command/run` ↔ `command/done` 日志生命周期，复用其
+  `ManualCompactionError` 全部分类（busy/cancelled/changed/summary/
+  commit/persistence）的本地化提示，微信不重复实现错误翻译
+
 ## [0.3.2] - 2026-08-17
 
 ### Fixed

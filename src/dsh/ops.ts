@@ -4,6 +4,7 @@
  * checks — no runtime imports of `@deepseek-ai/*` packages.
  */
 
+import type { Agent } from "./types.js";
 import type { BridgeContext } from "./sessions.js";
 
 /** Nominal id of one registered settings namespace (dsh-settings brand). */
@@ -126,6 +127,30 @@ export interface PermissionPresetsService {
   resolve(name: string): { sandbox: string; approval: string; name?: string; description?: string };
   /** Build the client option for a table entry or `custom`. */
   optionOf(name: string): { value: string; name: string; description?: string };
+}
+
+/**
+ * Minimal structural surface of the `commands` service (dsh-commands).
+ * Only the `execute` entry is needed — the bridge mirrors the GUI's
+ * command palette by dispatching each recognized slash command through
+ * the same registry, so the registered handler (e.g. dsh-command-compact)
+ * owns the `command/run` ↔ `command/done` lifecycle and the localized
+ * CommandResult text. We type `commandId` as opaque because the bridge
+ * never correlates across sessions.
+ */
+export interface CommandsService {
+  execute(
+    agent: Agent,
+    line: string,
+    signal: AbortSignal,
+  ): Promise<{ commandId: unknown; result: CommandResultShape } | undefined>;
+}
+
+/** Minimal shape of the handler's normalized result (dsh-commands CommandResult). */
+export interface CommandResultShape {
+  readonly kind: "success" | "error";
+  readonly text?: string;
+  readonly sourceEventSeq?: number;
 }
 
 /** Approximate context occupancy (dsh-token-meter `contextPressure` projection). */
@@ -325,6 +350,18 @@ export class DshOps {
   /** The deployment default permission preset for new sessions (settings-first). */
   permissionDefault(): string | undefined {
     return this.permissionPresets()?.defaultPreset;
+  }
+
+  // ─── Commands ───
+
+  /**
+   * The global `commands` service (dsh-commands). Exposes `execute` to dispatch
+   * slash commands through the same registry the GUI's command palette reads,
+   * so the registered handler — including `command/run` ↔ `command/done`
+   * lifecycle events — runs unchanged for WeChat users.
+   */
+  commands(): CommandsService | undefined {
+    return this.get<CommandsService>("commands");
   }
 
   /**

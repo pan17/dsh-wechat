@@ -127,6 +127,8 @@ export type ReasoningCommand =
   | { kind: "switch"; target: string }
   | { kind: "clear" };
 
+export type CompactCommand = { kind: "compact"; extra: string };
+
 /**
  * Parse `/workspace` (alias `/ws`):
  *   list | status | switch <path|n> | add <path>
@@ -270,6 +272,22 @@ export function parseReasoningCommand(text: string): ReasoningCommand | null {
   return { kind: "switch", target: rest };
 }
 
+/**
+ * Parse `/compact`:
+ *   (bare) | (args)
+ *
+ * The compaction service rejects any extra input with a usage error; we
+ * capture the trailing input verbatim so the handler can echo the same
+ * usage message the registered `dsh-command-compact` handler renders for
+ * the GUI. Bare `/compact` and trailing-whitespace-only inputs are the
+ * two valid forms.
+ */
+export function parseCompactCommand(text: string): CompactCommand | null {
+  const m = text.trim().match(/^\/compact(?:\s+(.*))?$/);
+  if (!m) return null;
+  return { kind: "compact", extra: (m[1] ?? "").trim() };
+}
+
 /** The /help reply. */
 export function formatHelp(): string {
   return [
@@ -283,6 +301,7 @@ export function formatHelp(): string {
     "• /model — list [提供商] | switch <提供商/模型> | status",
     "• /perm (permission) — status | list | switch <名称|编号> | default [名称|编号]（会话权限实时切换；默认写入 DSH 设置，与 GUI 同步）",
     "• /reasoning — 查看/设置推理等级：/reasoning [list|default|<等级>]",
+    "• /compact — 手动触发当前会话历史压缩（与 GUI /compact 等价）",
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
     "• /stop — 中断当前任务",
     "• /next — 继续发送因微信限制被缓存的消息",
