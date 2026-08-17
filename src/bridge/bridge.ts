@@ -18,7 +18,8 @@ import path from "node:path";
 import { login, loadToken, type TokenData } from "../weixin/auth.js";
 import { startMonitor } from "../weixin/monitor.js";
 import { sendTextMessage, sendMediaMessage, splitText } from "../weixin/send.js";
-import { MessageType, UploadMediaType } from "../weixin/types.js";
+import { sendTyping as apiSendTyping, getConfig as apiGetConfig } from "../weixin/api.js";
+import { MessageType, TypingStatus, UploadMediaType } from "../weixin/types.js";
 import type { WeixinMessage } from "../weixin/types.js";
 import { extractText, weixinMessageToPrompt } from "../adapter/inbound.js";
 import { formatForWeChat } from "../adapter/outbound.js";
@@ -60,6 +61,24 @@ const MSG_LIMIT_MAX = 10;
 const MSG_LIMIT_WARN = 7;
 /** How long a session's message-source marker stays valid without a touch. */
 const SURFACE_TTL_MS = 7 * 24 * 60 * 60_000;
+/** typing_ticket cache TTL — re-fetch via getconfig after expiry. */
+const TYPING_TICKET_TTL_MS = 5 * 60_000;
+/**
+ * Periodically re-send TYPING (status=1) while the agent is running, so the
+ * WeChat client's own typing-indicator timeout doesn't hide the indicator
+ * during long turns. WeChat's indicator typically auto-hides within ~10–30s
+ * without a refresh; 10s keeps it consistently visible throughout the turn.
+ */
+const TYPING_KEEPALIVE_MS = 10_000;
+/**
+ * TTL fallback for the typing indicator. The safety timer is refreshed on
+ * every keepalive tick, so under normal operation it never fires. It only
+ * kicks in when the keepalive loop itself stops (e.g. the interval callback
+ * fails repeatedly or some other fault blocks the timer queue) — at which
+ * point we force-clear the typing indicator to avoid a stuck "正在输入".
+ * Matches openclaw's 2-minute safety net.
+ */
+const TYPING_SAFETY_TIMEOUT_MS = 2 * 60_000;
 
 /** A model selection override for one agent (`/model switch` / `/reasoning`). */
 interface ModelOverride {
@@ -178,6 +197,28 @@ export class WeChatDSHBridge {
   /** apiProxy for respond() injection; set by attachMux. */
   private apiProxy: ApiProxySurface | null = null;
   private muxAbort: AbortController | null = null;
+  /**
+   * Per-user typing_ticket cache: the iLink `sendtyping` ticket is short-lived
+   * and tied to the user's current context. We re-fetch via getconfig only on
+   * miss / TTL expiry; otherwise the same ticket is reused across multiple
+   * status changes of the same turn.
+   */
+  private readonly typingTickets = new Map<string, { ticket: string; expiresAt: number }>();
+  /**
+   * Per-user active typing indicator. Tracks which user/session is currently
+   * shown as "正在输入", so we can (a) suppress duplicate TYPING sends on
+   * re-entry, (b) periodically refresh the indicator (TYPING is fire-and-
+   * forget and the WeChat client auto-hides after a few seconds), and
+   * (c) cancel cleanly on turn end / agent error / plugin stop. The
+   * `safetyTimer` is the TTL fallback — it is refreshed by every keepalive
+   * tick and only fires if the keepalive loop itself stops running.
+   */
+  private readonly typingActive = new Map<string, {
+    sessionId: string;
+    startedAt: number;
+    keepAliveTimer: NodeJS.Timeout;
+    safetyTimer: NodeJS.Timeout;
+  }>();
 
   constructor(ctx: BridgeContext, config: WeChatDSHConfig) {
     this.ctx = ctx;
@@ -239,6 +280,122 @@ export class WeChatDSHBridge {
     this.sourceBySession.set(sessionId, { source, at: Date.now() });
   }
 
+  // ─── Typing indicator (iLink sendtyping) ───
+  //
+  // When the agent starts processing a WeChat-bound turn, push a native
+  // "正在输入" status to the WeChat client; refresh it periodically so the
+  // client does not auto-hide it; clear it on turn end, agent error, or
+  // plugin stop. There is NO safety timeout — the indicator mirrors
+  // agent.status exactly and stays on as long as the turn is running,
+  // even through assistant text, tool calls, and approval/question card
+  // waits.
+  //
+  // WeChat iLink requires a fresh typing_ticket per sendtyping call; we
+  // fetch it lazily via /ilink/bot/getconfig and cache it for 5 minutes.
+  // All iLink calls are best-effort: a failed sendtyping never breaks the
+  // message-reply path.
+
+  /**
+   * Resolve a usable typing_ticket for the given user, caching the result
+   * for `TYPING_TICKET_TTL_MS`. Returns undefined when the bot is not
+   * logged in or the iLink call fails (caller treats this as "skip").
+   */
+  private async getTypingTicket(userId: string, contextToken: string): Promise<string | undefined> {
+    const cached = this.typingTickets.get(userId);
+    if (cached && cached.expiresAt > Date.now()) return cached.ticket;
+    if (!this.token) return undefined;
+    try {
+      const resp = await apiGetConfig({
+        baseUrl: this.token.baseUrl,
+        token: this.token.token,
+        ilinkUserId: userId,
+        contextToken,
+      });
+      if (!resp.typing_ticket) return undefined;
+      this.typingTickets.set(userId, {
+        ticket: resp.typing_ticket,
+        expiresAt: Date.now() + TYPING_TICKET_TTL_MS,
+      });
+      return resp.typing_ticket;
+    } catch (err) {
+      this.log(`getconfig for typing_ticket failed: ${String(err)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Best-effort iLink sendtyping call. Swallows all errors so a transient
+   * iLink failure never breaks the surrounding message flow.
+   */
+  private async sendTypingStatus(userId: string, status: 1 | 2): Promise<void> {
+    if (!this.token) return;
+    const contextToken = this.contextTokens.get(userId);
+    if (!contextToken) return;
+    const ticket = await this.getTypingTicket(userId, contextToken);
+    if (!ticket) return;
+    try {
+      await apiSendTyping({
+        baseUrl: this.token.baseUrl,
+        token: this.token.token,
+        body: { ilink_user_id: userId, typing_ticket: ticket, status },
+      });
+    } catch (err) {
+      this.log(`sendtyping(${status}) failed: ${String(err)}`);
+    }
+  }
+
+  /**
+   * Show the typing indicator for `userId` on the bound session. Idempotent:
+   * a second call while the indicator is already active is a no-op. Starts
+   * a periodic refresh (`TYPING_KEEPALIVE_MS`) so the WeChat client does
+   * not auto-hide the indicator during long turns, and a safety timer
+   * (`TYPING_SAFETY_TIMEOUT_MS`) refreshed on every keepalive tick so a
+   * stuck keepalive loop doesn't leave a phantom "正在输入" forever. The
+   * indicator is removed by `endTyping` on turn end, agent error, plugin
+   * stop, or (as a safety net) when the keepalive loop itself stops.
+   */
+  private beginTyping(userId: string, sessionId: string): void {
+    if (this.typingActive.has(userId)) return;
+    // The safety timer is captured by the closure so each keepalive tick can
+    // clearTimeout(stale) + setTimeout(new) to refresh it. endTyping clears
+    // the latest one via `active.safetyTimer`; if a tick has already swapped
+    // in a newer handle, `clearTimeout` on the stale one is a no-op.
+    let safetyTimer: NodeJS.Timeout = setTimeout(() => {
+      this.endTyping(userId, "safety-timeout");
+    }, TYPING_SAFETY_TIMEOUT_MS);
+    const refreshSafetyTimer = (): void => {
+      clearTimeout(safetyTimer);
+      safetyTimer = setTimeout(() => {
+        this.endTyping(userId, "safety-timeout");
+      }, TYPING_SAFETY_TIMEOUT_MS);
+    };
+    const keepAliveTimer = setInterval(() => {
+      void this.sendTypingStatus(userId, TypingStatus.TYPING);
+      refreshSafetyTimer();
+    }, TYPING_KEEPALIVE_MS);
+    this.typingActive.set(userId, {
+      sessionId,
+      startedAt: Date.now(),
+      keepAliveTimer,
+      safetyTimer,
+    });
+    void this.sendTypingStatus(userId, TypingStatus.TYPING);
+  }
+
+  /**
+   * Clear the typing indicator for `userId`. Idempotent: no-op when nothing
+   * is active. `reason` is recorded in the bridge log only.
+   */
+  private endTyping(userId: string, reason: string): void {
+    const active = this.typingActive.get(userId);
+    if (!active) return;
+    clearInterval(active.keepAliveTimer);
+    clearTimeout(active.safetyTimer);
+    this.typingActive.delete(userId);
+    void this.sendTypingStatus(userId, TypingStatus.CANCEL);
+    this.log(`typing ended for ${userId} (${reason})`);
+  }
+
   /** Start the bridge: resume with a stored token or begin QR login. */
   async start(): Promise<void> {
     this.token = loadToken(this.config.storageDir);
@@ -254,6 +411,11 @@ export class WeChatDSHBridge {
     this.monitorAbort?.abort();
     this.monitorAbort = null;
     this.stopMux();
+    // Clear every active typing indicator so a disconnecting bridge does
+    // not leave a phantom "正在输入" on any user's chat.
+    for (const userId of [...this.typingActive.keys()]) {
+      this.endTyping(userId, "plugin-stop");
+    }
   }
 
   /**
@@ -604,12 +766,17 @@ export class WeChatDSHBridge {
       const data = event.data as { target?: string; inserted?: Array<{ id?: string }> };
       if (data?.target === "next-turn") {
         const inserted = data.inserted ?? [];
-        if (inserted.length > 0) {
-          const isWechat = inserted.some(
-            (m) => typeof m?.id === "string" && m.id.startsWith("wx-msg-"),
-          );
-          this.markSessionSource(sessionId, isWechat ? "wechat" : "gui");
-        }
+        const isWechat = inserted.some(
+          (m) => typeof m?.id === "string" && m.id.startsWith("wx-msg-"),
+        );
+        this.markSessionSource(sessionId, isWechat ? "wechat" : "gui");
+        // Trigger the native "正在输入" indicator for WeChat-bound turns.
+        // Any next-turn splice on a WeChat-bound session means the agent is
+        // about to run (agent.status flips to "running") — show typing
+        // regardless of whether the trigger message came from WeChat or the
+        // GUI; the WeChat-bound user is waiting either way.
+        const typingUser = this.userForAgent(sessionId);
+        if (typingUser) this.beginTyping(typingUser.userId, sessionId);
       }
     }
 
@@ -647,6 +814,10 @@ export class WeChatDSHBridge {
           .map((b) => b.text)
           .join("\n");
         if (!text) return;
+        // Typing indicator stays on through the whole turn — we do NOT
+        // cancel here. agent.status is still "running" while text is being
+        // produced; the indicator mirrors that status and is only removed
+        // on turn/end / agent/error / plugin stop.
         if (user.silent) {
           const buffer = this.silentBuffers.get(sessionId) ?? [];
           buffer.push(text);
@@ -663,6 +834,10 @@ export class WeChatDSHBridge {
           // Silent mode: only the last text of the turn reaches WeChat.
           void this.sendReply(user.userId, buffer[buffer.length - 1]!);
         }
+        // Turn finished → agent.status flips back to "idle". Always clear
+        // the typing indicator here, regardless of whether any text was
+        // produced.
+        this.endTyping(user.userId, "turn-end");
         break;
       }
     }
@@ -672,6 +847,7 @@ export class WeChatDSHBridge {
   handleAgentError(agentId: string, error: unknown): void {
     const user = this.userForAgent(agentId);
     if (!user) return;
+    this.endTyping(user.userId, "agent-error");
     void this.sendReply(user.userId, `⚠️ Agent 出错: ${String(error)}`).catch(() => {});
   }
 
@@ -769,6 +945,8 @@ export class WeChatDSHBridge {
         this.pendingApprovals.set(userId, list);
         // Show the card immediately only when it belongs to the user's
         // current session; otherwise notify once and flush on switch.
+        // The typing indicator stays on through card waits — agent.status
+        // is still "running" until turn/end.
         const userState = this.state.getUser(userId);
         if (userState?.sessionId === sessionId) {
           void this.sendApprovalCard(userId, card, list.length).catch(() => {});
@@ -814,7 +992,8 @@ export class WeChatDSHBridge {
         const list = this.pendingQuestions.get(userId) ?? [];
         list.push(card);
         this.pendingQuestions.set(userId, list);
-        // Same current-session policy as approval cards.
+        // Same current-session policy as approval cards. Typing indicator
+        // stays on through card waits — agent.status is still "running".
         const userState = this.state.getUser(userId);
         if (userState?.sessionId === sessionId) {
           void this.sendQuestionCard(userId, card, questions, list.length).catch(() => {});
