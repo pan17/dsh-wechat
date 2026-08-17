@@ -91,7 +91,7 @@ export interface LlmService {
   listProviders(): ProviderInfo[];
   listModels(provider: string): Promise<ModelInfo[]>;
   /** Exact-route metadata: context window, reasoning efforts, etc. */
-  resolveModel(provider: string, model: string): Promise<{ reasoning?: ModelReasoningInfo }>;
+  resolveModelInfo(provider: string, model: string): Promise<{ reasoning?: ModelReasoningInfo }>;
 }
 
 export interface AgentPresetsService {
@@ -242,7 +242,7 @@ export class DshOps {
     const llm = this.get<LlmService>("llm");
     if (!llm) return undefined;
     try {
-      const info = await llm.resolveModel(provider, model);
+      const info = await llm.resolveModelInfo(provider, model);
       return info.reasoning;
     } catch {
       return undefined;

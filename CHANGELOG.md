@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-17
+
+### Fixed
+
+- `/reasoning` 命令误用 `llm.resolveModel(...)` 拿到旧版 llm 服务接口；
+  `dsh-llm@0.1.0-rc.6` 的 `LlmRuntime` 只暴露 `resolveModelInfo`，旧名调用
+  抛 TypeError 被 try/catch 吞掉，永远显示"当前模型不支持推理等级"
+  （Web GUI 同款命令正常），改为 `resolveModelInfo` 后与 GUI 数据同源
+
 ## [0.3.1] - 2026-08-15
 
 ### Fixed
