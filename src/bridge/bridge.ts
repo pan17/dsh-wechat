@@ -961,13 +961,10 @@ export class WeChatDSHBridge {
         for (const [userId, list] of [...this.pendingApprovals.entries()]) {
           const entry = list.find((c) => c.approvalId === approvalId);
           if (!entry) continue;
-          clearTimeout(entry.timer);
-          this.pendingApprovals.set(
-            userId,
-            list.filter((c) => c.approvalId !== approvalId),
-          );
+          const toolName = entry.toolName;
+          this.removeApprovalCard(userId, entry.rpcId);
           const label = outcome === "allowed-once" ? "✅ 已允许" : outcome === "rejected" ? "⛔ 已拒绝" : "🚫 已取消";
-          void this.sendReply(userId, `🔒 权限请求结果：${label}（${entry.toolName}）`).catch(() => {});
+          void this.sendReply(userId, `🔒 权限请求结果：${label}（${toolName}）`).catch(() => {});
           break;
         }
         break;
@@ -1008,11 +1005,7 @@ export class WeChatDSHBridge {
         for (const [userId, list] of [...this.pendingQuestions.entries()]) {
           const entry = list.find((c) => c.rpcId === questionRpcId);
           if (!entry) continue;
-          clearTimeout(entry.timer);
-          this.pendingQuestions.set(
-            userId,
-            list.filter((c) => c.rpcId !== questionRpcId),
-          );
+          this.removeQuestionCard(userId, entry.rpcId);
           void this.sendReply(userId, outcome === "answered" ? "✅ 提问已回答。" : "🚫 提问已取消。").catch(() => {});
           break;
         }
@@ -1084,6 +1077,24 @@ export class WeChatDSHBridge {
       userId,
       `${context}\n🔔 有 ${kinds}待处理，发送 /session switch <编号> 切换到该会话后查看。`,
     );
+  }
+
+  /**
+   * Drop the notified mark for (userId, sessionId) once no cards are pending
+   * for that session — so the next batch of cards produces a fresh WeChat
+   * notification. Burst dedupe within a single batch is preserved: this only
+   * clears when the last card of a session is removed (any path: GUI/WeChat
+   * resolve, timeout, /rp, /rq). Called from removeApprovalCard /
+   * removeQuestionCard so every removal path is covered automatically.
+   */
+  private clearNotifiedIfNoPending(userId: string, sessionId: string): void {
+    const approvals = (this.pendingApprovals.get(userId) ?? [])
+      .filter((c) => c.sessionId === sessionId).length;
+    const questions = (this.pendingQuestions.get(userId) ?? [])
+      .filter((c) => c.sessionId === sessionId).length;
+    if (approvals === 0 && questions === 0) {
+      this.notifiedCardSessions.get(userId)?.delete(sessionId);
+    }
   }
 
   /**
@@ -1209,10 +1220,13 @@ export class WeChatDSHBridge {
     const list = this.pendingApprovals.get(userId);
     if (!list) return;
     const entry = list.find((c) => c.rpcId === rpcId);
-    if (entry) clearTimeout(entry.timer);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    const sessionId = entry.sessionId;
     const next = list.filter((c) => c.rpcId !== rpcId);
     if (next.length > 0) this.pendingApprovals.set(userId, next);
     else this.pendingApprovals.delete(userId);
+    this.clearNotifiedIfNoPending(userId, sessionId);
   }
 
   /** `/rp` — reject every pending approval card of the current session. */
@@ -1354,10 +1368,13 @@ export class WeChatDSHBridge {
     const list = this.pendingQuestions.get(userId);
     if (!list) return;
     const entry = list.find((c) => c.rpcId === rpcId);
-    if (entry) clearTimeout(entry.timer);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    const sessionId = entry.sessionId;
     const next = list.filter((c) => c.rpcId !== rpcId);
     if (next.length > 0) this.pendingQuestions.set(userId, next);
     else this.pendingQuestions.delete(userId);
+    this.clearNotifiedIfNoPending(userId, sessionId);
   }
 
   // ─── Slash command handlers ───

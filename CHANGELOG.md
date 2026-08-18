@@ -11,6 +11,15 @@
   未绑定会话的消息回退到首个已知微信用户（保持单用户部署默认行为，
   与既有 `recipientForSession` 一致）；无任何微信用户时返回明确错误
 
+### Fixed
+
+- 非当前会话的卡提醒永久吞掉的 bug：之前
+  `notifiedCardSessions` 只在 `/session switch` 进该会话时清掉，
+  在 GUI 端 / 微信回复 / 超时 / `/rp` `/rq` 解决卡时不会清，导致
+  后续同一会话的提问/权限卡永远不再发微信提醒。改为：每次
+  `removeApprovalCard` / `removeQuestionCard` 后，若该会话已无
+  pending 卡则清掉标记——同一批次仍然只提醒一次，跨批次会再提醒
+
 ## [0.4.0] - 2026-08-17
 
 ### Added
