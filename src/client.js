@@ -31,7 +31,8 @@ window.__ModuleLoader__.load({
 .wx_btn{cursor:pointer;font-size:12px;padding:5px 12px;border-radius:8px;border:1px solid rgba(128,128,128,.5);background:transparent;color:inherit}
 .wx_btn:hover{background:rgba(128,128,128,.12)}
 .wx_btn:disabled{opacity:.5;cursor:default}
-.wx_btn.primary{border-color:transparent;background:var(--dsw-alias-button-primary-fill,#2563eb);color:var(--dsw-alias-brand-primary-invert,#fff)}
+.wx_btn.primary{border-color:transparent;background:#1976d2;color:#fff}
+.wx_btn.primary:hover{background:#1565c0}
 .wx_btn.danger{border-color:#c62828;color:#c62828}
 .wx_meta{font-size:12px;color:var(--dsw-alias-label-secondary,#888)}
 .wx_err{color:#c62828;font-size:12px}

@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-18
+
+### Added
+
+- iLink `sendtyping` 原生「正在输入」提示：agent 处理一轮时微信端显示
+  native typing indicator，与 `/status` 的 `agent.status` 同步——开启于
+  `agent/inbox/spliced`（next-turn，无论消息来源是微信还是 GUI，对绑定的
+  微信用户来说都在等回复），关闭于 `turn/end` / `agent/error` /
+  `bridge.stop()`。长轮次每 10 秒自动续期 typing 防止微信客户端自动隐藏；
+  2 分钟 TTL safety net 兜底。`getconfig` 拿 `typing_ticket`，缓存 5 分钟；
+  所有失败 best-effort 吞掉，不影响主流程
+
 ### Changed
 
 - `send_wechat` 工具解除会话绑定要求：任何会话的 agent 都能调用；
@@ -19,6 +31,10 @@
   后续同一会话的提问/权限卡永远不再发微信提醒。改为：每次
   `removeApprovalCard` / `removeQuestionCard` 后，若该会话已无
   pending 卡则清掉标记——同一批次仍然只提醒一次，跨批次会再提醒
+- 设置页 → WeChat 的「保存配置」按钮显示为纯黑（无文字可见）：
+  原样式用 `--dsw-alias-button-primary-fill` / `--dsw-alias-brand-primary-invert`
+  主题变量，部分主题下两者都解析为黑色，导致文字与底色同色。改为
+  直接用 `#1976d2` / `#fff` 高对比度配色，不再依赖主题变量
 
 ## [0.4.0] - 2026-08-17
 
