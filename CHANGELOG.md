@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-18
+
+### Fixed
+
+- 微信/GUI 提示词自动注入失效：`agent/inbox/spliced` 事件在每条消息的
+  生命周期内会发两次——enqueue（`inserted=[wx-msg-...]`）和
+  `inbox.claim`（`inserted=[]`，纯删除）；旧逻辑在第二次 splice 里把
+  刚设的 `"wechat"` 标记用 `markSessionSource("gui")` 覆盖掉，导致
+  `dsh-wechat-surface` 的 `text` 回调在 prompt assembly 时永远读到
+  `"gui"` → 微信消息也返回空上下文 → 两端都看不到提示词。修复：只有
+  `inserted.length > 0`（真正有新消息入队）时才更新 source 标记，
+  `inbox.claim` 的纯删除 splice 不再触碰 marker
+
+- 动态上下文 `text` 回调改为三路取 sessionId（`agent.session.header.id
+  ?? agent.session.id ?? agent.id`），兼容 DSH Agent 形状漂移；
+  `surface-prompt.test.ts` 新增 enqueue+claim 的 regression test
+  验证 `wechat → claim → 仍然 wechat` 不会翻成 `gui`
+
 ## [0.4.1] - 2026-08-18
 
 ### Added

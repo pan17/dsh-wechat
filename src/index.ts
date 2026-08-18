@@ -175,9 +175,14 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
         order: 50,
         text: (context) => {
           const agent = (context as { agent?: unknown })?.agent as
-            | { session?: { header?: { id?: string } } }
+            | { id?: string; session?: { id?: string; header?: { id?: string } } }
             | undefined;
-          const sessionId = agent?.session?.header?.id;
+          // Three candidate id paths — the master DSH Agent carries the session
+          // id on `agent.id` (also via `Session.id` / `SessionHeader.id`).
+          // Older or forked shapes may only expose one of them; the cascade
+          // keeps this dynamic context working when DSH's Agent shape drifts.
+          const sessionId =
+            agent?.session?.header?.id ?? agent?.session?.id ?? agent?.id;
           const source = sessionId ? bridge.surfaceSourceFor(sessionId) : undefined;
           return source === "wechat"
             ? "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（纯文本、适度使用 emoji、避免过长的表格）。"

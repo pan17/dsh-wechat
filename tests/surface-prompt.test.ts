@@ -315,4 +315,67 @@ describe("message-source tracking (dynamic surface prompt)", () => {
     const anyBridge = bridge as unknown as { surfaceSourceFor(s: string): string | undefined };
     expect(anyBridge.surfaceSourceFor("never-touched")).toBeUndefined();
   });
+
+  it("a pure-deletion next-turn splice (the agent-loop's claim) does NOT overwrite the marker", () => {
+    // Regression: the agent-loop emits TWO `agent/inbox/spliced` events per
+    // followup. The first (enqueue, inserted=[wx-msg-...]) correctly sets
+    // the marker to "wechat". The second (inbox.claim pulling the message
+    // out of next-turn for processing, inserted=[]) used to overwrite it
+    // with "gui" because the handler treated an empty `inserted` array the
+    // same as "no wx-msg- prefix → gui". Prompt assembly then read "gui"
+    // and hid the WeChat surface prompt for every turn.
+    const anyBridge = bridge as unknown as {
+      state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
+      handleSessionEvent(s: string, e: unknown): void;
+      surfaceSourceFor(s: string): string | undefined;
+    };
+    anyBridge.state.ensureUser("u1", "C:\\work");
+    anyBridge.state.update("u1", { sessionId: "wx-s1" });
+
+    // Enqueue — what `forwardToAgent` + the inbox.append splice look like.
+    anyBridge.handleSessionEvent("wx-s1", {
+      type: "agent/inbox/spliced",
+      seq: 1,
+      time: Date.now(),
+      data: {
+        target: "next-turn",
+        start: 0,
+        removedCount: 0,
+        inserted: [{ id: "wx-msg-claim-test", role: "user" }],
+      },
+    });
+    expect(anyBridge.surfaceSourceFor("wx-s1")).toBe("wechat");
+
+    // Claim — what the agent-loop's inbox.claim emits: same target, but
+    // removedCount=1 with inserted=[] (pure deletion). Must NOT flip the
+    // marker; this is the regression case.
+    anyBridge.handleSessionEvent("wx-s1", {
+      type: "agent/inbox/spliced",
+      seq: 2,
+      time: Date.now(),
+      data: {
+        target: "next-turn",
+        start: 0,
+        removedCount: 1,
+        inserted: [],
+      },
+    });
+    expect(anyBridge.surfaceSourceFor("wx-s1")).toBe("wechat");
+
+    // A subsequent GUI-typed splice still flips it, proving the marker is
+    // still mutable through this channel — the fix is "skip pure
+    // deletions", not "freeze the marker on next-turn".
+    anyBridge.handleSessionEvent("wx-s1", {
+      type: "agent/inbox/spliced",
+      seq: 3,
+      time: Date.now(),
+      data: {
+        target: "next-turn",
+        start: 0,
+        removedCount: 0,
+        inserted: [{ id: "18454289-7187-4009-8000-000000000000", role: "user" }],
+      },
+    });
+    expect(anyBridge.surfaceSourceFor("wx-s1")).toBe("gui");
+  });
 });

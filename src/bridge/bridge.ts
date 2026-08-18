@@ -766,15 +766,25 @@ export class WeChatDSHBridge {
       const data = event.data as { target?: string; inserted?: Array<{ id?: string }> };
       if (data?.target === "next-turn") {
         const inserted = data.inserted ?? [];
-        const isWechat = inserted.some(
-          (m) => typeof m?.id === "string" && m.id.startsWith("wx-msg-"),
-        );
-        this.markSessionSource(sessionId, isWechat ? "wechat" : "gui");
+        // Only update the surface marker when the splice actually carries new
+        // messages. A pure deletion (`inserted.length === 0`, `removedCount > 0`)
+        // is the agent-loop's `inbox.claim` pulling the message out of
+        // next-turn for processing — it would otherwise overwrite the just-
+        // written "wechat" marker with "gui" before prompt assembly reads it
+        // (see commit history: this masked WeChat→GUI as "gui" for every turn).
+        if (inserted.length > 0) {
+          const isWechat = inserted.some(
+            (m) => typeof m?.id === "string" && m.id.startsWith("wx-msg-"),
+          );
+          this.markSessionSource(sessionId, isWechat ? "wechat" : "gui");
+        }
         // Trigger the native "正在输入" indicator for WeChat-bound turns.
         // Any next-turn splice on a WeChat-bound session means the agent is
         // about to run (agent.status flips to "running") — show typing
         // regardless of whether the trigger message came from WeChat or the
-        // GUI; the WeChat-bound user is waiting either way.
+        // GUI; the WeChat-bound user is waiting either way. The pure-claim
+        // splice is included too: agent.status is already "running" by then
+        // and `beginTyping` is idempotent.
         const typingUser = this.userForAgent(sessionId);
         if (typingUser) this.beginTyping(typingUser.userId, sessionId);
       }
