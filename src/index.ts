@@ -83,7 +83,9 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
       toolsService.register({
         name: "send_wechat",
         description:
-          "Send a text message or a local file to the WeChat user chatting with this session. " +
+          "Send a text message or a local file to a WeChat user. " +
+          "If the calling session is bound to a WeChat user, the message goes to that user; " +
+          "otherwise it goes to the first known WeChat user (single-user deployments are the norm). " +
           "Use this to proactively push results, confirmations, or files to WeChat.",
         parameters: {
           type: "object",

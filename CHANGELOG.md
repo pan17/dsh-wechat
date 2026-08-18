@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `send_wechat` 工具解除会话绑定要求：任何会话的 agent 都能调用；
+  未绑定会话的消息回退到首个已知微信用户（保持单用户部署默认行为，
+  与既有 `recipientForSession` 一致）；无任何微信用户时返回明确错误
+
 ## [0.4.0] - 2026-08-17
 
 ### Added

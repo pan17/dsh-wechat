@@ -180,7 +180,7 @@ npm test         # vitest（64 个用例：splitText/格式化/解析/帧处理/
   处理——这是唯一工程差异。
 - 帧流 `events.mux`/`respond` 是 ApiProxy 正式契约；若 DSH 版本调整帧
   结构，按契约适配即可。
-- `send_wechat` 工具对所有 agent 可见；非微信绑定会话调用会返回错误提示。
+- `send_wechat` 工具对所有 agent 可见；任何会话的 agent 都能调用——绑定会话发送到绑定用户，未绑定会话回退到首个已知微信用户（单用户部署默认行为）。
 - `/preset switch` 遵循 DSH 约束：只有未产生任何内容的会话才能当场
   `recompose`；已有内容的会话会提示 Preset 应用于下一个新会话。默认
   Preset 本身写入 DSH 设置文档（`agent-presets` namespace），GUI 设置

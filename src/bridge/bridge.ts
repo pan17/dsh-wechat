@@ -1113,18 +1113,21 @@ export class WeChatDSHBridge {
     this.notifiedCardSessions.get(userId)?.delete(sessionId);
   }
 
-  /** The WeChat user a card for `sessionId` goes to: its bound user, else the most recent active user. */
-  private recipientForSession(sessionId: string): string | undefined {    const bound = this.userForAgent(sessionId);
-    if (bound) return bound.userId;
-    let latest: { userId: string; time: number } | undefined;
-    for (const [userId, token] of this.contextTokens) {
-      // contextTokens has no timestamp; fall back to last set order via insertion.
-      latest = { userId, time: 0 };
-    }
-    void latest;
-    // Prefer the first known user (single-user deployments are the norm).
-    const users = this.state.all();
-    return users[0]?.userId;
+  /**
+   * Resolve the WeChat user for a calling DSH agent id. Prefers the user
+   * bound to this agent (session) id; otherwise falls back to the first
+   * known user (single-user deployments are the norm). Returns undefined
+   * only when no user has ever interacted with the bridge.
+   */
+  private resolveUserForAgent(agentId: string): UserState | undefined {
+    const bound = this.userForAgent(agentId);
+    if (bound) return bound;
+    return this.state.all()[0];
+  }
+
+  /** The WeChat user a card for `sessionId` goes to: its bound user, else the first known user. */
+  private recipientForSession(sessionId: string): string | undefined {
+    return this.resolveUserForAgent(sessionId)?.userId;
   }
 
   private isBoundSession(sessionId: string): boolean {
@@ -2164,13 +2167,16 @@ export class WeChatDSHBridge {
   // ─── send-wechat tool ───
 
   /**
-   * Handle the `send_wechat` tool: push text or a local file to the
-   * bound WeChat user. Returns a plain JSON value for the tool result.
+   * Handle the `send_wechat` tool: push text or a local file to a
+   * WeChat user. The recipient is the user bound to the calling agent
+   * (session), or — when the agent has no binding — the first known
+   * WeChat user (single-user deployments are the norm). Returns a plain
+   * JSON value for the tool result.
    */
   async handleSendWeChat(agentId: string, args: { text?: string; file_path?: string }): Promise<{ ok: boolean; message: string }> {
-    const user = this.userForAgent(agentId);
+    const user = this.resolveUserForAgent(agentId);
     if (!user) {
-      return { ok: false, message: "no WeChat user is bound to this session" };
+      return { ok: false, message: "no WeChat user has interacted yet; a WeChat message must arrive before send_wechat can be used" };
     }
     const contextToken = this.contextTokens.get(user.userId);
     if (!contextToken) {
