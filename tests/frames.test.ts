@@ -9,15 +9,19 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
+const sendTextMessage = vi.fn().mockResolvedValue(undefined);
+const sendMediaMessage = vi.fn().mockResolvedValue(undefined);
+
 vi.mock("../src/weixin/send.js", () => ({
-  sendTextMessage: vi.fn().mockResolvedValue(undefined),
-  sendMediaMessage: vi.fn().mockResolvedValue(undefined),
+  sendTextMessage: (...args: unknown[]) => sendTextMessage(...args),
+  sendMediaMessage: (...args: unknown[]) => sendMediaMessage(...args),
   splitText: (text: string, maxLen: number) =>
     text.length <= maxLen ? [text] : [text.slice(0, maxLen), text.slice(maxLen)],
 }));
 
 import { WeChatDSHBridge, type ApiProxySurface } from "../src/bridge/bridge.js";
 import { defaultConfig } from "../src/config.js";
+import { MessageType } from "../src/weixin/types.js";
 
 function makeBridge() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-frame-"));
@@ -189,5 +193,156 @@ describe("frame-driven question cards", () => {
     expect(respondMock).toHaveBeenCalledTimes(1);
     const call = respondMock.mock.calls[0]![0] as { result: { ok: false; error: { code: string } } };
     expect(call.result).toEqual({ ok: false, error: { code: "cancelled" } });
+  });
+});
+
+/** A bare user text message, mirroring forwarding.test.ts's helper. */
+function userTextMessage(text: string) {
+  return {
+    message_type: MessageType.USER,
+    from_user_id: "u1",
+    context_token: "tok",
+    item_list: [{ type: 1, text_item: { text } }],
+  };
+}
+
+describe("card-bypass for slash commands", () => {
+  let bridge: WeChatDSHBridge;
+  let respondMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    bridge = makeBridge();
+    respondMock = vi.fn().mockResolvedValue({ accepted: true });
+    const api: ApiProxySurface = {
+      respond: respondMock as never,
+      events: { mux: () => (async function* () {})() },
+    };
+    bridge.attachMux(api);
+  });
+
+  it("question card + /next flushes cache and leaves the card pending", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+      outboundCache: Map<string, unknown[]>;
+      pendingQuestions: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    anyBridge.outboundCache.set("u1", [{ kind: "text", text: "cached" }]);
+    await anyBridge.handleMessage(userTextMessage("/next"));
+    // /next flushed the cache to WeChat.
+    expect(sendTextMessage).toHaveBeenCalled();
+    // The card was NOT answered.
+    expect(respondMock).not.toHaveBeenCalled();
+    expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
+  });
+
+  it("approval card + /next flushes cache and leaves the card pending", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+      outboundCache: Map<string, unknown[]>;
+      pendingApprovals: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(approvalFrame("a-rpc", "a-id", "pwsh"));
+    anyBridge.outboundCache.set("u1", [{ kind: "text", text: "cached" }]);
+    await anyBridge.handleMessage(userTextMessage("/next"));
+    expect(sendTextMessage).toHaveBeenCalled();
+    expect(respondMock).not.toHaveBeenCalled();
+    expect(anyBridge.pendingApprovals.get("u1")?.length).toBe(1);
+  });
+
+  it("question card + /status shows status and leaves the card pending", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+      pendingQuestions: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    await anyBridge.handleMessage(userTextMessage("/status"));
+    expect(sendTextMessage).toHaveBeenCalled();
+    expect(respondMock).not.toHaveBeenCalled();
+    expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
+  });
+
+  it("question card + /help shows help and leaves the card pending", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+      pendingQuestions: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    await anyBridge.handleMessage(userTextMessage("/help"));
+    // /help prints the help text via sendTextMessage.
+    expect(sendTextMessage).toHaveBeenCalled();
+    expect(respondMock).not.toHaveBeenCalled();
+    expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
+  });
+
+  it("question card + /rq still rejects (card-specific command stays)", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+      pendingQuestions: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    await anyBridge.handleMessage(userTextMessage("/rq"));
+    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(anyBridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
+  });
+
+  it("approval card + /rp still rejects (card-specific command stays)", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+      pendingApprovals: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(approvalFrame("a-rpc", "a-id", "pwsh"));
+    await anyBridge.handleMessage(userTextMessage("/rp"));
+    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(anyBridge.pendingApprovals.get("u1") ?? []).toHaveLength(0);
+  });
+
+  it("plain text still answers a pending question card (existing behaviour)", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+      pendingQuestions: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    await anyBridge.handleMessage(userTextMessage("1"));
+    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(anyBridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
+  });
+
+  it("unknown slash command still answers a pending question card", async () => {
+    // Unrecognized slash commands fall through to parseQuestionReply and
+    // are submitted as the question's custom-text answer — the bridge's
+    // "unknown slash command" hint is only emitted in the non-card path.
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    await anyBridge.handleMessage(userTextMessage("/foobar"));
+    expect(respondMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("empty text still triggers the card-handler hint (bypassCard is false)", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    await anyBridge.handleMessage({
+      message_type: MessageType.USER,
+      from_user_id: "u1",
+      context_token: "tok",
+      item_list: [{ type: 2 /* IMAGE — extractText skips non-text */ }],
+    });
+    // Empty text + pending question → hint message, no card answer.
+    expect(sendTextMessage).toHaveBeenCalled();
+    expect(respondMock).not.toHaveBeenCalled();
   });
 });

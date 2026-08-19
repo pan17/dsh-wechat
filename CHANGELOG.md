@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-19
+
+### Fixed
+
+- 提问/审批卡待处理时输入 slash 命令会被吞为卡片回复：
+  `handleMessage` 在收到 `question/requested` 或 `approval/requested` 帧后
+  把下一条文本当成卡片答案（`handleQuestionReply` /
+  `handleApprovalReply`）。之前只有 `/help`/`/rp`/`/rq`/`/stop`（仅
+  question）有"提前命令"分支，其它已识别的管理命令会被强解释为卡片
+  答案——`/next` 在提问卡上被当成 custom-text 答案提交给 agent，
+  `/next` 在审批卡上变成"unrecognized reply"警告。修复：新增
+  `isBypassSlashCommand(text)` 把所有管理命令（`/next`、`/silent`、
+  `/status`、`/workspace`、`/session`、`/preset`、`/model`、`/perm`、
+  `/reasoning`、`/compact`、`/help`）纳入 bypass 集合；在
+  `handleMessage` 顶部统一算 `bypassCard`，两个卡分支前置条件追加
+  `&& !bypassCard` 让命令走原有 slash 命令解析路径。`/rp`、`/rq`、
+  `/stop` 仍是卡专属语义，留在卡片处理器里保持原行为。
+
 ## [0.4.2] - 2026-08-18
 
 ### Fixed

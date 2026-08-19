@@ -23,6 +23,7 @@ import {
   parseWorkspaceCommand,
   detectUnknownSlashCommand,
   formatHelp,
+  isBypassSlashCommand,
 } from "../src/bridge/slash.js";
 import { StateStore } from "../src/state.js";
 import { createUserMessage } from "../src/dsh/messages.js";
@@ -171,6 +172,52 @@ describe("slash parsers", () => {
     expect(help).toContain("/silent");
     expect(help).toContain("/stop");
     expect(help).toContain("/next");
+  });
+});
+
+describe("isBypassSlashCommand", () => {
+  it("flags every non-card management command", () => {
+    // /help is included: its only effect is "print the help text", which
+    // handleMessage already handles. The two duplicate `parseHelpCommand`
+    // priority branches in the card handlers become dead code once /help
+    // bypasses.
+    expect(isBypassSlashCommand("/help")).toBe(true);
+    expect(isBypassSlashCommand("/h")).toBe(true);
+    expect(isBypassSlashCommand("/?")).toBe(true);
+    expect(isBypassSlashCommand("/next")).toBe(true);
+    expect(isBypassSlashCommand("/silent on")).toBe(true);
+    expect(isBypassSlashCommand("/silent")).toBe(true);
+    expect(isBypassSlashCommand("/sl off")).toBe(true);
+    expect(isBypassSlashCommand("/status")).toBe(true);
+    expect(isBypassSlashCommand("/workspace list")).toBe(true);
+    expect(isBypassSlashCommand("/ws switch 1")).toBe(true);
+    expect(isBypassSlashCommand("/session new")).toBe(true);
+    expect(isBypassSlashCommand("/s list current")).toBe(true);
+    expect(isBypassSlashCommand("/preset list")).toBe(true);
+    expect(isBypassSlashCommand("/p switch build")).toBe(true);
+    expect(isBypassSlashCommand("/model list")).toBe(true);
+    expect(isBypassSlashCommand("/perm status")).toBe(true);
+    expect(isBypassSlashCommand("/permission list")).toBe(true);
+    expect(isBypassSlashCommand("/reasoning high")).toBe(true);
+    expect(isBypassSlashCommand("/compact")).toBe(true);
+    expect(isBypassSlashCommand("/compact extra")).toBe(true);
+  });
+
+  it("returns false for card-specific commands and plain text", () => {
+    // /rp, /rq: card-management commands (reject all pending cards).
+    expect(isBypassSlashCommand("/rp")).toBe(false);
+    expect(isBypassSlashCommand("/reject-permission")).toBe(false);
+    expect(isBypassSlashCommand("/rq")).toBe(false);
+    expect(isBypassSlashCommand("/reject-question")).toBe(false);
+    // /stop is intentionally NOT in the bypass set: it lives in the
+    // question-card priority branch (stop-agent + reject-question) and
+    // changing that behaviour is out of scope for the bypass fix.
+    expect(isBypassSlashCommand("/stop")).toBe(false);
+    // Plain text and unrecognized commands stay as card answers.
+    expect(isBypassSlashCommand("")).toBe(false);
+    expect(isBypassSlashCommand("hello")).toBe(false);
+    expect(isBypassSlashCommand("1")).toBe(false);
+    expect(isBypassSlashCommand("/unknown")).toBe(false);
   });
 });
 

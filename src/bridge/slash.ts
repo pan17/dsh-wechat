@@ -288,6 +288,44 @@ export function parseCompactCommand(text: string): CompactCommand | null {
   return { kind: "compact", extra: (m[1] ?? "").trim() };
 }
 
+/**
+ * True if `text` is a recognized slash command that should BYPASS any
+ * pending question/approval card and execute normally.
+ *
+ * The bridge pre-empts the next user text after a `question/requested` or
+ * `approval/requested` frame, treating it as the card's answer. Without
+ * this helper, typing a management command (e.g. `/next`) while a card
+ * is shown silently submits the command text as the card's custom-text
+ * answer (questions) or rejects it as "unrecognized reply" (approvals),
+ * dropping the user's real intent.
+ *
+ * Card-specific commands (`/rp`, `/rq`) are intentionally excluded so
+ * they keep their existing card semantics. `/stop` is also excluded: it
+ * lives in `handleQuestionReply`'s priority branch (stop-agent +
+ * reject-question) and a behaviour change is out of scope. `/help` is
+ * included: its only effect is "print the help text", which
+ * `handleMessage` already handles; the card handlers' two duplicate
+ * `parseHelpCommand` branches become dead code once `/help` bypasses.
+ *
+ * Empty text returns false (the empty-text card hint still fires).
+ */
+export function isBypassSlashCommand(text: string): boolean {
+  if (!text) return false;
+  return (
+    parseHelpCommand(text) ||
+    parseNextCommand(text) ||
+    parseSilentCommand(text) !== null ||
+    parseStatusCommand(text) !== null ||
+    parseWorkspaceCommand(text) !== null ||
+    parseSessionCommand(text) !== null ||
+    parsePresetCommand(text) !== null ||
+    parseModelCommand(text) !== null ||
+    parsePermCommand(text) !== null ||
+    parseReasoningCommand(text) !== null ||
+    parseCompactCommand(text) !== null
+  );
+}
+
 /** The /help reply. */
 export function formatHelp(): string {
   return [

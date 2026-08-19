@@ -33,6 +33,7 @@ import type { WeChatDSHConfig } from "../config.js";
 import {
   detectUnknownSlashCommand,
   formatHelp,
+  isBypassSlashCommand,
   parseCompactCommand,
   parseHelpCommand,
   parseModelCommand,
@@ -587,15 +588,26 @@ export class WeChatDSHBridge {
 
     const user = this.state.ensureUser(userId, this.config.cwd);
 
+    // Pull text once so both the card handler and the slash command
+    // bypass check see the same input.
+    const text = extractText(msg.item_list);
+    // Slash commands whose meaning is unrelated to the pending card (e.g.
+    // `/next` to flush cached outbound, `/silent on`, `/status`,
+    // `/workspace …`) bypass the card and execute normally. The
+    // card-specific commands (`/rp`, `/rq`) stay in the card handler and
+    // keep their existing semantics (reject the card). Empty text returns
+    // false here so the empty-text card hint branch still fires.
+    const bypassCard = text !== "" && isBypassSlashCommand(text);
+
     // Pending approval cards for the CURRENT session: the next text is
     // (almost always) a decision. Cards of other sessions do not capture
     // messages — the user must switch into that session first (a notice
-    // was sent when the card arrived).
+    // was sent when the card arrived). A recognized non-card slash
+    // command bypasses this branch.
     const approvals = (this.pendingApprovals.get(userId) ?? []).filter(
       (c) => c.sessionId === user.sessionId,
     );
-    if (approvals.length > 0) {
-      const text = extractText(msg.item_list);
+    if (!bypassCard && approvals.length > 0) {
       if (text === null || text === "") {
         await this.sendReply(userId, "⚠️ 当前有权限卡待处理，请用文本回复（1 允许一次 / 2 拒绝，多张卡用 P1=1 P2=2）。");
         return;
@@ -604,12 +616,12 @@ export class WeChatDSHBridge {
       return;
     }
 
-    // Pending question cards for the CURRENT session: same policy.
+    // Pending question cards for the CURRENT session: same policy. Slash
+    // commands also bypass.
     const questions = (this.pendingQuestions.get(userId) ?? []).filter(
       (c) => c.sessionId === user.sessionId,
     );
-    if (questions.length > 0) {
-      const text = extractText(msg.item_list);
+    if (!bypassCard && questions.length > 0) {
       if (text === null || text === "") {
         await this.sendReply(userId, "⚠️ 当前有提问卡待处理，请用文本回复（数字或自定义文字，例如 `Q1=1` 或 `Q1-我的想法`）。");
         return;
@@ -621,8 +633,7 @@ export class WeChatDSHBridge {
     // Auto-flush cached outbound on any user message — except an explicit
     // `/next`, which owns the flush below so its result reply is not
     // duplicated by the auto path.
-    const text = extractText(msg.item_list);
-    const isNext = text !== null && parseNextCommand(text);
+    const isNext = parseNextCommand(text);
     const cached = this.outboundCache.get(userId);
     if (!isNext && cached && cached.length > 0) {
       await this.flushPending(userId);
@@ -1177,10 +1188,6 @@ export class WeChatDSHBridge {
       await this.rejectAllApprovals(userId);
       return;
     }
-    if (parseHelpCommand(text)) {
-      await this.sendReply(userId, formatHelp());
-      return;
-    }
 
     const { decisions, warnings } = parseApprovalReply(text, list);
     const snapshot = [...list];
@@ -1288,10 +1295,6 @@ export class WeChatDSHBridge {
       agent?.cancel("user-stop");
       await this.sendReply(userId, "🛑 已停止任务并拒绝问题。");
       return;
-    }
-    if (parseHelpCommand(text)) {
-      await this.sendReply(userId, formatHelp());
-      return; // cards stay pending
     }
 
     // Select the target card: single card → whole text; multiple cards → P{n}= prefix.
