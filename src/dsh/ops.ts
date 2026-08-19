@@ -5,6 +5,7 @@
  */
 
 import type { Agent } from "./types.js";
+import type { SessionProjectionService } from "./types.js";
 import type { BridgeContext } from "./sessions.js";
 
 /** Nominal id of one registered settings namespace (dsh-settings brand). */
@@ -362,6 +363,22 @@ export class DshOps {
    */
   commands(): CommandsService | undefined {
     return this.get<CommandsService>("commands");
+  }
+
+  // ─── Session projections ───
+
+  /**
+   * The `ctx.sessionProjections` registry (`@deepseek-ai/dsh-session-projection`).
+   * Hosts the whole-value projections every domain plugin registers for a
+   * session — plan mode (`key: 'plan'`), goal (`key: 'goal'`), and any
+   * future mode any third-party plugin adds. The WeChat bridge uses
+   * `snapshot(agent.session)` to read the whole map at once and render
+   * it in `/status`. Returns `undefined` when the registry is not
+   * composed (e.g. minimal headless profiles) — the caller treats that
+   * as "no projections, omit the section" without any further signal.
+   */
+  sessionProjections(): SessionProjectionService | undefined {
+    return this.get<SessionProjectionService>("sessionProjections");
   }
 
   /**

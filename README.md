@@ -61,17 +61,46 @@ dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除
 
 ## 微信命令
 
+### 与 DSH 原生命令同步
+
+<details>
+<summary>点击展开：bridge 如何接入 DSH 的 <code>ctx.commands</code> 注册中心（计划模式 / 目标 / 压缩 等原生 slash 命令走的就是这条路）</summary>
+
+微信消息进入后，bridge **先**向 DSH 的 `ctx.commands` 注册中心查询当前会话
+已注册的命令（这是 DSH 内置的人类 slash 命令注册服务，由 `@deepseek-ai/dsh-commands`
+提供；`name` /plan、`name` /goal、`name` /compact 等命令都由各自的 bundle 在那里
+注册）。命中即直接交给原生 handler 执行，并把结果回执渲染到微信——和 GUI 走同
+一条命令管线。
+
+未注册的命令回落到本仓库硬写的本地命令表（`/silent`、`/next`、`/rp`、`/rq`、
+/workspace、`/session` 等），命中失败时按 "未知命令" 提示并作为文本转发给 agent。
+DSH 的 `ctx.commands` 服务在某些极简装配下可能不挂载（缺失时会打一次 warn），
+这种情形行为完全等同之前的版本。
+
+所以：**DSH 加任何新的 `/xxx` 命令 bundle，微信端无需改动即可识别**——只要它是
+按 DSH 命令注册契约挂上去的。例如装有 `dsh-plan-mode` 时微信发 `/plan off` 收
+到原生回执 "Plan mode off."；装有 `dsh-command-goal` 时 `/goal <目标>` 收到原生
+"Goal created ..."；装有 `dsh-command-compact` 时 `/compact` 收到 "Compacted N
+history items (~M tokens)."——与 GUI 同款回执，由原生 handler 自己算、自己发。
+
+`/help` 在末尾加一段 `── DSH 原生命令（当前 profile 已注册）──`，列出当前
+profile 实际注册的所有原生命令；本地命令表里已有的名字自动去重，不会重复
+出现。
+
+</details>
+
+### 本地命令表
+
 | 命令 | 说明 |
 |---|---|
 | `/help`（`/h`、`/?`） | 帮助 |
-| `/status` | 当前状态：工作区、会话、Agent、Preset、模型、上下文、权限、静默 |
+| `/status` | 当前状态：工作区、会话、Agent、Preset、模型、上下文、权限、静默；末尾追加 DSH 通过 `ctx.sessionProjections` 注册的所有会话级状态，分四段显示——`[模式]`（plan / goal / subagent / todos）、`[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类）；DSH 加新 plugin 自动出现 |
 | `/workspace (ws) — list \| status \| switch <编号\|路径> \| add <路径>` | 工作区管理（list 显示各工作区会话数，不含已归档；switch 恢复该目录最近会话，无则新建） |
 | `/session (s) — list [current] \| switch <编号> \| new \| status` | 会话管理（list 最近 20 个，标记当前，不显示 GUI 已归档会话；`current` 只看当前工作目录；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建） |
 | `/preset (p) — list \| switch <名称\|编号> \| status` | Preset 管理（默认写入 DSH 设置，与 GUI 同步；当前会话无内容时立即应用） |
 | `/model — list [提供商] \| switch <提供商/模型> \| status` | 模型管理（切换立即作用于当前会话 + 设为默认） |
 | `/perm — status \| list \| switch <名称\|编号> \| default [名称\|编号]` | 权限管理（switch 实时切当前会话；default 写 DSH 设置，新会话生效） |
 | `/reasoning — [list \| default \| <等级>]` | 推理等级：查看当前/默认与模型支持的等级；`<等级>` 切换（实时 + 写默认）；`default` 恢复模型默认 |
-| `/compact` | 手动压缩当前会话历史（与 GUI `/compact` 等价，走 dsh-command-compact 同一 handler 与日志生命周期） |
 | `/silent on\|off`（`/sl`） | 静默模式：开启后 agent 每轮的中间过程输出（工具调用、思考等）不再逐条推送，只在轮次结束时发送最终回复，避免刷屏；跨重启持久化 |
 | `/stop` | 中断当前任务 |
 | `/next` | 继续发送因微信限制被缓存的消息 |

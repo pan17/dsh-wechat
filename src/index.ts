@@ -140,7 +140,36 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
     });
   }
 
-  // ─── Dynamic WeChat surface prompt (per-message-source) ───
+  // ─── DSH native command registry (ctx.commands) ───
+// When the host composes `@deepseek-ai/dsh-commands`, late-bind the
+// command surface so WeChat can dispatch `/plan`, `/goal`, `/compact`
+// and any other plugin-registered slash command through the same
+// native handler the GUI uses. If the registry is not composed
+// (minimal headless profiles, host version drift, etc.) we fall through
+// to the local whitelist exactly like before — no behavioral change.
+if (typeof context.inject === "function") {
+  context.inject(["commands"], (cmdCtx) => {
+    const commands = (cmdCtx as {
+      get<T = unknown>(name: string): T | undefined;
+    }).get<{
+      find: unknown;
+      execute: unknown;
+    }>("commands");
+    if (!commands) {
+      console.warn("[dsh-wechat] ctx.commands unavailable; 原生命令层禁用，回落到本地白名单");
+      return;
+    }
+    // Cast through the bridge's structural surface — we never reference
+    // the actual `@deepseek-ai/dsh-commands` types here, so zero runtime
+    // dep is added.
+    bridge.attachCommands(commands as never);
+    console.log("[dsh-wechat] 原生命令层已挂载 (/plan、/goal 等通过 ctx.commands 分发)");
+  });
+} else {
+  console.warn("[dsh-wechat] ctx.inject unavailable; 原生命令层禁用，回落到本地白名单");
+}
+
+// ─── Dynamic WeChat surface prompt (per-message-source) ───
   // Registered as a GLOBAL RUNTIME CONTEXT (not a prompt section): DSH's
   // system-prompt assembly applies a "complete-section replacement" pass to
   // sections (a preset's complete section replaces ALL ordinary sections,
