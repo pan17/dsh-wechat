@@ -20,6 +20,8 @@ export interface WeChatDSHConfig {
   textChunkLimit: number;
   /** Soft timeout for question/permission cards (ms). */
   cardTimeoutMs: number;
+  /** Cross-session notifications (turn/end + error + cards of non-current sessions). Default off. */
+  crossSessionNotify: boolean;
 }
 
 export function defaultStorageDir(): string {
@@ -35,5 +37,6 @@ export function defaultConfig(): WeChatDSHConfig {
     cwd: process.cwd(),
     textChunkLimit: 4000,
     cardTimeoutMs: 30 * 60_000,
+    crossSessionNotify: false,
   };
 }

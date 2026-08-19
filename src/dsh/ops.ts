@@ -403,6 +403,27 @@ export class DshOps {
     }
   }
 
+  // ─── Helpers for cross-session notification recipients ───
+
+  /**
+   * Find the full session record for `sessionId`, or undefined when not found
+   * or when the session is filtered (archived / subagent). Mirrors listSessions filtering.
+   */
+  async findSessionRecord(sessionId: string): Promise<SessionRecord | undefined> {
+    const all = await this.listSessions();
+    return all.find((r) => r.header.id === sessionId);
+  }
+
+  /**
+   * Workspace owning `sessionId`, if any. Resolved via the session's cwd and workspaceRegistry.
+   */
+  async workspaceOfSession(sessionId: string): Promise<Workspace | undefined> {
+    const record = await this.findSessionRecord(sessionId);
+    if (!record?.header.cwd) return undefined;
+    const workspaces = this.listWorkspaces();
+    return workspaces.find((w) => w.path === record.header.cwd) ?? workspaces.find((w) => w.sessionIds.includes(sessionId));
+  }
+
   // ─── Context pressure (token meter) ───
 
   /** Approximate context occupancy for one session (the GUI's context meter source). */
