@@ -5,6 +5,55 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-19
+
+### Added
+
+- 原生 slash 命令接入：微信消息先查询 DSH 的 `ctx.commands` 注册中心
+  （`@deepseek-ai/dsh-commands`），命中的命令（`/plan`、`/goal`、
+  `/compact` 等）走原生 handler，与 GUI 同款命令管线、回执、日志生命周期；
+  DSH 加新命令 bundle 微信端零改动自动可用
+- `/status` 末尾的"会话级状态"段：通过 `ctx.sessionProjections.snapshot()`
+  通用读取 DSH 全部 session-level projection（plan mode、goal、
+  tokenUsage、contextPressure、sessionStats、imageLimits、permissions
+  等），按 `[模式]` / `[用量与统计]` / `[会话]` / `[其它]` 四段显示，
+  每个已知 key 走专有 smart renderer（`on` / `active · ship · 3/64 轮`
+  / `192.0k / 1.0M（18%）` 等），未知 key 走 JSON fallback
+- `parseCommandName(text)` —— DSH 命令注册中心 `parseCommand()` 的
+  最小 wire 镜像；用于"未知 shape 命令"探测
+
+### Changed
+
+- `/status` 输出末尾的"会话级状态"段重写：从平铺的
+  `• key: {...json}` 改为分组 + smart formatter 形态：`plan` 行显示
+  `on`/`off` 而不是 `{active:true,pending:false}` JSON；`contextPressure`
+  显示 `192k / 1M (18%)` 而不是 raw token 数字；`sessionStats` 拆多行
+  显示 turns/steps/timing；`null` 显示为 `（无）`、空 title 显示为
+  `（未设标题）`、`subagentTiming.settledMs=0` 显示为 `未结算` —— 视觉
+  层次清晰、单位换算
+- `/help` 输出末尾加 `── DSH 原生命令（当前 profile 已注册）──` 段：
+  动态列出当前 profile 注册的 `/xxx` 命令，本地白名单里已有的名字不
+  重复出现
+- README "与 DSH 原生命令同步" 段折叠到 `<details>` 下，README 顶部一眼
+  只剩命令表
+
+### Fixed
+
+- 修复原生命令 dispatch 的 shape bug：`ctx.commands.execute()` 返回
+  `{commandId, result: CommandResult}` 嵌套结构，第一版代码读
+  `result.kind` 顶层（undefined）→ 错误地走 error 分支 → 显示
+  `⚠️ 命令出错：Enter or leave plan mode`（plan-mode description），
+  而用户输入 `/plan` 实际已进入 plan mode。修后读
+  `execution.result.kind` / `execution.result.text`，并把 success 无 text
+  的 fallback 从 description 改为 `✅ <name>`，避免 description 误入
+  success 路径
+
+### Removed
+
+- `/compact` 本地特殊路径：`handleCompactCommand` 方法、
+  `parseCompactCommand` 函数、`CompactCommand` 类型、`/compact` 在本地
+  命令表的行——由 `tryNativeCommand` generic 路径统一处理
+
 ## [0.4.3] - 2026-08-19
 
 ### Fixed
