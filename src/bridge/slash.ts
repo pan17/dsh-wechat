@@ -476,8 +476,363 @@ export function renderProjectionValue(v: unknown): string | undefined {
   return truncateForWeChat(s);
 }
 
-/** Cap a single projection row's value at 120 code units, append `…` if over. */
-function truncateForWeChat(s: string): string {
-  if (s.length > 120) return s.slice(0, 117) + "…";
+/** Cap a string at the given limit, append `…` if over. */
+function truncateForWeChat(s: string, limit = 120): string {
+  if (s.length > limit) return s.slice(0, limit - 3) + "…";
   return s;
+}
+
+// ─── Smart projection renderers ──────────────────────────────────────────
+//
+// Each renderer turns one host-side projection's `view` shape into a
+// WeChat-friendly, human-readable string (or returns `undefined` to
+// signal "shape unrecognised — fall back to generic JSON"). Each one
+// is a pure pure-function and fully testable in isolation.
+//
+// Renderer design rule: be tolerant of partial / renamed fields by
+// probing alternative field names (`uncachedInputTokens` vs
+// `inputTokens`, `pressureTokens` vs `projectedTokens`, etc.). When a
+// projection author changes something, the worst that happens is the
+// renderer returns `undefined` → the caller falls back to a JSON
+// line — visible to the user, never silent.
+//
+// ---------------------------------------------------------------------------
+
+/**
+ * Compact, locale-stable token count.
+ * - `< 1 000` → `"123"`
+ * - `< 1 000 000` → `"12.3k"` (one decimal)
+ * - `>= 1 000 000` → `"1.5M"` (one decimal)
+ */
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return String(n);
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** Compact byte count (`"5.2 MB"`, `"1.2 GB"`). */
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return String(n);
+  if (n < 1024) return `${Math.round(n)} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(1)} GB`;
+}
+
+/** Compact duration in ms (`"1.5s"`, `"16m"`, `"2h"`). */
+function formatMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return String(ms);
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+  return `${(ms / 3_600_000).toFixed(1)}h`;
+}
+
+/** Relative-time label in Chinese, matching the GUI sidebar's compact style. */
+function formatRelativeTime(epoch: number): string {
+  const diff = Date.now() - epoch;
+  if (diff < 60_000) return "刚刚";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  return `${Math.floor(diff / 86_400_000)} 天前`;
+}
+
+type ProjectionGroup = "mode" | "usage" | "session" | "other";
+
+/** Known-DSH-keys → category bucket. Unknown keys fall through to `"other"`. */
+const PROJECTION_GROUP: Record<string, ProjectionGroup> = {
+  // Modes — collaboration state the user toggles or the agent flips
+  plan: "mode",
+  goal: "mode",
+  subagent: "mode",
+  todos: "mode",
+  // Usage / stats — numeric snapshots the user tracks
+  contextPressure: "usage",
+  contextBreakdown: "usage",
+  tokenUsage: "usage",
+  sessionStats: "usage",
+  subagentTiming: "usage",
+  // Session — label / settings the user owns
+  title: "session",
+  sessionListMetadata: "session",
+  permissions: "session",
+  imageLimits: "session",
+};
+
+const GROUP_ORDER: ProjectionGroup[] = ["mode", "usage", "session", "other"];
+const GROUP_LABELS: Record<ProjectionGroup, string> = {
+  mode: "模式",
+  usage: "用量与统计",
+  session: "会话",
+  other: "其它",
+};
+
+/** Strict shape guards: keep the smart renderers' field probes safe under `noUncheckedIndexedAccess`. */
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function num(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+function str(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+function bool(v: unknown): boolean | undefined {
+  return typeof v === "boolean" ? v : undefined;
+}
+
+// ─── Per-key smart renderers ────────────────────────────────────────────
+
+function renderPlanProjection(v: unknown): string | undefined {
+  if (!isObj(v)) return undefined;
+  const active = bool(v.active);
+  if (active === undefined) return undefined;
+  const pending = v.pending;
+  if (pending === true) return active ? "on（下一次轮次关闭）" : "off（下一次轮次开启）";
+  return active ? "on" : "off";
+}
+
+function renderGoalProjection(v: unknown): string | undefined {
+  if (v === null) return "（无）";
+  if (!isObj(v)) return undefined;
+  const goal = isObj(v.goal) ? v.goal : undefined;
+  if (!goal) return undefined;
+  const phase = str(goal.phase);
+  if (!phase) return undefined;
+  const rounds = `${num(v.roundsStarted) ?? 0}/${num(goal.maxGoalRounds) ?? "?"}`;
+  const obj = str(goal.objective);
+  const objSuffix = obj ? truncateForWeChat(obj, 40) : "（无目标）";
+  if (phase === "blocked") {
+    const reason = isObj(goal.blockedReason) ? goal.blockedReason : undefined;
+    const code = reason ? str(reason.code) : undefined;
+    if (code) return `${phase} · ${rounds} 轮 · 阻塞 (${code})`;
+  }
+  return `${phase} · ${objSuffix} · ${rounds} 轮`;
+}
+
+function renderSubagentProjection(v: unknown): string | undefined {
+  if (v === null) return "（无）";
+  if (!isObj(v)) return undefined;
+  const status = str(v.status) ?? "active";
+  const count = Array.isArray(v.children) ? v.children.length : num(v.count);
+  return count !== undefined ? `${status} · ${count} 个子任务` : `${status}`;
+}
+
+function renderTodosProjection(v: unknown): string | undefined {
+  if (v === null) return "（无）";
+  if (!isObj(v)) return undefined;
+  const items = Array.isArray(v.items) ? v.items : undefined;
+  if (!items) return undefined;
+  const total = items.length;
+  const pending = items.filter((t) => {
+    if (!isObj(t)) return true;
+    const s = str(t.status);
+    return s !== "done" && s !== "completed" && s !== "cancelled";
+  }).length;
+  return `${total} 个 · ${pending} 待办`;
+}
+
+function renderContextPressureProjection(v: unknown): string | undefined {
+  if (!isObj(v)) return undefined;
+  const window = num(v.contextWindow);
+  if (window === undefined || window <= 0) return undefined;
+  const projected = num(v.projectedTokens) ?? num(v.pressureTokens);
+  if (projected === undefined) return undefined;
+  const pct = Math.round((projected / window) * 100);
+  return `${formatTokens(projected)} / ${formatTokens(window)}（${pct}%）`;
+}
+
+function renderContextBreakdownProjection(v: unknown): string | undefined {
+  if (!isObj(v)) return undefined;
+  const parts: string[] = [];
+  const sys = num(v.systemTokens);
+  const tools = num(v.toolsTokens) ?? num(v.toolsEstimateTokens);
+  const msg = num(v.messageTokens);
+  if (sys !== undefined) parts.push(`系统 ${formatTokens(sys)}`);
+  if (tools !== undefined) parts.push(`工具 ${formatTokens(tools)}`);
+  if (msg !== undefined) parts.push(`消息 ${formatTokens(msg)}`);
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+function renderTokenUsageProjection(v: unknown): string | undefined {
+  if (!isObj(v)) return undefined;
+  const inUncached = num(v.uncachedInputTokens) ?? num(v.inputTokens);
+  const inCached = num(v.cacheReadTokens);
+  const out = num(v.outputTokens);
+  const write = num(v.cacheWriteTokens);
+  if (inUncached === undefined && out === undefined && write === undefined) return undefined;
+  const lines: string[] = [];
+  if (inUncached !== undefined) {
+    let s = `输入 ${formatTokens(inUncached)}`;
+    if (inCached !== undefined && inCached > 0) {
+      const total = inUncached + inCached;
+      s += ` (缓存命中 ${formatTokens(inCached)}`;
+      if (total > 0) s += `, 命中率 ${Math.round((inCached / total) * 100)}%`;
+      s += ")";
+    }
+    lines.push(s);
+  }
+  if (out !== undefined) lines.push(`输出 ${formatTokens(out)}`);
+  if (write !== undefined && write > 0) lines.push(`缓存写入 ${formatTokens(write)}`);
+  return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
+function renderSessionStatsProjection(v: unknown): string | undefined {
+  if (!isObj(v)) return undefined;
+  const turns = num(v.turns);
+  const steps = num(v.steps);
+  const llmMs = num(v.llmMs);
+  const toolMs = num(v.toolMs);
+  const ttftMs = num(v.ttftMs);
+  const ttftSteps = num(v.ttftSteps);
+  const lines: string[] = [];
+  if (turns !== undefined && steps !== undefined) lines.push(`${turns} turns · ${steps} steps`);
+  const timing: string[] = [];
+  if (llmMs !== undefined) timing.push(`llm ${formatMs(llmMs)}`);
+  if (toolMs !== undefined) timing.push(`tool ${formatMs(toolMs)}`);
+  if (ttftMs !== undefined) {
+    let s = `ttft ${formatMs(ttftMs)}`;
+    if (ttftSteps !== undefined) s += ` / ${ttftSteps} steps`;
+    timing.push(s);
+  }
+  if (timing.length > 0) lines.push(timing.join(" · "));
+  return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
+function renderSubagentTimingProjection(v: unknown): string | undefined {
+  if (!isObj(v)) return undefined;
+  const ms = num(v.settledMs);
+  if (ms === undefined) return undefined;
+  return ms === 0 ? "未结算" : formatMs(ms);
+}
+
+function renderTitleProjection(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  return v.length === 0 ? "（未设标题）" : v;
+}
+
+function renderSessionListMetadataProjection(v: unknown): string | undefined {
+  if (!isObj(v)) return undefined;
+  const parts: string[] = [];
+  const last = num(v.lastPromptAt);
+  if (last !== undefined && last > 0) parts.push(`上次活动 ${formatRelativeTime(last)}`);
+  const blank = bool(v.blank);
+  if (blank !== undefined) parts.push(blank ? "空白会话" : "非空");
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+function renderPermissionsProjection(v: unknown): string | undefined {
+  if (!isObj(v)) return undefined;
+  const opts = Array.isArray(v.options) ? v.options : undefined;
+  if (!opts) return undefined;
+  const labels = opts
+    .map((o) => (isObj(o) ? (str(o.name) ?? str(o.value) ?? str(o.label)) : undefined))
+    .filter((s): s is string => s !== undefined);
+  return labels.length > 0 ? labels.join(" · ") : undefined;
+}
+
+function renderImageLimitsProjection(v: unknown): string | undefined {
+  if (!isObj(v)) return undefined;
+  const parts: string[] = [];
+  const bytes = num(v.maxImageBytes);
+  if (bytes !== undefined) parts.push(`${formatBytes(bytes)} / 张`);
+  const perMsg = num(v.maxImagesPerMessage);
+  if (perMsg !== undefined) parts.push(`${perMsg} 张 / 消息`);
+  const pixels = num(v.maxImagePixels);
+  if (pixels !== undefined) parts.push(`≤ ${Math.round(pixels / 1_000_000)}M px`);
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+/**
+ * Map of known DSH projection keys → smart renderer.
+ * Each renderer returns a WeChat-ready string (possibly multi-line) or
+ * `undefined` when the value's shape is unrecognised. Renderers are
+ * pure, isolated, fully tested.
+ */
+const PROJECTION_RENDERERS: Record<string, (v: unknown) => string | undefined> = {
+  plan: renderPlanProjection,
+  goal: renderGoalProjection,
+  subagent: renderSubagentProjection,
+  todos: renderTodosProjection,
+  contextPressure: renderContextPressureProjection,
+  contextBreakdown: renderContextBreakdownProjection,
+  tokenUsage: renderTokenUsageProjection,
+  sessionStats: renderSessionStatsProjection,
+  subagentTiming: renderSubagentTimingProjection,
+  title: renderTitleProjection,
+  sessionListMetadata: renderSessionListMetadataProjection,
+  permissions: renderPermissionsProjection,
+  imageLimits: renderImageLimitsProjection,
+};
+
+/**
+ * Render the full projection section that `/status` appends under the
+ * "── 会话级状态 ──" banner.
+ *
+ * Algorithm:
+ *   1. For each key (alphabetically sorted within its group), pick a
+ *      smart renderer when known or fall back to `renderProjectionValue`.
+ *   2. Group keys into `[模式]`, `[用量与统计]`, `[会话]`, `[其它]`
+ *      buckets; emit each non-empty bucket as `[label]` + indented
+ *      `• key:` lines (with multi-line continuation indented deeper).
+ *   3. Empty buckets are dropped. The caller decides whether the
+ *      whole section appears.
+ *
+ * Smart renderer exceptions are caught and downgraded to the JSON
+ * fallback for that single key; other keys still render. The caller
+ * does not see exceptions and `/status` stays intact.
+ *
+ * @param values The `snapshot(session).values` map from
+ *   `ctx.sessionProjections`.
+ * @returns Pre-formatted lines ready to be appended to `/status`.
+ *   Empty when `values` has no keys with renderable output.
+ */
+export function renderProjectionSection(values: Record<string, unknown>): string[] {
+  type Bucket = Array<{ key: string; lines: string[] }>;
+  const buckets: Record<ProjectionGroup, Bucket> = {
+    mode: [],
+    usage: [],
+    session: [],
+    other: [],
+  };
+
+  for (const key of Object.keys(values).sort()) {
+    const group = PROJECTION_GROUP[key] ?? "other";
+    const value = values[key];
+
+    let rendered: string | string[] | undefined;
+    try {
+      const fn = PROJECTION_RENDERERS[key];
+      const out = fn ? fn(value) : renderProjectionValue(value);
+      rendered = out === undefined ? renderProjectionValue(value) : out;
+    } catch (err) {
+      console.warn(`[dsh-wechat] projection ${key} renderer failed: ${String(err)}`);
+      rendered = renderProjectionValue(value);
+    }
+
+    if (rendered === undefined) continue;
+    const lines = Array.isArray(rendered) ? rendered : rendered.split("\n").filter((l) => l.length > 0);
+    if (lines.length === 0) continue;
+    buckets[group].push({ key, lines });
+  }
+
+  const out: string[] = [];
+  for (const g of GROUP_ORDER) {
+    const items = buckets[g];
+    if (items.length === 0) continue;
+    out.push(`[${GROUP_LABELS[g]}]`);
+    for (const { key, lines } of items) {
+      out.push(`  • ${key}: ${lines[0]!}`);
+      for (let i = 1; i < lines.length; i++) {
+        out.push(`      ${lines[i]!}`);
+      }
+    }
+    out.push("");
+  }
+  // Trim trailing blank line so the section joins cleanly with whatever
+  // the caller appends next (currently nothing — the `/status` output
+  // ends here).
+  if (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return out;
 }

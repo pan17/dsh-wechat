@@ -36,7 +36,7 @@ import {
   isBypassSlashCommand,
   parseCommandName,
   parseHelpCommand,
-  renderProjectionValue,
+  renderProjectionSection,
   parseModelCommand,
   parseNextCommand,
   parsePermCommand,
@@ -2294,10 +2294,13 @@ export class WeChatDSHBridge {
     ];
 
     // Session-level projection registry (`ctx.sessionProjections`). One
-    // generic read face surfaces every domain plugin's current state for
-    // this session — plan mode, goal, and any future mode a third-party
-    // plugin adds. DSH adds new ones → WeChat lights up new rows here
-    // without bridge changes.
+    // Session-level state published by every DSH plugin via
+    // `ctx.sessionProjections` — plan mode, goal, token usage, image
+    // limits, etc. The aggregator (`renderProjectionSection`) groups
+    // known keys by intent (mode / usage / session / other), renders
+    // each known key with a purpose-built smart formatter, and falls
+    // back to JSON for unknown keys — DSH adds new plugins → WeChat
+    // lights up new rows under `[其它]` with zero bridge change.
     if (agent && agent.session) {
       const proj = this.ops.sessionProjections();
       if (proj) {
@@ -2308,16 +2311,9 @@ export class WeChatDSHBridge {
           // is structurally compatible with `AgentSessionLike` at
           // runtime.
           const { values } = proj.snapshot(agent.session as never);
-          const projectionLines: string[] = [];
-          // Stable alphabetical order so plugin load order does not
-          // change the rendered output. Keeps the WeChat message bounded
-          // and human-deterministic.
-          for (const key of Object.keys(values).sort()) {
-            const rendered = renderProjectionValue(values[key]);
-            if (rendered !== undefined) projectionLines.push(`• ${key}: ${rendered}`);
-          }
-          if (projectionLines.length > 0) {
-            lines.push("", "── 会话级状态 ──", ...projectionLines);
+          const sectionLines = renderProjectionSection(values);
+          if (sectionLines.length > 0) {
+            lines.push("", "── 会话级状态 ──", ...sectionLines);
           }
         } catch (err) {
           console.warn(`[dsh-wechat] sessionProjections.snapshot failed: ${String(err)}`);
