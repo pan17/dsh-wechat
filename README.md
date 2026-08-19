@@ -63,6 +63,9 @@ dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除
 
 ### 与 DSH 原生命令同步
 
+<details>
+<summary>点击展开：bridge 如何接入 DSH 的 <code>ctx.commands</code> 注册中心（计划模式 / 目标 / 压缩 等原生 slash 命令走的就是这条路）</summary>
+
 微信消息进入后，bridge **先**向 DSH 的 `ctx.commands` 注册中心查询当前会话
 已注册的命令（这是 DSH 内置的人类 slash 命令注册服务，由 `@deepseek-ai/dsh-commands`
 提供；`name` /plan、`name` /goal、`name` /compact 等命令都由各自的 bundle 在那里
@@ -83,6 +86,8 @@ history items (~M tokens)."——与 GUI 同款回执，由原生 handler 自己
 `/help` 在末尾加一段 `── DSH 原生命令（当前 profile 已注册）──`，列出当前
 profile 实际注册的所有原生命令；本地命令表里已有的名字自动去重，不会重复
 出现。
+
+</details>
 
 ### 本地命令表
 
