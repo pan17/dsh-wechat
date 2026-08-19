@@ -91,6 +91,60 @@ export function detectUnknownSlashCommand(text: string): string | null {
   return m ? m[0] : null;
 }
 
+/**
+ * Parse just the lowercase command name out of a leading-slash line.
+ *
+ * Mirrors the wire contract of `@deepseek-ai/dsh-commands.parseCommand`:
+ * a slash at byte zero, a lowercase name containing letters, digits, `_`,
+ * or `-`, followed by either end-of-input or whitespace. Anything that
+ * survives the name is the handler's `rawInput` (separator whitespace
+ * included — handlers own their own grammar).
+ *
+ * Returns `null` for: empty input, missing leading slash, name starting
+ * with a digit, uppercase letters, or any other shape the registry
+ * itself would reject. Callers use the result to look up a definition
+ * with `ctx.commands.find(agent, name)` before deciding whether to
+ * dispatch natively or fall through to forwarding.
+ *
+ * @param text The raw inbound WeChat text (untrimmed — leading whitespace
+ *   is rejected so an accidental " /plan off" never matches).
+ * @returns The lowercase command name, or `null` if the line is not a
+ *   recognized native-command shape.
+ */
+export function parseCommandName(text: string): string | null {
+  if (!text) return null;
+  if (text.charCodeAt(0) !== 0x2f /* "/" */) return null;
+  // The first name character must be a lowercase letter or `_`; digits
+  // and `-` are not allowed at the head. This rejects "/1foo" and "-"
+  // while keeping "_foo" valid (per the registry contract).
+  const head = text.charCodeAt(1);
+  const isHead =
+    (head >= 0x61 /* "a" */ && head <= 0x7a /* "z" */) || head === 0x5f /* "_" */;
+  if (!isHead) return null;
+  let i = 1;
+  while (i < text.length) {
+    const c = text.charCodeAt(i);
+    const ok =
+      (c >= 0x61 && c <= 0x7a) ||
+      (c >= 0x30 /* "0" */ && c <= 0x39 /* "9" */) ||
+      c === 0x5f /* "_" */ ||
+      c === 0x2d /* "-" */;
+    if (!ok) break;
+    i++;
+  }
+  // The byte after the name must be either EOL or ASCII whitespace.
+  if (i < text.length) {
+    const c = text.charCodeAt(i);
+    const ws =
+      c === 0x20 /* " " */ ||
+      c === 0x09 /* "\t" */ ||
+      c === 0x0a /* "\n" */ ||
+      c === 0x0d /* "\r" */;
+    if (!ws) return null;
+  }
+  return text.slice(1, i);
+}
+
 // ─── Workspace / Session / Agent / Model ───
 
 export type WorkspaceCommand =

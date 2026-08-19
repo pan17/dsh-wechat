@@ -34,6 +34,7 @@ import {
   detectUnknownSlashCommand,
   formatHelp,
   isBypassSlashCommand,
+  parseCommandName,
   parseCompactCommand,
   parseHelpCommand,
   parseModelCommand,
@@ -137,6 +138,39 @@ export interface ApiProxySurface {
   events?: unknown;
 }
 
+/**
+ * Structural surface of the DSH `ctx.commands` plugin-owned human command
+ * registry (host side). Mirrors only the minimum the bridge consumes:
+ *
+ * - `find(agent, name)` — name-presence check; the bridge uses this to
+ *   decide whether to dispatch natively or fall through to the local
+ *   whitelist. Returns `undefined` when the name is not registered for
+ *   this agent.
+ * - `execute(agent, line, signal)` — full parse + dispatch; returns the
+ *   settled `CommandExecution` (`{ kind: 'success' | 'error', text? }`)
+ *   or `undefined` for invalid syntax / unknown names. The bridge treats
+ *   any non-undefined result as a final answer to render back to WeChat.
+ *
+ * No `@deepseek-ai/*` runtime dep — the registry lives in the host
+ * process; the bridge reaches it via `ctx.inject(['commands'], ...)`
+ * through the cordis injection pattern already used for `tools` /
+ * `apiProxy` / `systemPrompt`.
+ */
+export interface NativeCommandsSurface {
+  find(
+    agent: Agent,
+    name: string,
+  ): { name: string; description?: string; input?: { hint?: string } } | undefined;
+  execute(
+    agent: Agent,
+    line: string,
+    signal: AbortSignal,
+  ): Promise<
+    | { kind: "success" | "error"; text?: string; sourceEventSeq?: number }
+    | undefined
+  >;
+}
+
 type CachedMessage = { kind: "text"; text: string } | { kind: "file"; filePath: string; fileName: string };
 
 export class WeChatDSHBridge {
@@ -199,6 +233,15 @@ export class WeChatDSHBridge {
   private apiProxy: ApiProxySurface | null = null;
   private muxAbort: AbortController | null = null;
   /**
+   * DSH native command registry (ctx.commands) when present in the host.
+   * Set late by `attachCommands` once the cordis commands child has
+   * resolved (host's own injection pattern). When `null` the bridge
+   * silently skips the native command layer and the local whitelist
+   * keeps full ownership — every `/xxx` either hits a hard-coded branch
+   * or is forwarded as text to the agent.
+   */
+  private commandsCtx: NativeCommandsSurface | null = null;
+  /**
    * Per-user typing_ticket cache: the iLink `sendtyping` ticket is short-lived
    * and tied to the user's current context. We re-fetch via getconfig only on
    * miss / TTL expiry; otherwise the same ticket is reused across multiple
@@ -221,12 +264,111 @@ export class WeChatDSHBridge {
     safetyTimer: NodeJS.Timeout;
   }>();
 
-  constructor(ctx: BridgeContext, config: WeChatDSHConfig) {
+  constructor(ctx: BridgeContext, config: WeChatDSHConfig, commandsCtx?: NativeCommandsSurface | null) {
     this.ctx = ctx;
     this.config = config;
     this.state = new StateStore(config.storageDir);
     this.agents = new AgentStore(ctx);
     this.ops = new DshOps(ctx);
+    if (commandsCtx) this.commandsCtx = commandsCtx;
+  }
+
+  /**
+   * Late-bind the native command registry (`ctx.commands`).
+   *
+   * Called from `src/index.ts` after the host's commands child has
+   * resolved via `ctx.inject(['commands'], ...)`. Idempotent: a second
+   * call with the same surface is a no-op, a `null` is recorded as the
+   * "unavailable" state.
+   */
+  attachCommands(commandsCtx: NativeCommandsSurface | null): void {
+    this.commandsCtx = commandsCtx;
+  }
+
+  /**
+   * True when the line shape is a candidate for native command bypass
+   * of a pending approval/question card. Used by `bypassCard` so a card
+   * does not silently swallow a `/plan off` while waiting for the user.
+   *
+   * Two-gate:
+   *   1. The host's `ctx.commands` registry is composed — without it
+   *      the native dispatch layer is dormant and we must not bypass.
+   *   2. The shape parses as a leading-slash lowercase command name
+   *      (`parseCommandName`).
+   *
+   * `find(agent, name)` is NOT called here: at the bypass-card decision
+   * point the bound agent may not be ensured yet (cost reasons) and
+   * "shape-not-registered" is correctly re-detected inside
+   * `tryNativeCommand` — a name that parses but is unregistered simply
+   * falls through. The cost is that dsh-wechat-owned commands whose
+   * shape parses as a slash name (today: `/rp`, `/rq`, `/stop`) would
+   * bypass the card if matched here; those names are explicitly excluded
+   * below so the card handler keeps full ownership of their semantics.
+   */
+  private isBypassableNativeCommand(text: string): boolean {
+    if (!text || !this.commandsCtx) return false;
+    const name = parseCommandName(text);
+    if (!name) return false;
+    if (name === "rp" || name === "rq" || name === "stop") return false;
+    return true;
+  }
+
+  /**
+   * Probe the host's `ctx.commands` registry for the leading-slash name
+   * in `text`; if registered, run the native handler and render its
+   * settled result as a single WeChat reply. Returns `true` iff the
+   * reply was sent (the caller should stop processing); returns `false`
+   * for every "not ours" case so the local whitelist / forwarding
+   * pipeline continues unchanged.
+   *
+   * Failure isolation: a thrown native handler is caught and rendered as
+   * a friendly "command execution exception" reply; the message is never
+   * silently forwarded to the agent (a malformed command must not look
+   * like a real user prompt).
+   *
+   * The agent is ensured lazily on first hit so cold sessions without a
+   * cached DSH session still resolve cleanly. We do NOT call
+   * `agents.ensure` for unmatched names — the call would be wasted work
+   * on the (very common) "user typed `/foo bar`" path.
+   */
+  private async tryNativeCommand(
+    user: UserState,
+    userId: string,
+    text: string,
+  ): Promise<boolean> {
+    if (!this.commandsCtx || !text) return false;
+    const name = parseCommandName(text);
+    if (!name) return false;
+    if (name === "rp" || name === "rq" || name === "stop") return false;
+    const agent = await this.agents.ensure(user);
+    if (!agent) {
+      // Cannot resolve a session to scope `find` against — preserve the
+      // existing fall-through behavior (next layer is `forwardToAgent`,
+      // which itself fails with the same "无法创建/恢复 DSH 会话" hint).
+      return false;
+    }
+    let def: ReturnType<NativeCommandsSurface["find"]> | undefined;
+    let result: Awaited<ReturnType<NativeCommandsSurface["execute"]>>;
+    try {
+      def = this.commandsCtx.find(agent, name);
+      if (!def) return false;
+      const abort = new AbortController();
+      result = await this.commandsCtx.execute(agent, text, abort.signal);
+    } catch (err) {
+      console.warn(`[dsh-wechat] native command ${name} threw: ${String(err)}`);
+      const detail = err instanceof Error ? err.message : String(err);
+      await this.sendReply(userId, `⚠️ 命令执行异常：${detail}`);
+      return true;
+    }
+    if (result === undefined) return false;
+    if (result.kind === "success") {
+      const text2 = result.text ?? `✅ ${def.description ?? name}`;
+      await this.sendReply(userId, text2);
+    } else {
+      const fallback = def.description ?? name;
+      await this.sendReply(userId, `⚠️ 命令出错：${result.text ?? fallback}`);
+    }
+    return true;
   }
 
   // ─── Lifecycle ───
@@ -597,7 +739,17 @@ export class WeChatDSHBridge {
     // card-specific commands (`/rp`, `/rq`) stay in the card handler and
     // keep their existing semantics (reject the card). Empty text returns
     // false here so the empty-text card hint branch still fires.
-    const bypassCard = text !== "" && isBypassSlashCommand(text);
+    //
+    // Native commands registered in the host's `ctx.commands` (e.g.
+    // `/plan`, `/goal`, `/compact`) also bypass the card — a pending
+    // approval/question card must not swallow a management command.
+    // `isBypassableNativeCommand` only matches shapes the registry could
+    // plausibly own; the dsh-wechat-owned `/rp`/`/rq`/`/stop` semantics
+    // are kept off this branch so the card handler retains its meaning
+    // even when the native registry happens to be composed.
+    const bypassCard =
+      text !== "" &&
+      (isBypassSlashCommand(text) || this.isBypassableNativeCommand(text));
 
     // Pending approval cards for the CURRENT session: the next text is
     // (almost always) a decision. Cards of other sessions do not capture
@@ -646,6 +798,17 @@ export class WeChatDSHBridge {
         await this.flushPending(userId);
         return;
       }
+
+      // DSH native command dispatch (plan / goal / compact / ...).
+      // Probes the host's `ctx.commands` registry; if the leading-slash
+      // name is registered for this session, the native handler runs and
+      // its settled CommandExecution renders as a WeChat reply. Anything
+      // else (no registry, shape not registered, agent not yet ensured)
+      // returns `false` and the local whitelist / forwarding path takes
+      // over unchanged. This is the only entry point that talks to the
+      // native registry — keep it isolated so a future host change
+      // cannot leak through the slash parser.
+      if (await this.tryNativeCommand(user, userId, text)) return;
 
       if (parseHelpCommand(text)) {
         await this.sendReply(userId, formatHelp());

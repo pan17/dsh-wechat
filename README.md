@@ -61,6 +61,26 @@ dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除
 
 ## 微信命令
 
+### 与 DSH 原生命令同步
+
+微信消息进入后，bridge **先**向 DSH 的 `ctx.commands` 注册中心查询当前会话
+已注册的命令（这是 DSH 内置的人类 slash 命令注册服务，由 `@deepseek-ai/dsh-commands`
+提供；`name` /plan、`name` /goal、`name` /compact 等命令都由各自的 bundle 在那里
+注册）。命中即直接交给原生 handler 执行，并把结果回执渲染到微信——和 GUI 走同
+一条命令管线。
+
+未注册的命令回落到本仓库硬写的本地命令表（`/silent`、`/next`、`/rp`、`/rq`、
+/workspace、`/session` 等），命中失败时按 "未知命令" 提示并作为文本转发给 agent。
+DSH 的 `ctx.commands` 服务在某些极简装配下可能不挂载（缺失时会打一次 warn），
+这种情形行为完全等同之前的版本。
+
+所以：**DSH 加任何新的 `/xxx` 命令 bundle，微信端无需改动即可识别**——只要它是
+按 DSH 命令注册契约挂上去的。例如装有 `dsh-plan-mode` 时微信发 `/plan off` 收
+到原生回执 "Plan mode off."；装有 `dsh-command-goal` 时 `/goal <目标>` 收到原生
+"Goal created ..."。
+
+### 本地命令表
+
 | 命令 | 说明 |
 |---|---|
 | `/help`（`/h`、`/?`） | 帮助 |
