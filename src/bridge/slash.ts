@@ -431,3 +431,53 @@ export function formatHelp(
   );
   return lines.join("\n");
 }
+
+/**
+ * Render one projection value into a WeChat-bounded one-liner.
+ *
+ * The `ctx.sessionProjections.snapshot(session).values` map is
+ * `Record<string, unknown>` — the bridge does not (and intentionally
+ * cannot) know each plugin's exact shape. Generic rule:
+ *
+ * - `null` / `undefined` → literal text `null` / `undefined` so users
+ *   can see at a glance whether a key has state (vs. being absent).
+ * - `string` / `number` / `boolean` / `bigint` → `String(v)`.
+ * - `function` / `symbol` → `undefined` (skip — never legitimate value).
+ * - everything else (objects, arrays) → `JSON.stringify(v)` in compact
+ *   form. If the result is longer than 120 code units, truncate to 117
+ *   and append `…` — WeChat per-message cap is 4 KB but a single
+ *   projection line should stay readable on phone screens.
+ * - circular references / BigInt / values JSON cannot serialize →
+ *   `undefined`; the caller skips the key and logs once. We never
+ *   surface an unsanitized shape back to the user.
+ *
+ * Pure function — no I/O, no side effects, fully testable.
+ *
+ * @param v The projection's view output (schema-validated host side).
+ * @returns A WeChat-ready one-liner, or `undefined` to drop the row.
+ */
+export function renderProjectionValue(v: unknown): string | undefined {
+  if (v === null) return "null";
+  if (v === undefined) return "undefined";
+  const t = typeof v;
+  if (t === "string" || t === "number" || t === "boolean" || t === "bigint") {
+    return truncateForWeChat(String(v));
+  }
+  if (t === "function" || t === "symbol") return undefined;
+  let s: string;
+  try {
+    s = JSON.stringify(v);
+  } catch {
+    // circular refs, BigInt inside an object, etc.
+    return undefined;
+  }
+  // JSON.stringify never returns undefined for object/array inputs.
+  if (s === undefined) return undefined;
+  return truncateForWeChat(s);
+}
+
+/** Cap a single projection row's value at 120 code units, append `…` if over. */
+function truncateForWeChat(s: string): string {
+  if (s.length > 120) return s.slice(0, 117) + "…";
+  return s;
+}

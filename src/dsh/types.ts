@@ -128,3 +128,55 @@ export interface AskUserQuestionRequest {
 export interface UserQuestionProvider {
   ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer>;
 }
+
+// ─── Session projection registry (ctx.sessionProjections) ───
+//
+// `ctx.sessionProjections` is the host service through which every DSH
+// domain plugin publishes its current per-session state: plan mode
+// (`key: 'plan'`), goal (`key: 'goal'`), and any future mode any third-
+// party plugin registers. The registry exposes a generic read face
+// `snapshot(session)` returning `Record<string, unknown>` over every key
+// that was registered for this session — WeChat's `/status` consumes
+// this surface exactly once and renders the whole map, so a profile that
+// adds new plugins automatically lights up new rows in WeChat with no
+// bridge change.
+
+/**
+ * Whole-value projection snapshot returned by
+ * `ctx.sessionProjections.snapshot(session)` (`@deepseek-ai/dsh-session-projection`).
+ *
+ * `values` is a `Record<string, unknown>` keyed by every domain key a
+ * plugin registered for this session; the runtime shape of each value
+ * is whatever the registering plugin's `view` function returned. DSH
+ * wires schema validation on the host side, so a value that arrives
+ * here is already schema-clean.
+ *
+ * `asOfSeq` is the watermark of the log position the snapshot
+ * reflects — `-1` for an empty log (mirrors `session/subscribed.lastSeq`).
+ * The bridge currently does not consume the watermark; it is exposed
+ * in the structural surface so a future read face (e.g. a "stale?" UI
+ * badge) can reach it without a service-surface widening.
+ */
+export interface ProjectionSnapshotSurface {
+  asOfSeq: number;
+  values: Record<string, unknown>;
+}
+
+/**
+ * Structural surface of `ctx.sessionProjections`. Mirrors only
+ * `snapshot`, which is what `/status` needs; `checkpoint` / `restore` /
+ * `onChanged` are not consumed.
+ */
+export interface SessionProjectionService {
+  snapshot(session: AgentSessionLike): ProjectionSnapshotSurface;
+}
+
+/**
+ * Minimal shape the bridge needs on `agent.session` to call the
+ * snapshot face. Defined locally so we don't pull `dsh-session` types
+ * into the bridge's static surface; the host concrete `Session` fits
+ * via duck typing.
+ */
+export interface AgentSessionLike {
+  readonly seq: number;
+}

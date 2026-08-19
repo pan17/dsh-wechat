@@ -36,6 +36,7 @@ import {
   isBypassSlashCommand,
   parseCommandName,
   parseHelpCommand,
+  renderProjectionValue,
   parseModelCommand,
   parseNextCommand,
   parsePermCommand,
@@ -2291,6 +2292,39 @@ export class WeChatDSHBridge {
       ...(permission ? [`• 权限: ${permission}`] : []),
       `• 静默模式: ${user.silent ? "on" : "off"}`,
     ];
+
+    // Session-level projection registry (`ctx.sessionProjections`). One
+    // generic read face surfaces every domain plugin's current state for
+    // this session — plan mode, goal, and any future mode a third-party
+    // plugin adds. DSH adds new ones → WeChat lights up new rows here
+    // without bridge changes.
+    if (agent && agent.session) {
+      const proj = this.ops.sessionProjections();
+      if (proj) {
+        try {
+          // The bridge's structural `Agent.session` only declares the
+          // fields it touches; `seq` (the snapshot watermark index) is
+          // host-side. Duck-typed cast: dsh-session's concrete `Session`
+          // is structurally compatible with `AgentSessionLike` at
+          // runtime.
+          const { values } = proj.snapshot(agent.session as never);
+          const projectionLines: string[] = [];
+          // Stable alphabetical order so plugin load order does not
+          // change the rendered output. Keeps the WeChat message bounded
+          // and human-deterministic.
+          for (const key of Object.keys(values).sort()) {
+            const rendered = renderProjectionValue(values[key]);
+            if (rendered !== undefined) projectionLines.push(`• ${key}: ${rendered}`);
+          }
+          if (projectionLines.length > 0) {
+            lines.push("", "── 会话级状态 ──", ...projectionLines);
+          }
+        } catch (err) {
+          console.warn(`[dsh-wechat] sessionProjections.snapshot failed: ${String(err)}`);
+        }
+      }
+    }
+
     return lines.join("\n");
   }
 
