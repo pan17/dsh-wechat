@@ -20,13 +20,17 @@ export interface UserState {
   /** Working directory the bound session was created with. */
   cwd: string;
   /**
-   * Whether the user explicitly switched workspaces (/workspace, /session
-   * switch). Explicit choices are NOT overwritten by the settings-page cwd
-   * default; users without this flag follow the settings default.
-   */
+    * Whether the user explicitly switched workspaces (/workspace, /session
+    * switch). Explicit choices are NOT overwritten by the settings-page cwd
+    * default; users without this flag follow the settings default.
+    */
   cwdExplicit?: boolean;
   /** Silent mode: only send the final text of each turn. */
   silent: boolean;
+  /** Cross-session notification preference (default inherit -> follows global config). */
+  crossSessionNotify?: "inherit" | "on" | "off";
+  /** Sessions this user has ever been bound to — used for cross-session recipient resolution. */
+  watchedSessions?: string[];
 }
 
 export interface BridgeStateFile {
@@ -46,7 +50,19 @@ export class StateStore {
     try {
       if (fs.existsSync(this.filePath)) {
         const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf-8")) as BridgeStateFile;
-        if (parsed && typeof parsed === "object" && parsed.users) return parsed;
+        if (parsed && typeof parsed === "object" && parsed.users) {
+          // Normalize legacy files: ensure optional fields have safe defaults
+          for (const user of Object.values(parsed.users)) {
+            if (!Array.isArray(user.watchedSessions)) {
+              // Seed history with current binding so old users get at least their present session
+              user.watchedSessions = user.sessionId ? [user.sessionId] : [];
+            }
+            if (user.crossSessionNotify !== "on" && user.crossSessionNotify !== "off") {
+              user.crossSessionNotify = "inherit";
+            }
+          }
+          return parsed;
+        }
       }
     } catch {
       // fall through to fresh state
@@ -67,9 +83,23 @@ export class StateStore {
         sessionId: "",
         cwd,
         silent: false,
+        crossSessionNotify: "inherit",
+        watchedSessions: [],
       };
       this.state.users[userId] = user;
       this.save();
+    } else {
+      // Backfill missing fields for users created before this feature
+      let changed = false;
+      if (user.crossSessionNotify !== "on" && user.crossSessionNotify !== "off" && user.crossSessionNotify !== "inherit") {
+        user.crossSessionNotify = "inherit";
+        changed = true;
+      }
+      if (!Array.isArray(user.watchedSessions)) {
+        user.watchedSessions = user.sessionId ? [user.sessionId] : [];
+        changed = true;
+      }
+      if (changed) this.save();
     }
     return user;
   }
@@ -83,6 +113,28 @@ export class StateStore {
     if (!user) return;
     Object.assign(user, patch);
     this.save();
+  }
+
+  /** Record that `userId` has been bound to `sessionId` (for cross-session recipient resolution). */
+  watchSession(userId: string, sessionId: string): void {
+    if (!sessionId) return;
+    const user = this.state.users[userId];
+    if (!user) return;
+    if (!Array.isArray(user.watchedSessions)) user.watchedSessions = [];
+    if (!user.watchedSessions.includes(sessionId)) {
+      user.watchedSessions.push(sessionId);
+      // Cap history to avoid unbounded growth
+      if (user.watchedSessions.length > 100) user.watchedSessions = user.watchedSessions.slice(-100);
+      this.save();
+    }
+  }
+
+  /** Effective cross-session preference for display. */
+  getNotifyPreference(userId: string): "inherit" | "on" | "off" {
+    const user = this.state.users[userId];
+    if (!user) return "inherit";
+    if (user.crossSessionNotify === "on" || user.crossSessionNotify === "off") return user.crossSessionNotify;
+    return "inherit";
   }
 
   all(): UserState[] {

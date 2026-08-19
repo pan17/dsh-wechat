@@ -326,6 +326,57 @@ if (typeof context.inject === "function") {
           sendJson(res, 200, { ok: result.ok, message: result.message });
         },
       });
+      // Per-user toggles (silent / crossSessionNotify) for the WebUI
+      webServer.register({
+        kind: "prefix",
+        path: "/wechat/api/user/",
+        handler: async (req, res) => {
+          try {
+            const httpReq = req as { url?: string; method?: string; path?: string };
+            const rawUrl = (httpReq.url ?? httpReq.path ?? "") as string;
+            const prefix = "/wechat/api/user/";
+            const after = rawUrl.startsWith(prefix) ? rawUrl.slice(prefix.length) : rawUrl.split("/").pop() ?? "";
+            const userId = decodeURIComponent(after.split("?")[0]!.split("#")[0]!.trim());
+            if (!userId) {
+              sendJson(res, 400, { ok: false, message: "缺少 userId" });
+              return;
+            }
+            const patch = (await readJsonBody(req)) as { silent?: boolean; crossSessionNotify?: string };
+            const normalized: { silent?: boolean; crossSessionNotify?: "inherit" | "on" | "off" } = {};
+            if (typeof patch.silent === "boolean") normalized.silent = patch.silent;
+            if (patch.crossSessionNotify === "on" || patch.crossSessionNotify === "off" || patch.crossSessionNotify === "inherit") {
+              normalized.crossSessionNotify = patch.crossSessionNotify;
+            }
+            const result = bridge.updateUserConfig(userId, normalized);
+            sendJson(res, result.ok ? 200 : 400, result);
+          } catch (err) {
+            sendJson(res, 400, { ok: false, message: String(err) });
+          }
+        },
+      });
+      webServer.register({
+        kind: "exact",
+        path: "/wechat/api/user",
+        handler: async (req, res) => {
+          try {
+            const patch = (await readJsonBody(req)) as { userId?: string; silent?: boolean; crossSessionNotify?: string };
+            const userId = typeof patch.userId === "string" ? patch.userId.trim() : "";
+            if (!userId) {
+              sendJson(res, 400, { ok: false, message: "缺少 userId" });
+              return;
+            }
+            const normalized: { silent?: boolean; crossSessionNotify?: "inherit" | "on" | "off" } = {};
+            if (typeof patch.silent === "boolean") normalized.silent = patch.silent;
+            if (patch.crossSessionNotify === "on" || patch.crossSessionNotify === "off" || patch.crossSessionNotify === "inherit") {
+              normalized.crossSessionNotify = patch.crossSessionNotify;
+            }
+            const result = bridge.updateUserConfig(userId, normalized);
+            sendJson(res, result.ok ? 200 : 400, result);
+          } catch (err) {
+            sendJson(res, 400, { ok: false, message: String(err) });
+          }
+        },
+      });
       console.log("[dsh-wechat] Settings UI available: 设置 → WeChat；扫码页 http://127.0.0.1:3080/wechat/qr");
     });
   } else {

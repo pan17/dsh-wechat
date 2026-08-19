@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-19
+
+### Added
+
+- 跨会话通知（单用户单闸，默认关闭）：后台会话的已完成（`turn/end`）、报错（`agent/error`）、审批/提问卡通过微信提醒，卡片与完成/报错共用同一开关；新增微信命令 `/notify on|off|status`（别名 `/watch`），与网页设置同源
+- `/status` 新增 `• 跨会话通知: on/off` 一行（单用户单闸）
+- 设置页 `设置 → WeChat` 合并为单卡：连接表单（`baseUrl / cdnBaseUrl / botType / cwd / textChunkLimit / cardTimeoutMs`）+ `跨会话通知`（全局）与 `静默` 开关同卡，按 **保存配置** 统一落盘；状态与用户数同卡显示
+
+### Changed
+
+- 跨会话通知收敛为单用户单闸：`shouldNotifyCrossSession` 仅看全局 `config.crossSessionNotify`，`inherit/on/off` 的每用户分流已移除；`/notify` 直接读写全局并落 `config.json`
+- 设置页由 3 卡收敛为 1 大卡，文案精简，单用户场景不再展示多用户列表
+
+### Fixed
+
+- 关闭跨会话后，网页回答提问仍向微信推送 `✅ 提问已回答` / `🔒 权限结果` 的回声：`approval/resolved` 与 `question/resolved` 现同样受 `crossSessionNotify` 总闸门控
+- 网页 `静默` 勾选即时 `已更新` 的不一致：改为与 `跨会话通知` 同为保存才生效（`POST /wechat/api/config` + `POST /wechat/api/user {silent}` 一次保存）
+- 网页 `POST /wechat/api/user/:id` 的 `405`：移除对 `req.method` 的硬校验，新增 `POST /wechat/api/user` 直达路由（`{userId, silent}`），`prefix` 与 `exact` 双注册兜底
+
 ## [0.5.0] - 2026-08-19
 
 ### Added

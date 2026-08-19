@@ -39,6 +39,7 @@ import {
   renderProjectionSection,
   parseModelCommand,
   parseNextCommand,
+  parseNotifyCommand,
   parsePermCommand,
   parsePresetCommand,
   parseReasoningCommand,
@@ -50,6 +51,7 @@ import {
   parseStopCommand,
   parseWorkspaceCommand,
   type ModelCommand,
+  type NotifyCommand,
   type PermCommand,
   type PresetCommand,
   type ReasoningCommand,
@@ -221,6 +223,10 @@ export class WeChatDSHBridge {
    * are flushed (or reported gone).
    */
   private readonly notifiedCardSessions = new Map<string, Set<string>>();
+  /** Dedup for cross-session turn/end notifications (userId -> sessionIds already notified this turn). */
+  private readonly notifiedCrossSessionTurns = new Map<string, Set<string>>();
+  /** Last assistant text per session (for cross-session completion preview). */
+  private readonly lastAssistantTextBySession = new Map<string, string>();
   /**
    * Last user-prompt time per session (from `user/message` events with
    * source.kind === "user" — the same activity the GUI sidebar uses). Used
@@ -432,13 +438,21 @@ export class WeChatDSHBridge {
   /** Full status snapshot for the settings page / QR page. */
   getStatus(): Record<string, unknown> {
     const editable: Record<string, unknown> = {};
-    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "textChunkLimit", "cardTimeoutMs"] as const) {
+    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "textChunkLimit", "cardTimeoutMs", "crossSessionNotify"] as const) {
       editable[key] = this.config[key];
     }
     return {
       ...this.loginState,
       monitorRunning: this.monitorRunning,
       userCount: this.state.all().length,
+      users: this.state.all().map((u) => ({
+        userId: u.userId,
+        sessionId: u.sessionId,
+        cwd: u.cwd,
+        silent: u.silent,
+        crossSessionNotify: u.crossSessionNotify ?? "inherit",
+        watchedSessions: u.watchedSessions ?? [],
+      })),
       config: editable,
     };
   }
@@ -737,7 +751,7 @@ export class WeChatDSHBridge {
     }
 
     const editable: Record<string, unknown> = {};
-    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "textChunkLimit", "cardTimeoutMs"] as const) {
+    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "textChunkLimit", "cardTimeoutMs", "crossSessionNotify"] as const) {
       editable[key] = this.config[key];
     }
 
@@ -749,6 +763,26 @@ export class WeChatDSHBridge {
       return { config: editable, message: `配置已保存；工作目录已应用到 ${appliedCwd} 个用户（显式切换过的保留原样）` };
     }
     return { config: editable, message: "配置已保存" };
+  }
+
+  /**
+   * Update per-user settings from the WebUI (silent / crossSessionNotify).
+   * Returns the updated user snapshot or null when user not found.
+   */
+  updateUserConfig(
+    userId: string,
+    patch: { silent?: boolean; crossSessionNotify?: "inherit" | "on" | "off" },
+  ): { ok: boolean; message: string; user?: UserState } {
+    const user = this.state.getUser(userId);
+    if (!user) return { ok: false, message: `未找到用户 ${userId}` };
+    const toUpdate: Partial<UserState> = {};
+    if (typeof patch.silent === "boolean") toUpdate.silent = patch.silent;
+    if (patch.crossSessionNotify === "on" || patch.crossSessionNotify === "off" || patch.crossSessionNotify === "inherit") {
+      toUpdate.crossSessionNotify = patch.crossSessionNotify;
+    }
+    if (Object.keys(toUpdate).length === 0) return { ok: false, message: "无有效更新字段" };
+    this.state.update(userId, toUpdate);
+    return { ok: true, message: "已更新", user: this.state.getUser(userId) };
   }
 
   // ─── User lookup ───
@@ -872,6 +906,12 @@ export class WeChatDSHBridge {
         return;
       }
 
+      const notifyCmd = parseNotifyCommand(text);
+      if (notifyCmd) {
+        await this.handleNotifyCommand(userId, notifyCmd);
+        return;
+      }
+
       const status = parseStatusCommand(text);
       if (status) {
         await this.sendReply(userId, await this.formatStatus(user));
@@ -949,6 +989,7 @@ export class WeChatDSHBridge {
       return;
     }
     this.state.update(user.userId, { sessionId: user.sessionId });
+    this.trackWatchedSession(user.userId, user.sessionId);
 
     const tempDir = path.join(this.config.storageDir, "tempfile");
     const blocks = await weixinMessageToPrompt(msg, this.config.cdnBaseUrl, (m) => this.log(m), tempDir);
@@ -1032,8 +1073,44 @@ export class WeChatDSHBridge {
       }
     }
 
+    // Track last assistant text for cross-session completion preview (for any session)
+    if (event.type === "assistant/message") {
+      const data = event.data as { message?: { content?: Array<{ type: string; text?: string }> } };
+      const text = (data?.message?.content ?? [])
+        .filter((b) => b.type === "text" && b.text)
+        .map((b) => b.text)
+        .join("\n");
+      if (text) this.lastAssistantTextBySession.set(sessionId, text);
+    }
+
     const user = this.userForAgent(sessionId);
-    if (!user) return;
+    if (!user) {
+      if (event.type === "turn/end") {
+        void this.notifyCrossSessionTurnEnd(sessionId);
+      }
+      return;
+    }
+
+    if (event.type === "turn/end") {
+      void (async () => {
+        const recipients = await this.resolveCrossSessionRecipients(sessionId);
+        for (const r of recipients) {
+          if (r.userId === user.userId) continue;
+          if (!this.shouldNotifyCrossSession(r.userId)) continue;
+          const ctx = await this.sessionContextLabel(sessionId);
+          const preview = this.lastAssistantTextBySession.get(sessionId);
+          const suffix = preview ? "\n> " + preview.slice(0, 80) + (preview.length > 80 ? "…" : "") : "";
+          const body = ctx + "\n✅ 任务已完成" + suffix + "\n发送 /session switch <编号> 切换查看。";
+          if (!this.token || !this.contextTokens.has(r.userId)) continue;
+          const set = this.notifiedCrossSessionTurns.get(r.userId) ?? new Set<string>();
+          if (set.has(sessionId)) continue;
+          set.add(sessionId);
+          this.notifiedCrossSessionTurns.set(r.userId, set);
+          void this.sendReply(r.userId, body).catch(() => {});
+          setTimeout(() => this.notifiedCrossSessionTurns.get(r.userId)?.delete(sessionId), 30_000);
+        }
+      })();
+    }
 
     switch (event.type) {
       case "assistant/message": {
@@ -1067,6 +1144,7 @@ export class WeChatDSHBridge {
         // the typing indicator here, regardless of whether any text was
         // produced.
         this.endTyping(user.userId, "turn-end");
+        this.clearCrossSessionTurnNotified(user.userId, sessionId);
         break;
       }
     }
@@ -1075,9 +1153,13 @@ export class WeChatDSHBridge {
   /** Notify the bound user of an agent error. */
   handleAgentError(agentId: string, error: unknown): void {
     const user = this.userForAgent(agentId);
-    if (!user) return;
+    if (!user) {
+      void this.notifyCrossSessionError(agentId, error);
+      return;
+    }
     this.endTyping(user.userId, "agent-error");
     void this.sendReply(user.userId, `⚠️ Agent 出错: ${String(error)}`).catch(() => {});
+    void this.notifyCrossSessionError(agentId, error);
   }
 
   // ─── Mux frame stream: approval/question cards (GUI-equivalent mirror) ───
@@ -1174,13 +1256,17 @@ export class WeChatDSHBridge {
         this.pendingApprovals.set(userId, list);
         // Show the card immediately only when it belongs to the user's
         // current session; otherwise notify once and flush on switch.
+        // Unified cross-session switch gates the notification.
         // The typing indicator stays on through card waits — agent.status
         // is still "running" until turn/end.
         const userState = this.state.getUser(userId);
         if (userState?.sessionId === sessionId) {
           void this.sendApprovalCard(userId, card, list.length).catch(() => {});
         } else {
-          void this.notifyCardPending(userId, sessionId).catch(() => {});
+          if (!this.shouldNotifyCrossSession(userId)) {
+          } else {
+            void this.notifyCardPending(userId, sessionId).catch(() => {});
+          }
         }
         break;
       }
@@ -1192,6 +1278,7 @@ export class WeChatDSHBridge {
           if (!entry) continue;
           const toolName = entry.toolName;
           this.removeApprovalCard(userId, entry.rpcId);
+          if (!this.shouldNotifyCrossSession(userId)) break;
           const label = outcome === "allowed-once" ? "✅ 已允许" : outcome === "rejected" ? "⛔ 已拒绝" : "🚫 已取消";
           void this.sendReply(userId, `🔒 权限请求结果：${label}（${toolName}）`).catch(() => {});
           break;
@@ -1218,13 +1305,16 @@ export class WeChatDSHBridge {
         const list = this.pendingQuestions.get(userId) ?? [];
         list.push(card);
         this.pendingQuestions.set(userId, list);
-        // Same current-session policy as approval cards. Typing indicator
-        // stays on through card waits — agent.status is still "running".
+        // Same current-session policy as approval cards. Unified switch gates notification.
+        // Typing indicator stays on through card waits — agent.status is still "running".
         const userState = this.state.getUser(userId);
         if (userState?.sessionId === sessionId) {
           void this.sendQuestionCard(userId, card, questions, list.length).catch(() => {});
         } else {
-          void this.notifyCardPending(userId, sessionId).catch(() => {});
+          if (!this.shouldNotifyCrossSession(userId)) {
+          } else {
+            void this.notifyCardPending(userId, sessionId).catch(() => {});
+          }
         }
         break;
       }
@@ -1235,6 +1325,7 @@ export class WeChatDSHBridge {
           const entry = list.find((c) => c.rpcId === questionRpcId);
           if (!entry) continue;
           this.removeQuestionCard(userId, entry.rpcId);
+          if (!this.shouldNotifyCrossSession(userId)) break;
           void this.sendReply(userId, outcome === "answered" ? "✅ 提问已回答。" : "🚫 提问已取消。").catch(() => {});
           break;
         }
@@ -1327,6 +1418,86 @@ export class WeChatDSHBridge {
   }
 
   /**
+   * Whether cross-session notifications are enabled (single-user: global only).
+   */
+  private shouldNotifyCrossSession(_userId: string): boolean {
+    return this.config.crossSessionNotify === true;
+  }
+
+  private async resolveCrossSessionRecipients(sessionId: string): Promise<UserState[]> {
+    const record = await this.ops.findSessionRecord(sessionId);
+    if (!record) return [];
+    const recipients: UserState[] = [];
+    const seen = new Set<string>();
+    for (const user of this.state.all()) {
+      if (user.watchedSessions?.includes(sessionId)) {
+        recipients.push(user);
+        seen.add(user.userId);
+      }
+    }
+    if (recipients.length > 0) return recipients;
+    if (record.header.cwd) {
+      const workspaces = this.ops.listWorkspaces();
+      const owningWs = workspaces.find((w) => w.path === record.header.cwd) ?? workspaces.find((w) => w.sessionIds.includes(sessionId));
+      if (owningWs) {
+        for (const user of this.state.all()) {
+          if (!seen.has(user.userId) && user.cwd === owningWs.path) {
+            recipients.push(user);
+            seen.add(user.userId);
+          }
+        }
+        if (recipients.length > 0) return recipients;
+      }
+    }
+    const first = this.state.all()[0];
+    if (first && !seen.has(first.userId)) recipients.push(first);
+    return recipients;
+  }
+
+  private async notifyCrossSessionTurnEnd(sessionId: string): Promise<void> {
+    const recipients = await this.resolveCrossSessionRecipients(sessionId);
+    if (recipients.length === 0) return;
+    const context = await this.sessionContextLabel(sessionId);
+    const preview = this.lastAssistantTextBySession.get(sessionId);
+    const previewSuffix = preview ? "\n> " + preview.slice(0, 80) + (preview.length > 80 ? "…" : "") : "";
+    const body = context + "\n✅ 任务已完成" + previewSuffix + "\n发送 /session switch <编号> 切换查看。";
+    for (const user of recipients) {
+      if (user.sessionId === sessionId) continue;
+      if (!this.shouldNotifyCrossSession(user.userId)) continue;
+      if (!this.token || !this.contextTokens.has(user.userId)) continue;
+      const set = this.notifiedCrossSessionTurns.get(user.userId) ?? new Set<string>();
+      if (set.has(sessionId)) continue;
+      set.add(sessionId);
+      this.notifiedCrossSessionTurns.set(user.userId, set);
+      void this.sendReply(user.userId, body).catch(() => {});
+      setTimeout(() => { this.notifiedCrossSessionTurns.get(user.userId)?.delete(sessionId); }, 30_000);
+    }
+  }
+
+  private async notifyCrossSessionError(sessionId: string, error: unknown): Promise<void> {
+    const recipients = await this.resolveCrossSessionRecipients(sessionId);
+    if (recipients.length === 0) return;
+    const context = await this.sessionContextLabel(sessionId);
+    const msg = String(error).slice(0, 200);
+    const body = context + "\n⚠️ 任务报错: " + msg + "\n发送 /session switch <编号> 查看。";
+    for (const user of recipients) {
+      if (user.sessionId === sessionId) continue;
+      if (!this.shouldNotifyCrossSession(user.userId)) continue;
+      if (!this.token || !this.contextTokens.has(user.userId)) continue;
+      void this.sendReply(user.userId, body).catch(() => {});
+    }
+  }
+
+  private clearCrossSessionTurnNotified(userId: string, sessionId: string): void {
+    this.notifiedCrossSessionTurns.get(userId)?.delete(sessionId);
+  }
+
+  private trackWatchedSession(userId: string, sessionId: string): void {
+    if (!sessionId) return;
+    this.state.watchSession(userId, sessionId);
+  }
+
+  /**
    * After the user switches into `sessionId`, flush any pending cards for
    * it: show them if still pending, or — only when the user was notified
    * about this session earlier — say they are gone (timeout / handled in
@@ -1351,6 +1522,7 @@ export class WeChatDSHBridge {
     // Clear the notice either way: the user has now been shown the cards
     // (or told they are gone); a new card will notify again.
     this.notifiedCardSessions.get(userId)?.delete(sessionId);
+    this.clearCrossSessionTurnNotified(userId, sessionId);
   }
 
   /**
@@ -1600,6 +1772,37 @@ export class WeChatDSHBridge {
 
   // ─── Slash command handlers ───
 
+  private async handleNotifyCommand(userId: string, cmd: NotifyCommand): Promise<void> {
+    if (cmd.kind === "status") {
+      const on = this.shouldNotifyCrossSession(userId) ? "on" : "off";
+      await this.sendReply(userId, `🔔 跨会话通知: ${on}（已完成/报错/卡片，单用户）\n切换: /notify on|off`);
+      return;
+    }
+    if (cmd.kind === "on") {
+      this.config.crossSessionNotify = true;
+      try { this.persistGlobalCrossNotify(true); } catch {}
+      await this.sendReply(userId, "✅ 跨会话通知已开启。");
+      return;
+    }
+    if (cmd.kind === "off") {
+      this.config.crossSessionNotify = false;
+      try { this.persistGlobalCrossNotify(false); } catch {}
+      await this.sendReply(userId, "🔕 跨会话通知已关闭。");
+      return;
+    }
+  }
+
+  private persistGlobalCrossNotify(enabled: boolean): void {
+    try {
+      const cfgPath = require("node:path").join(this.config.storageDir, "config.json");
+      let cur: Record<string, unknown> = {};
+      try { cur = JSON.parse(require("node:fs").readFileSync(cfgPath, "utf-8")); } catch {}
+      cur.crossSessionNotify = enabled;
+      require("node:fs").mkdirSync(require("node:path").dirname(cfgPath), { recursive: true });
+      require("node:fs").writeFileSync(cfgPath, JSON.stringify(cur, null, 2), "utf-8");
+    } catch {}
+  }
+
   private async handleSilentCommand(userId: string, mode: "on" | "off" | "status"): Promise<void> {
     const user = this.state.ensureUser(userId, this.config.cwd);
     if (mode === "on") {
@@ -1702,6 +1905,7 @@ export class WeChatDSHBridge {
       user.sessionId = candidate;
     }
     this.state.update(user.userId, { cwd: workspacePath, cwdExplicit: true, sessionId: user.sessionId });
+    this.trackWatchedSession(user.userId, user.sessionId);
   }
 
   private async handleSessionCommand(userId: string, cmd: SessionCommand): Promise<void> {
@@ -1770,6 +1974,7 @@ export class WeChatDSHBridge {
           user.cwdExplicit = true;
         }
         this.state.update(user.userId, { sessionId: user.sessionId, cwd: user.cwd, cwdExplicit: user.cwdExplicit });
+        this.trackWatchedSession(user.userId, user.sessionId);
         const agent = await this.agents.ensure(user);
         await this.sendReply(userId, `✅ 已切换到会话 ${record.header.id.slice(0, 12)}（${record.header.cwd ?? "?"}）${agent ? `，Agent ${agent.status}` : ""}。`);
         // Flush any pending cards for the session just switched into
@@ -1794,6 +1999,7 @@ export class WeChatDSHBridge {
         if (blank) {
           user.sessionId = blank;
           this.state.update(user.userId, { sessionId: user.sessionId });
+          this.trackWatchedSession(user.userId, blank);
           const agent = await this.agents.ensure(user);
           await this.sendReply(userId, `✅ 已复用空白会话 ${blank.slice(0, 12)}（${user.cwd}）${agent ? `，Agent ${agent.status}` : ""}。`);
           return;
@@ -1802,6 +2008,7 @@ export class WeChatDSHBridge {
         this.state.update(user.userId, { sessionId: "" });
         const agent = await this.agents.ensure(user);
         this.state.update(user.userId, { sessionId: user.sessionId });
+        this.trackWatchedSession(user.userId, user.sessionId);
         await this.sendReply(userId, `✅ 已创建新会话（${user.cwd}）${agent ? "，Agent 就绪" : "，但 Agent 创建失败"}。`);
         return;
       }
@@ -2281,6 +2488,7 @@ export class WeChatDSHBridge {
       effortSuffix = `（推理: ${level?.name ?? active.reasoningEffort}）`;
     }
 
+    const crossEffective = this.shouldNotifyCrossSession(user.userId) ? "on" : "off";
     const lines = [
       "📊 当前状态",
       `• 工作区: ${user.cwd}`,
@@ -2291,6 +2499,7 @@ export class WeChatDSHBridge {
       ...(contextLabel ? [contextLabel] : []),
       ...(permission ? [`• 权限: ${permission}`] : []),
       `• 静默模式: ${user.silent ? "on" : "off"}`,
+      `• 跨会话通知: ${crossEffective}`,
     ];
 
     // Session-level projection registry (`ctx.sessionProjections`). One

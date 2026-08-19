@@ -14,6 +14,10 @@ export type SilentCommand = { kind: "silent"; mode: "on" | "off" | "status" };
 export type StopCommand = { kind: "stop" };
 export type RejectQuestionCommand = { kind: "reject-question" };
 export type RejectPermissionCommand = { kind: "reject-permission" };
+export type NotifyCommand =
+  | { kind: "status" }
+  | { kind: "on" }
+  | { kind: "off" };
 
 export type SlashCommand =
   | HelpCommand
@@ -54,6 +58,23 @@ export function parseSilentCommand(text: string): SilentCommand | null {
 export function parseStopCommand(text: string): StopCommand | null {
   const trimmed = text.trim().toLowerCase();
   if (trimmed === "/stop") return { kind: "stop" };
+  return null;
+}
+
+/**
+ * Parse `/notify` (aliases `/watch`, `/notice`) — cross-session notification toggle.
+ *   /notify          → status
+ *   /notify status   → status
+ *   /notify on|off   → on/off (also enable/disable)
+ */
+export function parseNotifyCommand(text: string): NotifyCommand | null {
+  const trimmed = text.trim().toLowerCase();
+  const m = trimmed.match(/^\/(?:notify|watch|notice)(?:\s+(.*))?$/);
+  if (!m) return null;
+  const rest = (m[1] ?? "").trim();
+  if (!rest || rest === "status") return { kind: "status" };
+  if (rest === "on" || rest === "enable" || rest === "enabled") return { kind: "on" };
+  if (rest === "off" || rest === "disable" || rest === "disabled") return { kind: "off" };
   return null;
 }
 
@@ -357,7 +378,8 @@ export function isBypassSlashCommand(text: string): boolean {
     parsePresetCommand(text) !== null ||
     parseModelCommand(text) !== null ||
     parsePermCommand(text) !== null ||
-    parseReasoningCommand(text) !== null
+    parseReasoningCommand(text) !== null ||
+    parseNotifyCommand(text) !== null
   );
 }
 
@@ -392,6 +414,9 @@ const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "reject-permission",
   "rq",
   "reject-question",
+  "notify",
+  "watch",
+  "notice",
 ]);
 
 /** The /help reply, optionally augmented with native command descriptors. */
@@ -410,6 +435,7 @@ export function formatHelp(
     "• /perm (permission) — status | list | switch <名称|编号> | default [名称|编号]（会话权限实时切换；默认写入 DSH 设置，与 GUI 同步）",
     "• /reasoning — 查看/设置推理等级：/reasoning [list|default|<等级>]",
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
+    "• /notify on|off|status (watch) — 跨会话通知：完成/报错/卡片（默认关闭）",
     "• /stop — 中断当前任务",
     "• /next — 继续发送因微信限制被缓存的消息",
     "• /rp — 拒绝所有待处理权限卡（微信端）",

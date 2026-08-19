@@ -18,7 +18,7 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
   `~/.dsh-wechat/tempfile/`，本地路径作为附件注入）
 - **接收** — agent 回复文本回微信；`send_wechat` 工具可主动推送文本/文件到微信
 - **微信 slash 命令** — `/workspace`、`/session`、`/preset`、`/model`、
-  `/perm`、`/silent`、`/next`、`/status`、`/stop`、`/rp`、`/rq` 等
+  `/perm`、`/silent`、`/notify`、`/next`、`/status`、`/stop`、`/rp`、`/rq` 等
   由 bridge 直接处理（见下方命令表）
 - **审批/提问卡（双端同卡）** — 微信与 GUI 弹一致的原生审批/提问卡，
   谁先回复谁生效（原生防双决）
@@ -26,10 +26,10 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
   自动注入"你正在通过微信(WeChat)与用户聊天"（runtime context，微信会话
   才知道要调整回复格式）；从 GUI 发消息时该提示词自动消失——按消息来源
   动态切换，新旧会话（GUI/微信创建）一视同仁
-- **静默模式** — `/silent on` 后每轮只发送最终回复
+- **静默模式** — `/silent on` 后每轮只发送最终回复，设置页可切换
+- **跨会话通知** — 后台会话的已完成/报错/卡片通过微信提醒，`/notify on|off|status` 切换，默认关闭（单用户单闸）
 - **二维码登录** — `http://127.0.0.1:3080/wechat/qr` 扫码登录，设置页内嵌
-- **设置页 UI** — DSH 设置 → **WeChat**：扫码、状态、重连、退出登录、
-  连接配置（保存即生效，存储于 `~/.dsh-wechat/config.json`）
+- **设置页 UI** — DSH 设置 → **WeChat**：单卡展示状态、扫码、重连、退出登录、连接配置与通知/静默开关（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
 - **断点续传** — `sync-buf` 与微信会话映射持久化，重启 DSH 后自动恢复会话
 
 ## 安装（部署到 DSH profile）
@@ -94,14 +94,15 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 | 命令 | 说明 |
 |---|---|
 | `/help`（`/h`、`/?`） | 帮助 |
-| `/status` | 当前状态：工作区、会话、Agent、Preset、模型、上下文、权限、静默；末尾追加 DSH 通过 `ctx.sessionProjections` 注册的所有会话级状态，分四段显示——`[模式]`（plan / goal / subagent / todos）、`[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类）；DSH 加新 plugin 自动出现 |
+| `/status` | 当前状态：工作区、会话、Agent、Preset、模型、上下文、权限、静默、跨会话通知；末尾追加 DSH 通过 `ctx.sessionProjections` 注册的所有会话级状态，分四段显示——`[模式]`（plan / goal / subagent / todos）、`[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类）；DSH 加新 plugin 自动出现 |
 | `/workspace (ws) — list \| status \| switch <编号\|路径> \| add <路径>` | 工作区管理（list 显示各工作区会话数，不含已归档；switch 恢复该目录最近会话，无则新建） |
 | `/session (s) — list [current] \| switch <编号> \| new \| status` | 会话管理（list 最近 20 个，标记当前，不显示 GUI 已归档会话；`current` 只看当前工作目录；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建） |
 | `/preset (p) — list \| switch <名称\|编号> \| status` | Preset 管理（默认写入 DSH 设置，与 GUI 同步；当前会话无内容时立即应用） |
 | `/model — list [提供商] \| switch <提供商/模型> \| status` | 模型管理（切换立即作用于当前会话 + 设为默认） |
 | `/perm — status \| list \| switch <名称\|编号> \| default [名称\|编号]` | 权限管理（switch 实时切当前会话；default 写 DSH 设置，新会话生效） |
 | `/reasoning — [list \| default \| <等级>]` | 推理等级：查看当前/默认与模型支持的等级；`<等级>` 切换（实时 + 写默认）；`default` 恢复模型默认 |
-| `/silent on\|off`（`/sl`） | 静默模式：开启后 agent 每轮的中间过程输出（工具调用、思考等）不再逐条推送，只在轮次结束时发送最终回复，避免刷屏；跨重启持久化 |
+| `/silent on\|off`（`/sl`） | 静默模式：开启后 agent 每轮的中间过程输出（工具调用、思考等）不再逐条推送，只在轮次结束时发送最终回复，避免刷屏；跨重启持久化，设置页可切换 |
+| `/notify on\|off\|status`（`/watch`） | 跨会话通知：后台会话的已完成/报错/卡片提醒，默认关闭（单用户单闸，设置页可切换） |
 | `/stop` | 中断当前任务 |
 | `/next` | 继续发送因微信限制被缓存的消息 |
 | `/rp` / `/rq` | 拒绝所有待处理权限卡 / 提问卡（微信端） |
@@ -154,13 +155,13 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 同款交付），挂载到 `settings.section` slot（nav 顺序 40）：
 
 - **状态卡** — 登录阶段（未登录/等待扫码/已扫码/已登录/失败）、Bot ID、
-  监控运行状态、已绑定用户数
+  监控运行状态、已绑定用户数，与 `跨会话通知` / `静默` 开关同卡展示
 - **扫码** — 未登录时页面内直接显示二维码，扫码确认后自动进入已登录
 - **操作按钮** — `重新扫码`（清除 token 重新登录）、`重连`（重启长轮询
-  监控，token 失效时自动回到扫码）、`退出登录`
+  监控，token 失效时自动回到扫码）、`退出登录`，与保存配置同行
 - **连接配置** — baseUrl / cdnBaseUrl / botType / cwd /
-  textChunkLimit / cardTimeoutMs；保存即生效，
-  网关参数变更自动重连；存储于 `~/.dsh-wechat/config.json`
+  textChunkLimit / cardTimeoutMs / 跨会话通知（全局）/ 静默；保存即生效，
+  网关参数变更自动重连；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
 
 与宿主通信走插件自己的 HTTP API（`/wechat/api/status|config|relogin|
 reconnect|logout`），客户端零 `@deepseek-ai` 依赖。
@@ -186,6 +187,7 @@ reconnect|logout`），客户端零 `@deepseek-ai` 依赖。
 | `cwd` | `process.cwd()` | 新会话工作目录 |
 | `textChunkLimit` | `4000` | 微信单条消息长度上限 |
 | `cardTimeoutMs` | `1800000` | 提问/权限卡软超时（30 分钟） |
+| `crossSessionNotify` | `false` | 跨会话通知总闸（已完成/报错/卡片，单用户） |
 
 > 新会话的 agent preset 由 DSH 设置文档（`agent-presets` namespace，GUI
 > 设置页或微信 `/preset switch` 修改）决定，插件不再提供 `agentPreset`
