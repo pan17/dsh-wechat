@@ -7,7 +7,6 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import {
-  parseCompactCommand,
   parseHelpCommand,
   parseModelCommand,
   parseNextCommand,
@@ -134,24 +133,6 @@ describe("slash parsers", () => {
     expect(parseReasoningCommand("reasoning list")).toBeNull();
   });
 
-  it("parseCompactCommand: bare /compact + trailing whitespace accepted; any extra args preserved", () => {
-    // Bare and trailing-whitespace-only forms (the registered handler's
-    // `USAGE: /compact (no arguments)` rejects anything past trim).
-    expect(parseCompactCommand("/compact")).toEqual({ kind: "compact", extra: "" });
-    expect(parseCompactCommand("/compact ")).toEqual({ kind: "compact", extra: "" });
-    expect(parseCompactCommand("/compact\t")).toEqual({ kind: "compact", extra: "" });
-    expect(parseCompactCommand("/compact  \t  ")).toEqual({ kind: "compact", extra: "" });
-    expect(parseCompactCommand("  /compact  ")).toEqual({ kind: "compact", extra: "" });
-    // Extra input is captured verbatim (handler echoes the usage error).
-    expect(parseCompactCommand("/compact foo")).toEqual({ kind: "compact", extra: "foo" });
-    expect(parseCompactCommand("/compact   bar baz")).toEqual({ kind: "compact", extra: "bar baz" });
-    // Anything that isn't /compact exactly.
-    expect(parseCompactCommand("/compact?")).toBeNull();
-    expect(parseCompactCommand("/")).toBeNull();
-    expect(parseCompactCommand("compact")).toBeNull();
-    expect(parseCompactCommand("/compacts")).toBeNull();
-  });
-
   it("parseNextCommand", () => {
     expect(parseNextCommand("/next")).toBe(true);
     expect(parseNextCommand("  /next  ")).toBe(true);
@@ -168,10 +149,14 @@ describe("slash parsers", () => {
     expect(help).toContain("/model");
     expect(help).toContain("/perm");
     expect(help).toContain("/reasoning");
-    expect(help).toContain("/compact");
     expect(help).toContain("/silent");
     expect(help).toContain("/stop");
     expect(help).toContain("/next");
+    // /compact used to be in this list — it is now a native command
+    // (dsh-command-compact) and shows up only when the host actually
+    // registered it. Bare `formatHelp()` without a native snapshot
+    // must NOT advertise it.
+    expect(help).not.toContain("/compact");
   });
 });
 
@@ -199,8 +184,6 @@ describe("isBypassSlashCommand", () => {
     expect(isBypassSlashCommand("/perm status")).toBe(true);
     expect(isBypassSlashCommand("/permission list")).toBe(true);
     expect(isBypassSlashCommand("/reasoning high")).toBe(true);
-    expect(isBypassSlashCommand("/compact")).toBe(true);
-    expect(isBypassSlashCommand("/compact extra")).toBe(true);
   });
 
   it("returns false for card-specific commands and plain text", () => {

@@ -418,6 +418,62 @@ describe("Native command dispatch via ctx.commands", () => {
     // Make sure the description did NOT leak into the reply.
     expect(text).not.toContain("Enter or leave plan mode");
   });
+
+  it("routes /compact through the generic native dispatch (replaces the local handleCompactCommand)", async () => {
+    // /compact used to have a dedicated `handleCompactCommand` that
+    // called `ctx.get("commands").execute` directly. After the
+    // cleanup it flows through `tryNativeCommand` like every other
+    // registered command — no bridge-owned special case.
+    const mock = makeMockAgent("wx-s1");
+    const commands = makeMockCommands({
+      registry: new Map([
+        [
+          "compact",
+          {
+            description: "Compact older conversation history",
+            reply: { kind: "success", text: "Compacted 12 history items (~3400 tokens)." },
+          },
+        ],
+      ]),
+    });
+    const bridge = makeBridge({ agent: mock, commands });
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/compact"),
+    );
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    expect(text).toBe("Compacted 12 history items (~3400 tokens).");
+    expect(mock.received.length).toBe(0);
+  });
+
+  it("surfaces the registered handler's usage message when /compact receives trailing input", async () => {
+    // The host's dsh-command-compact rejects any extra args with the
+    // canonical `Usage: /compact (no arguments)` text. The bridge now
+    // forwards the error verbatim — same reply the GUI shows.
+    const mock = makeMockAgent("wx-s1");
+    const commands = makeMockCommands({
+      registry: new Map([
+        [
+          "compact",
+          {
+            description: "Compact older conversation history",
+            reply: { kind: "error", text: "Usage: /compact (no arguments)" },
+          },
+        ],
+      ]),
+    });
+    const bridge = makeBridge({ agent: mock, commands });
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/compact extra"),
+    );
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    expect(text).toBe("⚠️ 命令出错：Usage: /compact (no arguments)");
+  });
 });
 
 describe("/help discovery of native commands", () => {
@@ -452,19 +508,19 @@ describe("/help discovery of native commands", () => {
     expect(text).toContain("/status — 当前会话");
   });
 
-  it("de-duplicates names that already exist in the local whitelist", async () => {
+  it("de-duplicates names that still live in the local whitelist (e.g. /status from a third-party plugin)", async () => {
+    // /status stays local because the bridge owns its reply (it reads
+    // session / model / perm state the host doesn't expose directly).
+    // If a third-party plugin re-registered /status, the local row
+    // must win — the native row must NOT also appear, or users would
+    // see two entries for one command.
     const mock = makeMockAgent("wx-s1");
-    // Suppose a future bundle re-registered /compact (the current
-    // `dsh-command-compact` does, in fact — `name: 'compact'`). The
-    // local row carries the full subcommand grammar; the native row
-    // must NOT also appear, or users would see two entries for one
-    // command.
     const commands = makeMockCommands({
       registry: new Map([
-        ["compact", { description: "Manual compact", reply: { kind: "success", text: "" } }],
+        ["status", { description: "Third-party status", reply: { kind: "success", text: "" } }],
       ]),
       listSnapshot: [
-        { name: "compact", description: "Manual compact", input: { hint: "" } },
+        { name: "status", description: "Third-party status", input: { hint: "" } },
       ],
     });
     const bridge = makeBridge({ agent: mock, commands });
@@ -474,13 +530,37 @@ describe("/help discovery of native commands", () => {
     );
 
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
-    // The local /compact row exists once.
-    const compactLocalMatches = text.match(/• \/compact/g);
-    expect(compactLocalMatches?.length).toBe(1);
-    // The "DSH 原生命令" section appears (we have at least one
-    // command listed) but compact is filtered out of it.
+    const statusLocalMatches = text.match(/• \/status/g);
+    expect(statusLocalMatches?.length).toBe(1);
     const nativeSection = text.split("── DSH 原生命令")[1] ?? "";
-    expect(nativeSection).not.toMatch(/\/compact/);
+    expect(nativeSection).not.toMatch(/\/status/);
+  });
+
+  it("lists /compact under the native section (no longer duplicated as a local command)", async () => {
+    // /compact is a native command only (`dsh-command-compact`).
+    // After this change the local row is gone; the host descriptor is
+    // the single source of truth.
+    const mock = makeMockAgent("wx-s1");
+    const commands = makeMockCommands({
+      registry: new Map([
+        ["compact", { description: "Compact older conversation history", reply: { kind: "success", text: "" } }],
+      ]),
+      listSnapshot: [
+        { name: "compact", description: "Compact older conversation history", input: { hint: "" } },
+      ],
+    });
+    const bridge = makeBridge({ agent: mock, commands });
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/help"),
+    );
+
+    const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    // One row total, in the native section.
+    const compactMatches = text.match(/• \/compact/g);
+    expect(compactMatches?.length).toBe(1);
+    const nativeSection = text.split("── DSH 原生命令")[1] ?? "";
+    expect(nativeSection).toContain("/compact — Compact older conversation history");
   });
 
   it("falls back to the local help text when commandsCtx is unavailable", async () => {
