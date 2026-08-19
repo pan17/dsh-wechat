@@ -380,9 +380,45 @@ export function isBypassSlashCommand(text: string): boolean {
   );
 }
 
-/** The /help reply. */
-export function formatHelp(): string {
-  return [
+/**
+ * DSH `ctx.commands` names already documented by the local whitelist
+ * below. Used by `formatHelp(nativeCommands)` to de-duplicate the
+ * "/xxx — 说明" section so users do not see two rows for the same
+ * name (the local row stays the authoritative one because it carries
+ * the full subcommand grammar; native rows only describe their
+ * discovery-surface description).
+ */
+const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
+  "help",
+  "status",
+  "workspace",
+  "ws",
+  "session",
+  "s",
+  "preset",
+  "p",
+  "agent",
+  "a",
+  "model",
+  "perm",
+  "permission",
+  "reasoning",
+  "compact",
+  "silent",
+  "sl",
+  "stop",
+  "next",
+  "rp",
+  "reject-permission",
+  "rq",
+  "reject-question",
+]);
+
+/** The /help reply, optionally augmented with native command descriptors. */
+export function formatHelp(
+  nativeCommands?: ReadonlyArray<{ name: string; description?: string; input?: { hint?: string } }>,
+): string {
+  const lines: string[] = [
     "🤖 DSH 微信助手 — 命令列表",
     "",
     "• /help (h, ?) — 显示帮助",
@@ -399,8 +435,20 @@ export function formatHelp(): string {
     "• /next — 继续发送因微信限制被缓存的消息",
     "• /rp — 拒绝所有待处理权限卡（微信端）",
     "• /rq — 拒绝所有待处理的问题卡（微信端）",
+  ];
+  if (nativeCommands && nativeCommands.length > 0) {
+    lines.push("", "── DSH 原生命令（当前 profile 已注册）──");
+    for (const cmd of nativeCommands) {
+      if (LOCAL_COMMAND_NAMES.has(cmd.name)) continue;
+      const desc = cmd.description?.trim() || "(未提供说明)";
+      const hint = cmd.input?.hint ? `  ${cmd.input.hint}` : "";
+      lines.push(`• /${cmd.name}${hint} — ${desc}`);
+    }
+  }
+  lines.push(
     "",
     "权限审批完全走 DSH 原生机制（沙箱升级触发），GUI 与微信双端同卡，谁先回复谁生效。",
     "其他 /xxx 命令会作为文本转发给 agent。",
-  ].join("\n");
+  );
+  return lines.join("\n");
 }

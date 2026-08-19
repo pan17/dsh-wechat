@@ -58,9 +58,11 @@ interface MockCommandsOptions {
   executeThrows?: unknown;
   /** Find throws on every call. */
   findThrows?: unknown;
+  /** Static list snapshot returned by `list`. Defaults to descriptors derived from `registry`. */
+  listSnapshot?: Array<{ name: string; description?: string; input?: { hint?: string } }>;
 }
 
-function makeMockCommands({ registry, executeThrows, findThrows }: MockCommandsOptions) {
+function makeMockCommands({ registry, executeThrows, findThrows, listSnapshot }: MockCommandsOptions) {
   return {
     find: (agent: unknown, name: string) => {
       if (findThrows) throw findThrows;
@@ -68,17 +70,25 @@ function makeMockCommands({ registry, executeThrows, findThrows }: MockCommandsO
       if (!entry) return undefined;
       return { name, description: entry.description };
     },
+    // The real `execute` returns `CommandExecution` = `{ commandId, result }`,
+    // where `result` is the `CommandResult` = `{ kind: 'success', text? } |
+    // { kind: 'error', text }` that the handler returned. We key on the
+    // name parsed off the leading-slash line so the bridge sees a
+    // faithful surface.
     execute: async (agent: unknown, line: string) => {
       if (executeThrows) throw executeThrows;
-      // Convention used by the real @deepseek-ai/dsh-commands: the
-      // handler returns `undefined` for unknown names, a `CommandResult`
-      // otherwise. We key on the name parsed off the leading-slash
-      // line so the bridge sees a faithful surface.
       const nameMatch = /^\/([a-z_][a-z0-9_-]*)/.exec(line);
       if (!nameMatch) return undefined;
       const entry = registry.get(nameMatch[1]!);
       if (!entry) return undefined;
-      return entry.reply as { kind: "success" | "error"; text?: string };
+      return { commandId: `cmd-${nameMatch[1]}`, result: entry.reply };
+    },
+    list: (agent: unknown) => {
+      if (listSnapshot) return listSnapshot;
+      return Array.from(registry.entries()).map(([name, e]) => ({
+        name,
+        description: e.description,
+      }));
     },
   };
 }
@@ -285,10 +295,12 @@ describe("Native command dispatch via ctx.commands", () => {
     const commands = {
       find: (agent: unknown, name: string) =>
         name === "goal" ? { name, description: "set or view the goal for a long-running task" } : undefined,
+      // Real `execute` returns `CommandExecution` = `{ commandId, result }`.
       execute: async (agent: unknown, line: string) => {
         capturedLines.push(line);
-        return { kind: "success", text: "ok" };
+        return { commandId: "cmd-goal", result: { kind: "success" as const, text: "ok" } };
       },
+      list: () => [],
     };
     const bridge = makeBridge({ agent: mock, commands });
 
@@ -350,5 +362,138 @@ describe("Native command dispatch via ctx.commands", () => {
     const allReplies = sendTextMessage.mock.calls.map((c) => c[1] as string);
     expect(allReplies.some((t) => t.includes("rejected all"))).toBe(false);
     expect(mock.received.length).toBe(0);
+  });
+
+  it("renders a success result with no text via the ✅ <name> fallback", async () => {
+    // Per the host contract, success.text is optional (commands may
+    // reply through `sourceEventSeq` instead). The bridge falls back
+    // to a localized acknowledgement so the WeChat user always sees
+    // something — never a silent success.
+    const mock = makeMockAgent("wx-s1");
+    const commands = makeMockCommands({
+      registry: new Map([
+        ["plan", { description: "Enter or leave plan mode", reply: { kind: "success" } }],
+      ]),
+    });
+    const bridge = makeBridge({ agent: mock, commands });
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/plan"),
+    );
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    expect(text).toBe("✅ plan");
+    expect(mock.received.length).toBe(0);
+  });
+
+  it("renders the error text from the registry (no fallback; error.text is required)", async () => {
+    // This case is the one the user observed before the fix:
+    // the legacy code read `result.kind` on the raw CommandExecution
+    // wrapper, fell into the error branch with no text, and printed
+    // `⚠️ 命令出错：<description>`. After the fix the bridge unwraps
+    // `execution.result` and surfaces the handler's actual error
+    // verbatim — the description never leaks through.
+    const mock = makeMockAgent("wx-s1");
+    const commands = makeMockCommands({
+      registry: new Map([
+        [
+          "plan",
+          {
+            description: "Enter or leave plan mode",
+            reply: { kind: "error", text: "Plan mode entry cancelled." },
+          },
+        ],
+      ]),
+    });
+    const bridge = makeBridge({ agent: mock, commands });
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/plan"),
+    );
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    expect(text).toBe("⚠️ 命令出错：Plan mode entry cancelled.");
+    // Make sure the description did NOT leak into the reply.
+    expect(text).not.toContain("Enter or leave plan mode");
+  });
+});
+
+describe("/help discovery of native commands", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("appends a 'DSH 原生命令' section listing everything the host registered", async () => {
+    const mock = makeMockAgent("wx-s1");
+    const commands = makeMockCommands({
+      registry: new Map([
+        ["plan", { description: "Enter or leave plan mode", reply: { kind: "success", text: "" } }],
+        ["goal", { description: "set or view the goal for a long-running task", reply: { kind: "success", text: "" } }],
+      ]),
+      listSnapshot: [
+        { name: "plan", description: "Enter or leave plan mode", input: { hint: "[off|message]" } },
+        { name: "goal", description: "set or view the goal for a long-running task", input: { hint: "[<objective>|clear|edit|pause|resume]" } },
+      ],
+    });
+    const bridge = makeBridge({ agent: mock, commands });
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/help"),
+    );
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    expect(text).toContain("── DSH 原生命令（当前 profile 已注册）──");
+    expect(text).toContain("/plan  [off|message] — Enter or leave plan mode");
+    expect(text).toContain("/goal  [<objective>|clear|edit|pause|resume] — set or view the goal for a long-running task");
+    // Local entries stay authoritative — no native duplicates for /status etc.
+    expect(text).toContain("/status — 当前会话");
+  });
+
+  it("de-duplicates names that already exist in the local whitelist", async () => {
+    const mock = makeMockAgent("wx-s1");
+    // Suppose a future bundle re-registered /compact (the current
+    // `dsh-command-compact` does, in fact — `name: 'compact'`). The
+    // local row carries the full subcommand grammar; the native row
+    // must NOT also appear, or users would see two entries for one
+    // command.
+    const commands = makeMockCommands({
+      registry: new Map([
+        ["compact", { description: "Manual compact", reply: { kind: "success", text: "" } }],
+      ]),
+      listSnapshot: [
+        { name: "compact", description: "Manual compact", input: { hint: "" } },
+      ],
+    });
+    const bridge = makeBridge({ agent: mock, commands });
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/help"),
+    );
+
+    const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    // The local /compact row exists once.
+    const compactLocalMatches = text.match(/• \/compact/g);
+    expect(compactLocalMatches?.length).toBe(1);
+    // The "DSH 原生命令" section appears (we have at least one
+    // command listed) but compact is filtered out of it.
+    const nativeSection = text.split("── DSH 原生命令")[1] ?? "";
+    expect(nativeSection).not.toMatch(/\/compact/);
+  });
+
+  it("falls back to the local help text when commandsCtx is unavailable", async () => {
+    const mock = makeMockAgent("wx-s1");
+    const bridge = makeBridge({ agent: mock }); // no commands
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/help"),
+    );
+
+    const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    // The native section is suppressed when the registry isn't composed.
+    expect(text).not.toContain("DSH 原生命令（当前 profile 已注册）");
+    expect(text).toContain("/status");
   });
 });

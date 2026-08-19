@@ -147,9 +147,16 @@ export interface ApiProxySurface {
  *   whitelist. Returns `undefined` when the name is not registered for
  *   this agent.
  * - `execute(agent, line, signal)` — full parse + dispatch; returns the
- *   settled `CommandExecution` (`{ kind: 'success' | 'error', text? }`)
- *   or `undefined` for invalid syntax / unknown names. The bridge treats
- *   any non-undefined result as a final answer to render back to WeChat.
+ *   settled `CommandExecution` (`{ commandId, result: CommandResult }`)
+ *   or `undefined` for invalid syntax / unknown names. The bridge reads
+ *   `result.kind` / `result.text` and renders to WeChat. Per the host
+ *   type contract, `CommandResult` is `{ kind: 'success', text? }` or
+ *   `{ kind: 'error', text }` — the success text is optional (some
+ *   commands reply through `sourceEventSeq` instead), the error text
+ *   is required.
+ * - `list(agent)` — name-sorted descriptors for discovery; used by
+ *   `/help` to surface whatever the host has registered so users can
+ *   discover commands that have no entry in this plugin's local docs.
  *
  * No `@deepseek-ai/*` runtime dep — the registry lives in the host
  * process; the bridge reaches it via `ctx.inject(['commands'], ...)`
@@ -166,9 +173,19 @@ export interface NativeCommandsSurface {
     line: string,
     signal: AbortSignal,
   ): Promise<
-    | { kind: "success" | "error"; text?: string; sourceEventSeq?: number }
+    | {
+        commandId: string;
+        result:
+          | { kind: "success"; text?: string; sourceEventSeq?: number }
+          | { kind: "error"; text: string };
+      }
     | undefined
   >;
+  list(agent: Agent): Array<{
+    name: string;
+    description?: string;
+    input?: { hint?: string };
+  }>;
 }
 
 type CachedMessage = { kind: "text"; text: string } | { kind: "file"; filePath: string; fileName: string };
@@ -361,14 +378,45 @@ export class WeChatDSHBridge {
       return true;
     }
     if (result === undefined) return false;
-    if (result.kind === "success") {
-      const text2 = result.text ?? `✅ ${def.description ?? name}`;
+    // CommandExecution carries `result: CommandResult` (see
+    // packages/interaction/commands/src/types.ts): `success` may omit
+    // text (commands that reply via `sourceEventSeq` instead), `error`
+    // always carries text. Render the success text when present, fall
+    // back to a generic acknowledgement when it isn't, and surface the
+    // handler's own error message verbatim when it is.
+    if (result.result.kind === "success") {
+      const text2 = result.result.text ?? `✅ ${name}`;
       await this.sendReply(userId, text2);
     } else {
-      const fallback = def.description ?? name;
-      await this.sendReply(userId, `⚠️ 命令出错：${result.text ?? fallback}`);
+      await this.sendReply(userId, `⚠️ 命令出错：${result.result.text}`);
     }
     return true;
+  }
+
+  /**
+   * Resolve the host's native command descriptors for `/help` discovery.
+   *
+   * Returns the name-sorted `ctx.commands.list(agent)` snapshot when
+   * the registry is composed AND an agent is bound; returns an empty
+   * array otherwise. The host registry may legitimately list commands
+   * that are not yet defined for the bound agent — `formatHelp` then
+   * falls back to those entries; the bridge never re-filters by the
+   * local whitelist (de-duplication is `formatHelp`'s job). A failed
+   * `list` is logged once and treated as "no native commands" so
+   * `/help` still works for users with a degraded registry.
+   */
+  private async listNativeCommandsForHelp(
+    user: UserState,
+  ): Promise<ReadonlyArray<{ name: string; description?: string; input?: { hint?: string } }>> {
+    if (!this.commandsCtx) return [];
+    const agent = await this.agents.ensure(user);
+    if (!agent) return [];
+    try {
+      return this.commandsCtx.list(agent);
+    } catch (err) {
+      console.warn(`[dsh-wechat] ctx.commands.list failed: ${String(err)}`);
+      return [];
+    }
   }
 
   // ─── Lifecycle ───
@@ -811,7 +859,11 @@ export class WeChatDSHBridge {
       if (await this.tryNativeCommand(user, userId, text)) return;
 
       if (parseHelpCommand(text)) {
-        await this.sendReply(userId, formatHelp());
+        // Augment /help with whatever the host's `ctx.commands` has
+        // registered so users see the full command surface — not just
+        // the local whitelist. Native descriptors that overlap with
+        // local entries are de-duplicated inside `formatHelp`.
+        await this.sendReply(userId, formatHelp(await this.listNativeCommandsForHelp(user)));
         return;
       }
 
