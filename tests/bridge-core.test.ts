@@ -125,10 +125,16 @@ describe("slash parsers", () => {
     expect(parseReasoningCommand("/reasoning")).toEqual({ kind: "status" });
     expect(parseReasoningCommand("/reasoning list")).toEqual({ kind: "list" });
     expect(parseReasoningCommand("/reasoning default")).toEqual({ kind: "clear" });
-    expect(parseReasoningCommand("/reasoning high")).toEqual({ kind: "switch", target: "high" });
-    expect(parseReasoningCommand("/reasoning 高")).toEqual({ kind: "switch", target: "高" });
-    expect(parseReasoningCommand("/reasoning  thinking")).toEqual({ kind: "switch", target: "thinking" });
+    expect(parseReasoningCommand("/reasoning switch high")).toEqual({ kind: "switch", target: "high" });
+    expect(parseReasoningCommand("/reasoning switch 高")).toEqual({ kind: "switch", target: "高" });
+    expect(parseReasoningCommand("/reasoning  switch   thinking")).toEqual({ kind: "switch", target: "thinking" });
     expect(parseReasoningCommand(" /reasoning  ")).toEqual({ kind: "status" });
+    // Bare level names (without `switch`) are no longer accepted: the
+    // explicit `switch` keyword keeps the grammar consistent with the
+    // other management commands (`/workspace`, `/session`, `/preset`,
+    // `/model`, `/perm`).
+    expect(parseReasoningCommand("/reasoning high")).toBeNull();
+    expect(parseReasoningCommand("/reasoning switch")).toBeNull();
     expect(parseReasoningCommand("/reason")).toBeNull();
     expect(parseReasoningCommand("reasoning list")).toBeNull();
   });
@@ -183,7 +189,7 @@ describe("isBypassSlashCommand", () => {
     expect(isBypassSlashCommand("/model list")).toBe(true);
     expect(isBypassSlashCommand("/perm status")).toBe(true);
     expect(isBypassSlashCommand("/permission list")).toBe(true);
-    expect(isBypassSlashCommand("/reasoning high")).toBe(true);
+    expect(isBypassSlashCommand("/reasoning switch high")).toBe(true);
   });
 
   it("returns false for card-specific commands and plain text", () => {

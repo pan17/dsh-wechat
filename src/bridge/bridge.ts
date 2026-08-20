@@ -2146,7 +2146,7 @@ export class WeChatDSHBridge {
           return;
         }
         const current = active!.reasoningEffort;
-        const lines = [`🧠 ${active!.provider}/${active!.model} 的推理等级（/reasoning <等级> 切换）`];
+        const lines = [`🧠 ${active!.provider}/${active!.model} 的推理等级（/reasoning switch <等级> 切换）`];
         reasoning.efforts.forEach((effort, i) => {
           const markers = [
             current === effort.id ? " ◀ 当前" : "",

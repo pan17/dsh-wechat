@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-20
+
+### Changed
+
+- `/reasoning` 命令语法统一为 `list | default | switch <等级>`，与 `/workspace`、`/session`、`/preset`、`/model`、`/perm` 一致；裸等级名（如 `/reasoning high`）不再被识别为切换，需显式 `/reasoning switch high`；帮助与 `/reasoning list` 提示同步更新
+- 设置页 `WeChat` 卡片的 `cwd`、`textChunkLimit`、`cardTimeoutMs`、`跨会话通知`、`静默` 字段标签后新增 `?` 图标，hover/键盘聚焦弹出黑色气泡说明字段语义（纯 CSS 实现，无新依赖）
+
 ## [0.5.1] - 2026-08-19
 
 ### Added

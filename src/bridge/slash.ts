@@ -326,23 +326,32 @@ export function parsePermCommand(text: string): PermCommand | null {
 
 /**
  * Parse `/reasoning`:
- *   (bare) | list | default | <等级>
+ *   (bare) | list | default | switch <等级>
  *
  * The reasoning effort rides the same selection as the model: `/reasoning`
  * with no argument reports the current/default effort and the current
  * model's supported levels; `default` clears it (provider/model default);
- * anything else switches the effort (by id or display name), applying to
+ * `switch <等级>` switches the effort (by id or display name), applying to
  * the current session immediately and persisting as the new default.
+ * The explicit `switch` keyword matches the other management commands
+ * (`/workspace`, `/session`, `/preset`, `/model`, `/perm`).
  */
 export function parseReasoningCommand(text: string): ReasoningCommand | null {
   const trimmed = text.trim();
-  const m = trimmed.match(/^\/reasoning(?:\s+(.*))?$/);
+  const m = trimmed.match(/^\/reasoning(?:\s+(list|default|switch)(?:\s+(.*))?)?$/);
   if (!m) return null;
-  const rest = (m[1] ?? "").trim();
-  if (!rest) return { kind: "status" };
-  if (rest === "list") return { kind: "list" };
-  if (rest === "default") return { kind: "clear" };
-  return { kind: "switch", target: rest };
+  const sub = m[1] as "list" | "default" | "switch" | undefined;
+  if (!sub) return { kind: "status" };
+  const rest = (m[2] ?? "").trim();
+  switch (sub) {
+    case "list":
+      return { kind: "list" };
+    case "default":
+      return { kind: "clear" };
+    case "switch":
+      if (!rest) return null;
+      return { kind: "switch", target: rest };
+  }
 }
 
 /**
@@ -433,7 +442,7 @@ export function formatHelp(
     "• /preset (p) — list | switch <名称|编号> | status（改的是 DSH 设置的默认 preset，与 GUI 同步）",
     "• /model — list [提供商] | switch <提供商/模型> | status",
     "• /perm (permission) — status | list | switch <名称|编号> | default [名称|编号]（会话权限实时切换；默认写入 DSH 设置，与 GUI 同步）",
-    "• /reasoning — 查看/设置推理等级：/reasoning [list|default|<等级>]",
+    "• /reasoning — 查看/设置推理等级：/reasoning [list|default|switch <等级>]",
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
     "• /notify on|off|status (watch) — 跨会话通知：完成/报错/卡片（默认关闭）",
     "• /stop — 中断当前任务",

@@ -47,7 +47,13 @@ window.__ModuleLoader__.load({
 .wx_check input{width:16px;height:16px}
 .wx_user{border:1px solid rgba(128,128,128,.2);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
 .wx_user_head{font-weight:600;font-size:12px;word-break:break-all}
-.wx_toggle{display:flex;align-items:center;gap:8px;font-size:12px}`;
+.wx_toggle{display:flex;align-items:center;gap:8px;font-size:12px}
+.wx_help{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;background:rgba(128,128,128,.22);color:var(--dsw-alias-label-secondary,#888);font-size:10px;font-weight:600;cursor:help;margin-left:6px;vertical-align:middle;position:relative;user-select:none;line-height:1}
+.wx_help:hover,.wx_help:focus{background:rgba(128,128,128,.42);outline:none;color:inherit}
+.wx_help::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);padding:6px 10px;background:rgba(20,20,20,.92);color:#fff;font-size:11px;font-weight:400;white-space:normal;width:max-content;max-width:260px;border-radius:6px;opacity:0;pointer-events:none;transition:opacity .12s;z-index:20;line-height:1.5;text-align:left}
+.wx_help::before{content:"";position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);border:4px solid transparent;border-top-color:rgba(20,20,20,.92);opacity:0;pointer-events:none;transition:opacity .12s;z-index:20}
+.wx_help:hover::after,.wx_help:focus::after,.wx_help:hover::before,.wx_help:focus::before{opacity:1}
+.wx_field_label{display:inline-flex;align-items:center}`;
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=\"dsh-wechat/section\"]") === null) {
 			const tag = document.createElement("style");
 			tag.dataset.plugin = "dsh-wechat";
@@ -63,6 +69,23 @@ window.__ModuleLoader__.load({
 			"logged-in": "已登录",
 			failed: "登录失败",
 		};
+
+		// Small "?" badge with a CSS-driven tooltip (data-tip). Used next to
+		// settings labels whose semantics are not obvious. Hover or keyboard
+		// focus shows the explanation; clicking it does not toggle the
+		// surrounding <label>/checkbox.
+		function HelpTip(props) {
+			const text = props.text;
+			return createElement("span", {
+				className: "wx_help",
+				"data-tip": text,
+				role: "tooltip",
+				tabIndex: 0,
+				"aria-label": text,
+				onMouseDown: (e) => e.stopPropagation(),
+				onClick: (e) => e.stopPropagation(),
+			}, "?");
+		}
 
 		function api(path, options) {
 			return fetch("/wechat/api" + path, {
@@ -210,20 +233,28 @@ window.__ModuleLoader__.load({
 							createElement("input", { value: form.cdnBaseUrl, onChange: set("cdnBaseUrl"), placeholder: "https://novac2c.cdn.weixin.qq.com/c2c" })),
 						createElement("label", null, "botType",
 							createElement("input", { value: form.botType, onChange: set("botType"), placeholder: "3" })),
-						createElement("label", null, "cwd",
+						createElement("label", null,
+							createElement("span", { className: "wx_field_label" }, "cwd",
+								createElement(HelpTip, { text: "新会话的工作目录。仅影响未通过 /workspace 或 /session switch 显式切过工作区的用户；显式切过的保留原样。" })),
 							createElement("input", { value: form.cwd, onChange: set("cwd"), placeholder: "F:\\work" })),
-						createElement("label", null, "textChunkLimit",
+						createElement("label", null,
+							createElement("span", { className: "wx_field_label" }, "textChunkLimit",
+								createElement(HelpTip, { text: "微信单条消息长度上限（字符）。超出后会被自动拆成多条发送。" })),
 							createElement("input", { value: form.textChunkLimit, onChange: set("textChunkLimit"), placeholder: "4000" })),
-						createElement("label", null, "cardTimeoutMs",
+						createElement("label", null,
+							createElement("span", { className: "wx_field_label" }, "cardTimeoutMs",
+								createElement(HelpTip, { text: "提问 / 权限卡软超时（毫秒），默认 1800000（30 分钟）。超时未答复的卡会被自动撤回。" })),
 							createElement("input", { value: form.cardTimeoutMs, onChange: set("cardTimeoutMs"), placeholder: "1800000" })),
 					) : null,
 					createElement("div", { className: "wx_row", style: { marginTop: "4px" } },
 						createElement("label", { className: "wx_check" },
 							createElement("input", { type: "checkbox", checked: !!form?.crossSessionNotify, onChange: (e) => setForm({ ...form, crossSessionNotify: e.target.checked }) }),
-							createElement("span", null, "跨会话通知")),
+							createElement("span", null, "跨会话通知"),
+							createElement(HelpTip, { text: "后台会话的已完成 / 报错 / 卡片提醒通过微信推送，默认关闭。" })),
 						createElement("label", { className: "wx_check" },
 							createElement("input", { type: "checkbox", checked: !!form?.silent, onChange: (e) => setForm({ ...form, silent: e.target.checked }) }),
 							createElement("span", null, "静默"),
+							createElement(HelpTip, { text: "开启后 agent 每轮的中间过程（工具调用、思考等）不再逐条推送，只在轮次结束时发送最终回复，避免刷屏。" }),
 						),
 						(status?.users && status.users.length === 0) ? createElement("span", { className: "wx_meta" }, "（暂无绑定用户，静默将在首条微信消息后生效）") : null,
 					),
