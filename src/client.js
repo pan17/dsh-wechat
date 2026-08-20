@@ -106,7 +106,11 @@ window.__ModuleLoader__.load({
 					if (!r.ok) return;
 					setStatus(r.body);
 					const firstUser = r.body.users && r.body.users[0];
-					// Fill the form once.
+					// Fill the form once — only when first entering the page.
+					// No polling: user edits stay locally until Save, and are
+					// only re-synced when the user refreshes the page or after
+					// a successful save/relogin/reconnect/logout (which all call
+					// refresh() explicitly).
 					setForm((prev) => prev ?? {
 						baseUrl: r.body.config?.baseUrl ?? "",
 						cdnBaseUrl: r.body.config?.cdnBaseUrl ?? "",
@@ -117,19 +121,10 @@ window.__ModuleLoader__.load({
 						crossSessionNotify: !!r.body.config?.crossSessionNotify,
 						silent: !!(firstUser && firstUser.silent),
 					});
-					// Keep toggles in sync when status refreshes (after save)
-					if (r.body.config && typeof r.body.config.crossSessionNotify === "boolean") {
-						setForm((prev) => prev ? { ...prev, crossSessionNotify: !!r.body.config.crossSessionNotify } : prev);
-					}
-					if (firstUser && typeof firstUser.silent === "boolean") {
-						setForm((prev) => prev ? { ...prev, silent: !!firstUser.silent } : prev);
-					}
 				}).catch(() => {});
 			}, []);
 			react.useEffect(() => {
 				refresh();
-				const t = setInterval(refresh, 3000);
-				return () => clearInterval(t);
 			}, [refresh]);
 
 			const run = async (action, next) => {

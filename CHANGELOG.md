@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-08-20
+
+### Fixed
+
+- 设置页 `WeChat` 卡片的 `跨会话通知` 与 `静默` 开关勾选后 1-2 秒回弹、来不及保存：`src/client.js` 移除 3 秒轮询对表单的强制覆写（`setInterval(refresh, 3000)` + 每次 `refresh` 无条件 `setForm({crossSessionNotify/silent: server值})`），改为仅在进入页面时初始化一次（`prev ??`），后续仅在 `保存配置` / `重新扫码` / `重连` / `退出登录` 成功后显式 `refresh()`，本地编辑直到保存前不再被覆盖
+
 ## [0.5.3] - 2026-08-20
 
 ### Added
