@@ -86,7 +86,13 @@ export interface SessionQuery {
   listSessions(): Promise<SessionRecord[]>;
   readTitle(sessionId: string): Promise<{ title?: string } | undefined>;
   /** Lightweight raw-log event records (ascending seq), for recency recovery. */
-  listEvents(sessionId: string): Promise<{ type: string; time: number }[]>;
+  listEvents(sessionId: string): Promise<Array<{ type: string; time: number; data?: unknown; seq?: number }>>;
+}
+
+export interface HistoryEntry {
+  role: "user" | "assistant";
+  text: string;
+  time: number;
 }
 
 export interface LlmService {
@@ -244,6 +250,103 @@ export class DshOps {
       return undefined;
     } catch {
       return undefined;
+    }
+  }
+
+  // ─── History ──────────────────────────────────────────────────────────────
+
+  /**
+   * Extract display text from a session event's data payload.
+   * Handles multiple host shapes: `data.message.content[]`, `data.content`,
+   * `data.text`, etc. Returns empty string when nothing text-like is found.
+   */
+  private extractHistoryText(data: unknown): string {
+    if (!data || typeof data !== "object") {
+      if (typeof data === "string") return data;
+      return "";
+    }
+    const d = data as Record<string, unknown>;
+    // Primary: DSH message shape `data.message.content: [{type:"text",text}]`
+    const msg = d.message as Record<string, unknown> | undefined;
+    if (msg && Array.isArray(msg.content)) {
+      const parts = (msg.content as Array<Record<string, unknown>>)
+        .filter((b) => b.type === "text" && typeof b.text === "string")
+        .map((b) => String(b.text));
+      if (parts.length > 0) return parts.join("\n");
+    }
+    // Fallback: `data.content` array (some versions flatten)
+    if (Array.isArray(d.content)) {
+      const parts = (d.content as Array<Record<string, unknown>>)
+        .filter((b) => b && typeof b === "object" && (b as { type?: string }).type === "text" && typeof (b as { text?: unknown }).text === "string")
+        .map((b) => String((b as { text: string }).text));
+      if (parts.length > 0) return parts.join("\n");
+    }
+    // Fallback: plain `data.text`
+    if (typeof d.text === "string" && d.text.trim()) return d.text;
+    // Fallback: `data.prompt` or `data.input` string
+    if (typeof d.prompt === "string" && d.prompt.trim()) return d.prompt;
+    if (typeof d.input === "string" && d.input.trim()) return d.input;
+    return "";
+  }
+
+  /**
+   * Retrieve the most recent `limit` conversation entries (user + assistant)
+   * for `sessionId`, ordered oldest→newest.
+   *
+   * Strategy:
+   *  1. Try in-memory `agent.session.events` via `ctx.get("agents")` — fast,
+   *     no I/O, survives even when `sessionQuery` is unavailable.
+   *  2. Fall back to persisted `sessionQuery.listEvents(sessionId)` — works
+   *     after restart or when agent is not live.
+   *
+   * Filters to `user/message` (role=user) and `assistant/message`
+   * (role=assistant). Other event types (tool results, system, etc.) are
+   * ignored to keep the WeChat view concise.
+   *
+   * Returns `[]` on any error or when no history exists — caller renders
+   * a friendly empty-state message.
+   */
+  async getSessionHistory(sessionId: string, limit: number): Promise<HistoryEntry[]> {
+    const cap = Math.max(1, Math.min(limit, 20));
+    // 1) In-memory fast path
+    try {
+      const agents = this.get<{ get(id: string): { session?: { events?: readonly { type: string; time?: number; data?: unknown }[] } } | undefined }>("agents");
+      const agent = agents?.get(sessionId);
+      const events = agent?.session?.events;
+      if (Array.isArray(events) && events.length > 0) {
+        const entries: HistoryEntry[] = [];
+        for (const ev of events) {
+          if (ev.type !== "user/message" && ev.type !== "assistant/message") continue;
+          const text = this.extractHistoryText(ev.data);
+          if (!text) continue;
+          const role = ev.type === "user/message" ? "user" as const : "assistant" as const;
+          entries.push({ role, text, time: typeof ev.time === "number" ? ev.time : Date.now() });
+        }
+        if (entries.length > 0) {
+          // events are already in chronological order (ascending seq)
+          return entries.slice(-cap);
+        }
+      }
+    } catch {
+      // fall through to persisted path
+    }
+
+    // 2) Persisted fallback
+    const query = this.get<SessionQuery>("sessionQuery");
+    if (!query) return [];
+    try {
+      const records = await query.listEvents(sessionId);
+      const entries: HistoryEntry[] = [];
+      for (const r of records) {
+        if (r.type !== "user/message" && r.type !== "assistant/message") continue;
+        const text = this.extractHistoryText((r as { data?: unknown }).data);
+        if (!text) continue;
+        const role = r.type === "user/message" ? "user" as const : "assistant" as const;
+        entries.push({ role, text, time: r.time });
+      }
+      return entries.slice(-cap);
+    } catch {
+      return [];
     }
   }
 

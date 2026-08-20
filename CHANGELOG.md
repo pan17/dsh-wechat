@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-20
+
+### Added
+
+- 新增 `/history [数量]` 微信命令：查看当前会话最近历史消息，默认 5 条、最多 20 条（`/history`→5、`/history 10`→10、`/history 30`→20，`0`/`abc` 等非法参数回 `用法: /history [数量]（1-20，默认 5）`）；按时间升序渲染为 `序号 [时间] 角色: 摘要`（`你`/`助手`），单条超 300 字截断为 `…`，自动走 `sendReply` 的 `splitText`/`10条限流`与 `/next` 缓存；无会话/空历史友好提示；帮助与 `isBypassSlashCommand` 同步、去重 `history`，卡片等待时仍可执行
+- `DshOps.getSessionHistory(sessionId, limit)`：优先读内存 `agents.get(sessionId).session.events`，回落 `sessionQuery.listEvents` 持久化日志，兼容 `data.message.content[]` / `data.content` / `data.text` 等多形态抽取，异常隔离回空
+
 ## [0.5.2] - 2026-08-20
 
 ### Changed

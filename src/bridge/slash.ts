@@ -354,6 +354,45 @@ export function parseReasoningCommand(text: string): ReasoningCommand | null {
   }
 }
 
+// ─── History ────────────────────────────────────────────────────────────────
+
+export const HISTORY_DEFAULT = 5;
+export const HISTORY_MAX = 20;
+
+export type HistoryCommand = { kind: "history"; count: number };
+
+/**
+ * Parse `/history [N]` — view recent conversation history.
+ *   /history        → 5 (default)
+ *   /history 10     → 10
+ *   /history 30     → 20 (clamped to HISTORY_MAX)
+ *
+ * Returns null for: invalid number (non-integer, <=0, NaN), extra
+ * trailing garbage that is not a number, or non-history prefix.
+ * The caller detects a leading `/history` with an invalid arg and
+ * replies with usage instead of forwarding to the agent.
+ */
+export function parseHistoryCommand(text: string): HistoryCommand | null {
+  const trimmed = text.trim();
+  const m = trimmed.match(/^\/history(?:\s+(.*))?$/i);
+  if (!m) return null;
+  const rest = (m[1] ?? "").trim();
+  if (!rest) return { kind: "history", count: HISTORY_DEFAULT };
+  // Only a single integer token is allowed; anything else is invalid.
+  if (!/^\d+$/.test(rest)) return null;
+  const n = parseInt(rest, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return { kind: "history", count: Math.min(n, HISTORY_MAX) };
+}
+
+/**
+ * True if text looks like a /history attempt (including invalid args),
+ * used to decide whether to show usage instead of forwarding to agent.
+ */
+export function isHistoryCommandAttempt(text: string): boolean {
+  return /^\s*\/history\b/i.test(text);
+}
+
 /**
  * True if `text` is a recognized slash command that should BYPASS any
  * pending question/approval card and execute normally.
@@ -388,7 +427,8 @@ export function isBypassSlashCommand(text: string): boolean {
     parseModelCommand(text) !== null ||
     parsePermCommand(text) !== null ||
     parseReasoningCommand(text) !== null ||
-    parseNotifyCommand(text) !== null
+    parseNotifyCommand(text) !== null ||
+    parseHistoryCommand(text) !== null
   );
 }
 
@@ -419,6 +459,7 @@ const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "sl",
   "stop",
   "next",
+  "history",
   "rp",
   "reject-permission",
   "rq",
@@ -445,6 +486,7 @@ export function formatHelp(
     "• /reasoning — 查看/设置推理等级：/reasoning [list|default|switch <等级>]",
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
     "• /notify on|off|status (watch) — 跨会话通知：完成/报错/卡片（默认关闭）",
+    "• /history [数量] — 查看最近历史消息（默认 5 条，最多 20 条）",
     "• /stop — 中断当前任务",
     "• /next — 继续发送因微信限制被缓存的消息",
     "• /rp — 拒绝所有待处理权限卡（微信端）",
