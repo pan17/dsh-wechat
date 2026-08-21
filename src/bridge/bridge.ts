@@ -39,6 +39,7 @@ import {
   parseHelpCommand,
   parseHistoryCommand,
   renderProjectionSection,
+  parseEnterCommand,
   parseModelCommand,
   parseNextCommand,
   parseNotifyCommand,
@@ -53,6 +54,7 @@ import {
   parseStopCommand,
   parseWorkspaceCommand,
   HISTORY_MAX,
+  type EnterCommand,
   type HistoryCommand,
   type ModelCommand,
   type NotifyCommand,
@@ -976,6 +978,12 @@ export class WeChatDSHBridge {
         return;
       }
 
+      const enterCmd = parseEnterCommand(text);
+      if (enterCmd) {
+        await this.handleEnterCommand(userId, enterCmd);
+        return;
+      }
+
       const historyCmd = parseHistoryCommand(text);
       if (historyCmd) {
         await this.handleHistoryCommand(userId, historyCmd, user);
@@ -1013,7 +1021,16 @@ export class WeChatDSHBridge {
     const messageId = `wx-msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     this.markWechatMessage(messageId);
     this.markSessionSource(user.sessionId, "wechat");
-    this.agents.followup(agent, blocks, messageId);
+    // Busy-time delivery follows the DSH `ui-conversation.busyEnter` setting
+    // (the GUI's 「繁忙时 Enter 键行为」 row): while the agent is running,
+    // `queue` keeps the historical follow-up-turn behavior and `steer`
+    // splices the message into the running turn at its nearest step
+    // boundary. Idle agents always take the ordinary queue path — the same
+    // "idle Enter = Queue" rule the GUI composer applies. A steer whose
+    // window already closed degrades to the next waking queue turn inside
+    // AgentLoop, so neither mode can lose the message.
+    const mode = agent.status === "running" ? this.ops.busyEnter() : "queue";
+    this.agents.followup(agent, blocks, messageId, mode);
   }
 
   // ─── Outbound: DSH → WeChat ───
@@ -1831,6 +1848,38 @@ export class WeChatDSHBridge {
     }
   }
 
+  // ─── Busy-Enter delivery behavior (/enter) ───
+
+  /**
+   * `/enter` — view or switch the busy-time delivery behavior. Reads and
+   * writes the DSH settings document (`ui-conversation.busyEnter`), the same
+   * field the GUI General Settings 「繁忙时 Enter 键行为」 row edits, so both
+   * ends always share one value. The behavior applies at delivery time: while
+   * the agent is running, `queue` waits for a follow-up turn and `steer`
+   * splices into the running turn.
+   */
+  private async handleEnterCommand(userId: string, cmd: EnterCommand): Promise<void> {
+    const describe = (mode: "queue" | "steer"): string =>
+      mode === "steer"
+        ? "steer（插话：运行中发消息立即插入当前轮次）"
+        : "queue（排队：运行中发消息等当前轮结束后新开一轮）";
+    if (cmd.kind === "status") {
+      await this.sendReply(
+        userId,
+        `⏳ 繁忙时投递: ${describe(this.ops.busyEnter())}\n切换: /enter queue|steer（与 DSH 设置「繁忙时 Enter 键行为」同步，双端共用）`,
+      );
+      return;
+    }
+    const saved = await this.ops.saveBusyEnter(cmd.target);
+    const lines = [`✅ 繁忙时投递已切换: ${describe(cmd.target)}`];
+    if (saved) {
+      lines.push("（已写入 DSH 设置，GUI 设置页同步可见）");
+    } else {
+      lines.push("⚠️ 无法写入 DSH 设置（仅本次进程内生效）");
+    }
+    await this.sendReply(userId, lines.join("\n"));
+  }
+
   private async handleStopCommand(userId: string, user: UserState): Promise<void> {
     const agent = this.agents.get(user);
     if (!agent) {
@@ -2557,6 +2606,7 @@ export class WeChatDSHBridge {
       ...(contextLabel ? [contextLabel] : []),
       ...(permission ? [`• 权限: ${permission}`] : []),
       `• 静默模式: ${user.silent ? "on" : "off"}`,
+      `• 繁忙投递: ${this.ops.busyEnter() === "steer" ? "steer（插话）" : "queue（排队）"}`,
       `• 跨会话通知: ${crossEffective}`,
     ];
 

@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-08-21
+
+### Added
+
+- 繁忙时投递行为（与 DSH 同源）：agent 运行中收到微信消息时，按 DSH 设置 `ui-conversation.busyEnter`（GUI 通用设置的「繁忙时 Enter 键行为」）决定投递方式——`queue`（默认）走 `agent.followup` 排队下一轮，`steer` 走 `agent.steer` 立即插入运行中轮次的最近 step 边界（窗口已关闭时由 AgentLoop 自动降级为下一次唤醒的排队轮，消息不丢）；空闲会话始终新开一轮，与 GUI「空闲 Enter=Queue」语义一致。媒体消息同路径覆盖
+- 新增 `/enter queue|steer|status` 微信命令（别名 `/busy`，支持 `排队`/`插话` 中文参数）：直接读写 DSH 设置文档 `ui-conversation` 命名空间（`$DSH_HOME/settings.yaml`），与 GUI 设置页双端共用同一事实源、实时互见；设置服务缺失/命名空间未注册时读回落 `queue`（等同旧行为）、写提示降级；卡片等待时可 bypass 执行
+- `/status` 新增 `• 繁忙投递: queue（排队）/ steer（插话）` 一行；帮助与 README 命令表同步
+- `DshOps.busyEnter()/saveBusyEnter()`：结构化读取/写入 host settings（`get(ns)` resolved 值 + `update(ns, patch)`），异常隔离回落
+
 ## [0.5.4] - 2026-08-20
 
 ### Fixed

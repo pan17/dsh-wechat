@@ -11,6 +11,18 @@ import type { BridgeContext } from "./sessions.js";
 /** Nominal id of one registered settings namespace (dsh-settings brand). */
 export type SettingsNamespace = string & { readonly __settingsNamespace?: undefined };
 
+/**
+ * Busy-time delivery behavior for user messages (DSH `ui-conversation.busyEnter`).
+ * `queue` = ordinary follow-up turn; `steer` = splice into the running turn at
+ * the nearest step boundary. The value lives in the host user-settings document
+ * (`$DSH_HOME/settings.yaml`) — the exact field the GUI's General Settings
+ * 「繁忙时 Enter 键行为」 row edits — so WeChat and the GUI always agree.
+ */
+export type BusyEnterBehavior = "queue" | "steer";
+
+/** Settings namespace owning the busy-Enter preference (dsh-client-ui-conversation). */
+export const BUSY_ENTER_NAMESPACE = "ui-conversation";
+
 // ─── Structural service shapes (verified against the running harness) ───
 
 export interface Workspace {
@@ -158,6 +170,17 @@ export interface CommandResultShape {
   readonly kind: "success" | "error";
   readonly text?: string;
   readonly sourceEventSeq?: number;
+}
+
+/**
+ * Minimal structural surface of the host user-settings service (`ctx.settings`,
+ * dsh-settings). `get(ns)` returns the schema-resolved section (`undefined`
+ * while the namespace is unregistered); `update(ns, patch)` merges a patch
+ * into the namespace's user layer and persists it to the settings document.
+ */
+export interface SettingsService {
+  get(ns: SettingsNamespace): unknown;
+  update(ns: SettingsNamespace, patch: object): Promise<void>;
 }
 
 /** Approximate context occupancy (dsh-token-meter `contextPressure` projection). */
@@ -502,6 +525,44 @@ export class DshOps {
       return true;
     } catch (err) {
       console.error(`[dsh-wechat] save default permission failed: ${String(err)}`);
+      return false;
+    }
+  }
+
+  // ─── Busy-Enter delivery behavior (ui-conversation.busyEnter) ───
+
+  /**
+   * The resolved busy-time delivery behavior — the same value the GUI's
+   * General Settings 「繁忙时 Enter 键行为」 row shows. Falls back to
+   * `"queue"` (the schema default) when no settings provider is mounted,
+   * the namespace is unregistered, or the read throws.
+   */
+  busyEnter(): BusyEnterBehavior {
+    const settings = this.get<SettingsService>("settings");
+    try {
+      const section = settings?.get(BUSY_ENTER_NAMESPACE as SettingsNamespace) as
+        | { busyEnter?: unknown }
+        | undefined;
+      return section?.busyEnter === "steer" ? "steer" : "queue";
+    } catch {
+      return "queue";
+    }
+  }
+
+  /**
+   * Persist the busy-Enter behavior into the DSH settings document
+   * (`ui-conversation` namespace) — the exact field the GUI settings page
+   * edits, so a switch from WeChat shows up there and vice versa. Returns
+   * false when no settings provider is mounted or the write is refused.
+   */
+  async saveBusyEnter(next: BusyEnterBehavior): Promise<boolean> {
+    const settings = this.get<SettingsService>("settings");
+    if (!settings) return false;
+    try {
+      await settings.update(BUSY_ENTER_NAMESPACE as SettingsNamespace, { busyEnter: next });
+      return true;
+    } catch (err) {
+      console.error(`[dsh-wechat] save busyEnter failed: ${String(err)}`);
       return false;
     }
   }

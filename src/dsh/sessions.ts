@@ -10,6 +10,7 @@
 
 import crypto from "node:crypto";
 import { createUserMessage } from "./messages.js";
+import type { BusyEnterBehavior } from "./ops.js";
 import type { Agent, AgentHandle, ContentBlock, CreateAgentOptions, ResumeAgentOptions } from "./types.js";
 import type { UserState } from "../state.js";
 
@@ -135,18 +136,31 @@ export class AgentStore {
     }
   }
 
-  /** Queue a user-role message as a follow-up turn on the agent. */
-  followup(agent: Agent, content: ContentBlock[], messageId?: string): void {
-    agent.followup(
-      createUserMessage({
-        content,
-        // kind 'user' — identical to messages sent from the GUI chat box, so
-        // the WeChat user's messages render as ordinary user messages (a
-        // 'plugin' source renders as "context injection" in the GUI).
-        source: { kind: "user" },
-        ...(messageId ? { id: messageId } : {}),
-      }),
-    );
+  /**
+   * Deliver a user-role message to the agent.
+   *
+   * `mode` mirrors the DSH `ui-conversation.busyEnter` preference (the GUI's
+   * 「繁忙时 Enter 键行为」): `"queue"` routes through `agent.followup` — an
+   * ordinary follow-up turn, the behavior while idle and the historical
+   * default; `"steer"` routes through `agent.steer` — an idle driver starts a
+   * turn, a running driver consumes the message at its nearest step boundary
+   * (a closed window degrades to the next waking queue turn, never lost).
+   * The caller resolves the mode from agent.status + the shared setting.
+   */
+  followup(agent: Agent, content: ContentBlock[], messageId?: string, mode: BusyEnterBehavior = "queue"): void {
+    const message = createUserMessage({
+      content,
+      // kind 'user' — identical to messages sent from the GUI chat box, so
+      // the WeChat user's messages render as ordinary user messages (a
+      // 'plugin' source renders as "context injection" in the GUI).
+      source: { kind: "user" },
+      ...(messageId ? { id: messageId } : {}),
+    });
+    if (mode === "steer") {
+      agent.steer(message);
+    } else {
+      agent.followup(message);
+    }
   }
 }
 

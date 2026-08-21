@@ -202,6 +202,11 @@ export type ReasoningCommand =
   | { kind: "switch"; target: string }
   | { kind: "clear" };
 
+/** Busy-time delivery behavior switch (`/enter`), shared with the DSH setting. */
+export type EnterCommand =
+  | { kind: "status" }
+  | { kind: "switch"; target: "queue" | "steer" };
+
 /**
  * Parse `/workspace` (alias `/ws`):
  *   list | status | switch <path|n> | add <path>
@@ -354,6 +359,33 @@ export function parseReasoningCommand(text: string): ReasoningCommand | null {
   }
 }
 
+/**
+ * Parse `/enter` (alias `/busy`) — busy-time delivery behavior, shared with
+ * the DSH General Settings 「繁忙时 Enter 键行为」 preference
+ * (`ui-conversation.busyEnter`):
+ *   /enter              → status
+ *   /enter status       → status
+ *   /enter queue|q|排队 → switch to queue (running messages wait for a new turn)
+ *   /enter steer|s|插话 → switch to steer (splice into the running turn)
+ *
+ * Returns null for unknown subcommands so the text falls through to the
+ * unknown-command hint + agent forwarding.
+ */
+export function parseEnterCommand(text: string): EnterCommand | null {
+  const trimmed = text.trim().toLowerCase();
+  const m = trimmed.match(/^\/(?:enter|busy)(?:\s+(.*))?$/);
+  if (!m) return null;
+  const rest = (m[1] ?? "").trim();
+  if (!rest || rest === "status") return { kind: "status" };
+  if (rest === "queue" || rest === "q" || rest === "排队") {
+    return { kind: "switch", target: "queue" };
+  }
+  if (rest === "steer" || rest === "s" || rest === "插话") {
+    return { kind: "switch", target: "steer" };
+  }
+  return null;
+}
+
 // ─── History ────────────────────────────────────────────────────────────────
 
 export const HISTORY_DEFAULT = 5;
@@ -427,6 +459,7 @@ export function isBypassSlashCommand(text: string): boolean {
     parseModelCommand(text) !== null ||
     parsePermCommand(text) !== null ||
     parseReasoningCommand(text) !== null ||
+    parseEnterCommand(text) !== null ||
     parseNotifyCommand(text) !== null ||
     parseHistoryCommand(text) !== null
   );
@@ -455,6 +488,8 @@ const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "perm",
   "permission",
   "reasoning",
+  "enter",
+  "busy",
   "silent",
   "sl",
   "stop",
@@ -484,6 +519,7 @@ export function formatHelp(
     "• /model — list [提供商] | switch <提供商/模型> | status",
     "• /perm (permission) — status | list | switch <名称|编号> | default [名称|编号]（会话权限实时切换；默认写入 DSH 设置，与 GUI 同步）",
     "• /reasoning — 查看/设置推理等级：/reasoning [list|default|switch <等级>]",
+    "• /enter (busy) — queue|steer|status 繁忙时消息投递（排队/插话，与 DSH 设置「繁忙时 Enter 键行为」同步）",
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
     "• /notify on|off|status (watch) — 跨会话通知：完成/报错/卡片（默认关闭）",
     "• /history [数量] — 查看最近历史消息（默认 5 条，最多 20 条）",
