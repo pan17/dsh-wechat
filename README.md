@@ -10,7 +10,7 @@
 DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，零运行时
 `@deepseek-ai` 依赖，直接调用 DSH 进程内服务。
 
-<img src="./resources/发送.jpg" alt="发送" width="32%" /> <img src="./resources/接收.jpg" alt="接收" width="32%" /> <img src="./resources/设置页.png" alt="设置页" width="32%" />
+<img src="./resources/send.jpg" alt="发送" width="32%" /> <img src="./resources/receive.jpg" alt="接收" width="32%" /> <img src="./resources/settings.png" alt="设置页" width="32%" />
 
 ## 功能
 

@@ -50,6 +50,10 @@
     }
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pan17/dsh-wechat.git"
+  },
   "keywords": [
     "wechat",
     "dsh",
