@@ -2703,8 +2703,16 @@ export class WeChatDSHBridge {
    * Handle the `send_wechat` tool: push text or a local file to a
    * WeChat user. The recipient is the user bound to the calling agent
    * (session), or — when the agent has no binding — the first known
-   * WeChat user (single-user deployments are the norm). Returns a plain
-   * JSON value for the tool result.
+   * WeChat user (single-user deployments are the norm).
+   *
+   * Delivery goes through `deliverOutbound`, so tool pushes share the same
+   * per-user gateway budget as assistant replies, and budget overflow /
+   * transient send failures are queued (`/next` or the next inbound
+   * message flushes them) instead of being lost. A queued push reports
+   * `ok: true` with an explicit "queued" message: the bridge has taken
+   * over delivery, and an error result would only tempt the model into
+   * retrying (→ duplicate deliveries on flush). Only an unreadable
+   * `file_path` returns `ok: false` immediately.
    */
   async handleSendWeChat(agentId: string, args: { text?: string; file_path?: string }): Promise<{ ok: boolean; message: string }> {
     const user = this.resolveUserForAgent(agentId);
@@ -2719,43 +2727,155 @@ export class WeChatDSHBridge {
       return { ok: false, message: "WeChat is not logged in" };
     }
 
-    const sendOpts = {
-      baseUrl: this.token.baseUrl,
-      token: this.token.token,
-      contextToken,
-    };
-
-    try {
-      if (args.file_path) {
-        const buffer = await import("node:fs/promises").then((fs) => fs.readFile(args.file_path!));
-        const fileName = args.file_path.split(/[\\/]/).pop() ?? "file";
-        // Send images/videos with their native media type so WeChat renders
-        // them inline; everything else goes as a file attachment.
-        const mediaType = mediaTypeForFile(fileName);
-        await sendMediaMessage(user.userId, mediaType, buffer, {
-          ...sendOpts,
-          cdnBaseUrl: this.config.cdnBaseUrl,
-          fileName,
-        });
-        const kind = mediaType === UploadMediaType.IMAGE ? "image" : mediaType === UploadMediaType.VIDEO ? "video" : "file";
-        return { ok: true, message: `sent ${kind} ${fileName}` };
+    if (args.file_path) {
+      const filePath = args.file_path;
+      const fileName = filePath.split(/[\\/]/).pop() ?? "file";
+      // Send images/videos with their native media type so WeChat renders
+      // them inline; everything else goes as a file attachment.
+      const mediaType = mediaTypeForFile(fileName);
+      const kind = mediaType === UploadMediaType.IMAGE ? "image" : mediaType === UploadMediaType.VIDEO ? "video" : "file";
+      const outcome = await this.deliverOutbound(user.userId, { kind: "file", filePath, fileName });
+      if (outcome === "failed") {
+        return { ok: false, message: `file not found: ${filePath}` };
       }
-      if (args.text) {
-        const segments = splitText(args.text, this.config.textChunkLimit);
-        for (const segment of segments) {
-          await sendTextMessage(user.userId, segment, sendOpts);
-        }
-        return { ok: true, message: `sent ${segments.length} message(s)` };
-      }
-      return { ok: false, message: "provide either text or file_path" };
-    } catch (err) {
-      return { ok: false, message: `send failed: ${String(err)}` };
+      return outcome === "sent"
+        ? { ok: true, message: `sent ${kind} ${fileName}` }
+        : { ok: true, message: `queued ${kind} ${fileName}; delivery deferred by WeChat rate limiting, the user can flush with /next` };
     }
+    if (args.text) {
+      const segments = splitText(args.text, this.config.textChunkLimit);
+      let sent = 0;
+      let queued = 0;
+      for (const segment of segments) {
+        const outcome = await this.deliverOutbound(user.userId, { kind: "text", text: segment });
+        if (outcome === "sent") {
+          sent++;
+        } else {
+          // "cached" parks the segment in outboundCache; "failed" cannot
+          // occur here (login + context token are guarded above), so any
+          // non-sent outcome is counted as queued.
+          queued++;
+        }
+      }
+      return queued === 0
+        ? { ok: true, message: `sent ${sent} message(s)` }
+        : { ok: true, message: `sent ${sent} message(s), queued ${queued} (WeChat rate limiting); the user can flush with /next` };
+    }
+    return { ok: false, message: "provide either text or file_path" };
   }
 
   // ─── Outbound sending (WeChat gateway limits) ───
+  //
+  // Every WeChat-bound outbound item — assistant replies AND `send_wechat`
+  // tool pushes — flows through `deliverOutbound`, which owns the per-user
+  // gateway budget (`wechatMsgCount`, reset on each inbound user message):
+  // items beyond MSG_LIMIT_MAX and transient send failures are parked in
+  // the per-user `outboundCache` instead of being lost, and the 💾 notice
+  // tells the user how to flush them (/next or any next message).
+
   /** Cached-message notice already shown for this user (avoids recursion). */
   private readonly cacheNoticeSent = new Set<string>();
+
+  /**
+   * Deliver one outbound item within the user's message budget.
+   *
+   * Budget exhaustion and transient send failures park the item in
+   * `outboundCache` and return "cached" — the caller reports a queued
+   * hand-off, never a silent loss. Only an unreadable `file_path` returns
+   * "failed" without caching: a permanently bad path is a caller error
+   * that must surface immediately rather than poison the queue (and it
+   * could never succeed on a later flush anyway).
+   */
+  private async deliverOutbound(userId: string, item: CachedMessage): Promise<"sent" | "cached" | "failed"> {
+    const token = this.token;
+    const contextToken = this.contextTokens.get(userId);
+    if (!token || !contextToken) {
+      this.log(`deliverOutbound skipped (not logged in / no context token for ${userId})`);
+      return "failed";
+    }
+
+    // File reads happen before the budget gate so an unreadable path is
+    // reported as "failed" regardless of budget state.
+    let buffer: Buffer | undefined;
+    if (item.kind === "file") {
+      try {
+        buffer = await fs.promises.readFile(item.filePath);
+      } catch (err) {
+        this.log(`outbound file read failed (${item.filePath}): ${String(err)}`);
+        return "failed";
+      }
+    }
+
+    const count = this.wechatMsgCount.get(userId) ?? 0;
+    if (count >= MSG_LIMIT_MAX) {
+      this.parkOutbound(userId, item);
+      await this.notifyCachePending(userId);
+      return "cached";
+    }
+    this.wechatMsgCount.set(userId, count + 1);
+
+    try {
+      if (item.kind === "text") {
+        // The limit-warning suffix rides the payload only — the cached
+        // copy keeps the original text so a later flush sends it clean.
+        const payload =
+          count + 1 > MSG_LIMIT_WARN
+            ? item.text + `\n\n⚠️ 微信限制连续发送消息数量10条（已发 ${count + 1} 条），发送 /next 可继续`
+            : item.text;
+        await sendTextMessage(userId, payload, {
+          baseUrl: token.baseUrl,
+          token: token.token,
+          contextToken,
+        });
+      } else {
+        await sendMediaMessage(userId, mediaTypeForFile(item.fileName), buffer!, {
+          baseUrl: token.baseUrl,
+          token: token.token,
+          contextToken,
+          cdnBaseUrl: this.config.cdnBaseUrl,
+          fileName: item.fileName,
+        });
+      }
+      return "sent";
+    } catch (err) {
+      this.log(`outbound send error (${item.kind}): ${String(err)}`);
+      this.parkOutbound(userId, item);
+      await this.notifyCachePending(userId);
+      return "cached";
+    }
+  }
+
+  /** Park one item at the tail of the user's outbound queue. */
+  private parkOutbound(userId: string, item: CachedMessage): void {
+    const cache = this.outboundCache.get(userId) ?? [];
+    cache.push(item);
+    this.outboundCache.set(userId, cache);
+  }
+
+  /**
+   * Tell the user that queued messages exist and how to flush them. Sent
+   * at most once per caching episode (`cacheNoticeSent`) so a burst of
+   * overflows yields a single notice; a failed notice send re-arms the
+   * dedupe mark so the next caching attempt retries it.
+   */
+  private async notifyCachePending(userId: string): Promise<void> {
+    if (this.cacheNoticeSent.has(userId)) return;
+    const pendingCount = this.outboundCache.get(userId)?.length ?? 0;
+    const token = this.token;
+    const contextToken = this.contextTokens.get(userId);
+    if (!token || !contextToken || pendingCount === 0) return;
+    this.cacheNoticeSent.add(userId);
+    const notice = `💾 有 ${pendingCount} 条消息暂存待发（微信限流或发送失败），发送 /next 可继续发送。`;
+    try {
+      await sendTextMessage(userId, notice, {
+        baseUrl: token.baseUrl,
+        token: token.token,
+        contextToken,
+      });
+    } catch {
+      this.cacheNoticeSent.delete(userId);
+    }
+  }
 
   private async sendReply(userId: string, text: string): Promise<void> {
     if (!this.token || !this.contextTokens.has(userId)) {
@@ -2764,46 +2884,8 @@ export class WeChatDSHBridge {
     }
     const formatted = formatForWeChat(text);
     const segments = splitText(formatted, this.config.textChunkLimit);
-    const cache = this.outboundCache.get(userId) ?? [];
-    let limitCached = false;
-
     for (const segment of segments) {
-      const count = this.wechatMsgCount.get(userId) ?? 0;
-      if (count >= MSG_LIMIT_MAX) {
-        cache.push({ kind: "text", text: segment });
-        limitCached = true;
-        continue;
-      }
-      this.wechatMsgCount.set(userId, count + 1);
-      const payload =
-        count + 1 > MSG_LIMIT_WARN
-          ? segment + `\n\n⚠️ 微信限制连续发送消息数量10条（已发 ${count + 1} 条），发送 /next 可继续`
-          : segment;
-      try {
-        await sendTextMessage(userId, payload, {
-          baseUrl: this.token.baseUrl,
-          token: this.token.token,
-          contextToken: this.contextTokens.get(userId)!,
-        });
-      } catch (err) {
-        this.log(`send reply error: ${String(err)}`);
-        cache.push({ kind: "text", text: segment });
-      }
-    }
-    if (cache.length > 0) this.outboundCache.set(userId, cache);
-
-    if (limitCached && !this.cacheNoticeSent.has(userId)) {
-      this.cacheNoticeSent.add(userId);
-      const notice = `💾 有 ${cache.length} 条消息因微信限制被缓存，发送 /next 可继续发送。`;
-      try {
-        await sendTextMessage(userId, notice, {
-          baseUrl: this.token.baseUrl,
-          token: this.token.token,
-          contextToken: this.contextTokens.get(userId)!,
-        });
-      } catch {
-        this.cacheNoticeSent.delete(userId);
-      }
+      await this.deliverOutbound(userId, { kind: "text", text: segment });
     }
   }
 
@@ -2816,6 +2898,7 @@ export class WeChatDSHBridge {
     }
     this.wechatMsgCount.set(userId, 0);
     const remaining: CachedMessage[] = [];
+    let dropped = 0;
     for (const msg of cache) {
       const count = this.wechatMsgCount.get(userId) ?? 0;
       if (count >= MSG_LIMIT_MAX) {
@@ -2831,8 +2914,20 @@ export class WeChatDSHBridge {
             contextToken: this.contextTokens.get(userId)!,
           });
         } else {
-          const buffer = await import("node:fs/promises").then((fs) => fs.readFile(msg.filePath));
-          await sendMediaMessage(userId, UploadMediaType.FILE, buffer, {
+          let buffer: Buffer;
+          try {
+            buffer = await fs.promises.readFile(msg.filePath);
+          } catch (err) {
+            // Unreadable cached file (temp cleaned up, moved, bad path):
+            // drop it instead of retrying forever on every flush.
+            this.log(`flush dropping unreadable cached file ${msg.filePath}: ${String(err)}`);
+            dropped++;
+            continue;
+          }
+          // Preserve the sender's native media type: a cached image/video
+          // re-flushes inline (mediaTypeForFile), not degraded to a plain
+          // file attachment.
+          await sendMediaMessage(userId, mediaTypeForFile(msg.fileName), buffer, {
             baseUrl: this.token!.baseUrl,
             token: this.token!.token,
             contextToken: this.contextTokens.get(userId)!,
@@ -2845,12 +2940,14 @@ export class WeChatDSHBridge {
         remaining.push(msg);
       }
     }
+    const sentCount = cache.length - remaining.length - dropped;
+    const dropSuffix = dropped > 0 ? `，${dropped} 条文件缓存因无法读取被丢弃` : "";
     if (remaining.length > 0) {
       this.outboundCache.set(userId, remaining);
-      await this.sendReply(userId, `✅ 已发送 ${cache.length - remaining.length} 条，剩余 ${remaining.length} 条缓存，/next 继续。`);
+      await this.sendReply(userId, `✅ 已发送 ${sentCount} 条，剩余 ${remaining.length} 条缓存，/next 继续。${dropSuffix}`);
     } else {
       this.outboundCache.delete(userId);
-      await this.sendReply(userId, `✅ 全部 ${cache.length} 条缓存消息已发送。`);
+      await this.sendReply(userId, `✅ 全部 ${sentCount} 条缓存消息已发送${dropSuffix}。`);
     }
   }
 

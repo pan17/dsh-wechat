@@ -31,6 +31,7 @@ vi.mock("../src/weixin/api.js", () => ({
 }));
 
 import { WeChatDSHBridge } from "../src/bridge/bridge.js";
+import { UploadMediaType } from "../src/weixin/types.js";
 import { defaultConfig } from "../src/config.js";
 
 function makeBridge() {
@@ -211,5 +212,149 @@ describe("send_wechat: error paths (regression)", () => {
     expect(result).toEqual({ ok: false, message: "provide either text or file_path" });
     expect(sendTextMessage).not.toHaveBeenCalled();
     expect(sendMediaMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Shared gateway budget & cache recovery ───
+//
+// `send_wechat` deliveries flow through the same deliverOutbound path as
+// assistant replies: they consume the per-user message budget
+// (`wechatMsgCount`), and items beyond the limit (or transiently failed)
+// are parked in `outboundCache` for /next or auto-flush delivery instead
+// of being lost. The 💾 cache notice rides a direct send outside the
+// budget, so "queued" cases still show exactly one sendTextMessage call.
+
+describe("send_wechat: shared gateway budget & cache", () => {
+  interface BudgetBridge {
+    wechatMsgCount: Map<string, number>;
+    outboundCache: Map<string, Array<{ kind: string; text?: string; filePath?: string; fileName?: string }>>;
+    sendReply(userId: string, text: string): Promise<void>;
+    flushPending(userId: string): Promise<void>;
+  }
+  const asBudget = (bridge: ReturnType<typeof makeBridge>) => bridge as unknown as BudgetBridge;
+
+  function setup() {
+    const bridge = makeBridge();
+    setLoggedIn(bridge);
+    bridge.state.ensureUser("u1", "C:\\work");
+    bridge.state.update("u1", { sessionId: "wx-s1" });
+    bridge.contextTokens.set("u1", "ctx-1");
+    return bridge;
+  }
+
+  it("consumes the shared per-user budget on success", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    expect(b.wechatMsgCount.get("u1")).toBeUndefined();
+
+    await bridge.handleSendWeChat("wx-s1", { text: "hello" });
+    expect(b.wechatMsgCount.get("u1")).toBe(1);
+
+    // Reply-path sends share the same counter.
+    await b.sendReply("u1", "reply");
+    expect(b.wechatMsgCount.get("u1")).toBe(2);
+  });
+
+  it("queues instead of sending once the budget is exhausted", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    b.wechatMsgCount.set("u1", 10);
+
+    const result = await bridge.handleSendWeChat("wx-s1", { text: "overflow" });
+    expect(result.ok).toBe(true);
+    expect(result.message).toMatch(/queued/i);
+    // No payload delivery — the only send is the 💾 cache notice.
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    const [to, notice] = sendTextMessage.mock.calls[0]! as [string, string];
+    expect(to).toBe("u1");
+    expect(notice).toContain("暂存待发");
+    // The queued item sits in the outbound cache verbatim.
+    expect(b.outboundCache.get("u1")).toHaveLength(1);
+    expect(b.outboundCache.get("u1")![0]).toMatchObject({ kind: "text", text: "overflow" });
+  });
+
+  it("reply-path sends after tool pushes share the same 10-slot budget", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    for (let i = 0; i < 10; i++) {
+      await bridge.handleSendWeChat("wx-s1", { text: `m${i}` });
+    }
+    // Ten direct deliveries, no caching notice yet.
+    expect(sendTextMessage).toHaveBeenCalledTimes(10);
+
+    // The 11th push — via the reply path — must queue and fire the notice.
+    await b.sendReply("u1", "eleventh");
+    expect(sendTextMessage).toHaveBeenCalledTimes(11);
+    const [, notice] = sendTextMessage.mock.calls[10]! as [string, string];
+    expect(notice).toContain("暂存待发");
+    expect(b.outboundCache.get("u1")!.map((c) => c.text)).toContain("eleventh");
+  });
+
+  it("transient send failure parks the message and reports queued", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    sendTextMessage.mockRejectedValueOnce(new Error("gateway 429"));
+
+    const result = await bridge.handleSendWeChat("wx-s1", { text: "flaky" });
+    expect(result.ok).toBe(true);
+    expect(result.message).toMatch(/queued/i);
+    expect(b.outboundCache.get("u1")).toHaveLength(1);
+    expect(b.outboundCache.get("u1")![0]).toMatchObject({ kind: "text", text: "flaky" });
+  });
+
+  it("queued tool text is delivered by flushPending", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    b.wechatMsgCount.set("u1", 10);
+    await bridge.handleSendWeChat("wx-s1", { text: "overflow" });
+    sendTextMessage.mockClear();
+
+    b.wechatMsgCount.set("u1", 0);
+    await b.flushPending("u1");
+
+    // Flushed payload first, then the flush summary via sendReply.
+    expect(sendTextMessage).toHaveBeenCalledTimes(2);
+    const [, flushed] = sendTextMessage.mock.calls[0]! as [string, string];
+    expect(flushed).toBe("overflow");
+    expect(b.outboundCache.has("u1")).toBe(false);
+  });
+
+  it("a cached image file re-flushes with its native IMAGE media type", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    const tmpPng = path.join(os.tmpdir(), `send-wechat-${Date.now()}.png`);
+    fs.writeFileSync(tmpPng, "png-bytes");
+    try {
+      b.wechatMsgCount.set("u1", 10);
+      const result = await bridge.handleSendWeChat("wx-s1", { file_path: tmpPng });
+      // Queued, not sent — no CDN upload attempted while over budget.
+      expect(sendMediaMessage).not.toHaveBeenCalled();
+      expect(result.ok).toBe(true);
+      expect(result.message).toMatch(/^queued image/);
+
+      sendMediaMessage.mockClear();
+      b.wechatMsgCount.set("u1", 0);
+      await b.flushPending("u1");
+      expect(sendMediaMessage).toHaveBeenCalledTimes(1);
+      const [, mediaType] = sendMediaMessage.mock.calls[0]! as [string, number, Buffer, unknown];
+      // Inline image on flush — not degraded to FILE(3).
+      expect(mediaType).toBe(UploadMediaType.IMAGE);
+    } finally {
+      fs.unlinkSync(tmpPng);
+    }
+  });
+
+  it("nonexistent file_path returns ok:false immediately and touches no cache", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    const missing = path.join(os.tmpdir(), `send-wechat-missing-${Date.now()}.bin`);
+
+    const result = await bridge.handleSendWeChat("wx-s1", { file_path: missing });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("file not found");
+    // Not even the 💾 notice: nothing was parked.
+    expect(sendTextMessage).not.toHaveBeenCalled();
+    expect(sendMediaMessage).not.toHaveBeenCalled();
+    expect(b.outboundCache.has("u1")).toBe(false);
   });
 });
