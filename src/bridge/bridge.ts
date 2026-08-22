@@ -88,6 +88,14 @@ const TYPING_KEEPALIVE_MS = 10_000;
  * Matches openclaw's 2-minute safety net.
  */
 const TYPING_SAFETY_TIMEOUT_MS = 2 * 60_000;
+/**
+ * Hard cap on one user's outbound cache. The cache normally holds only
+ * rate-limit overflow, but the cold-start path (`sendReply` with no login /
+ * context token) parks GUI-triggered replies there too — a long logged-out
+ * stretch must not grow it without bound. Oldest items drop first: for a
+ * chat backlog, recent output matters more than stale output.
+ */
+const MAX_OUTBOUND_CACHE = 100;
 
 /** A model selection override for one agent (`/model switch` / `/reasoning`). */
 interface ModelOverride {
@@ -609,11 +617,29 @@ export class WeChatDSHBridge {
   /** Start the bridge: resume with a stored token or begin QR login. */
   async start(): Promise<void> {
     this.token = loadToken(this.config.storageDir);
+    this.restoreContextTokens();
     if (this.token) {
       this.loginState = { phase: "logged-in", botId: this.token.accountId };
       await this.startMonitor();
     } else {
       void this.startLoginFlow();
+    }
+  }
+
+  /**
+   * Seed the in-memory context-token map from the persisted per-user state.
+   *
+   * The gateway requires a `context_token` to send TO a user, and fresh
+   * tokens arrive only with inbound messages. Restoring the last persisted
+   * one at startup closes the cold-start window where GUI-triggered replies
+   * for a WeChat-bound session had no token to send with. A restored token
+   * may have expired server-side; such a send throws, `deliverOutbound`
+   * parks the item, and the next inbound message flushes it — degraded to
+   * "arrives after your next WeChat ping", never lost.
+   */
+  private restoreContextTokens(): void {
+    for (const user of this.state.all()) {
+      if (user.lastContextToken) this.contextTokens.set(user.userId, user.lastContextToken);
     }
   }
 
@@ -636,6 +662,7 @@ export class WeChatDSHBridge {
   async reconnect(): Promise<{ ok: boolean; message: string }> {
     this.stop();
     this.token = loadToken(this.config.storageDir);
+    this.restoreContextTokens();
     if (this.token) {
       this.loginState = { phase: "logged-in", botId: this.token.accountId };
       await this.startMonitor();
@@ -816,6 +843,13 @@ export class WeChatDSHBridge {
     this.contextTokens.set(userId, contextToken);
 
     const user = this.state.ensureUser(userId, this.config.cwd);
+    // Persist the freshest context token so a restart can still reach this
+    // user BEFORE their next inbound message. Without this, the in-memory
+    // map was empty after a DSH restart and every GUI-triggered reply for
+    // the bound session was silently dropped until the user pinged WeChat.
+    if (user.lastContextToken !== contextToken) {
+      this.state.update(userId, { lastContextToken: contextToken });
+    }
 
     // Pull text once so both the card handler and the slash command
     // bypass check see the same input.
@@ -2849,6 +2883,13 @@ export class WeChatDSHBridge {
   private parkOutbound(userId: string, item: CachedMessage): void {
     const cache = this.outboundCache.get(userId) ?? [];
     cache.push(item);
+    // Hard cap (see MAX_OUTBOUND_CACHE): drop the OLDEST items first so a
+    // long cold stretch cannot grow the queue without bound.
+    if (cache.length > MAX_OUTBOUND_CACHE) {
+      const overflow = cache.length - MAX_OUTBOUND_CACHE;
+      cache.splice(0, overflow);
+      this.log(`outbound cache cap (${MAX_OUTBOUND_CACHE}) exceeded for ${userId}; dropped ${overflow} oldest item(s)`);
+    }
     this.outboundCache.set(userId, cache);
   }
 
@@ -2879,7 +2920,16 @@ export class WeChatDSHBridge {
 
   private async sendReply(userId: string, text: string): Promise<void> {
     if (!this.token || !this.contextTokens.has(userId)) {
-      this.log(`sendReply skipped (not logged in / no context token for ${userId}): ${text.slice(0, 60)}`);
+      // Cold bridge (not logged in yet, or no context token since the last
+      // restart): park the reply instead of dropping it. The next inbound
+      // WeChat message auto-flushes the cache with a fresh token, so a
+      // GUI-triggered reply reaches the user right after their next ping.
+      // Segments are pre-split exactly as they would have been delivered.
+      this.log(`sendReply deferred to outbound cache (not logged in / no context token for ${userId}): ${text.slice(0, 60)}`);
+      const formatted = formatForWeChat(text);
+      for (const segment of splitText(formatted, this.config.textChunkLimit)) {
+        this.parkOutbound(userId, { kind: "text", text: segment });
+      }
       return;
     }
     const formatted = formatForWeChat(text);

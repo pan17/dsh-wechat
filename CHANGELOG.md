@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-22
+
+### Fixed
+
+- 重启 DSH 后、未先在微信发消息时，Web UI（GUI）触发的 AI 回复静默丢失：外发所需的 iLink `context_token` 此前仅存于内存（只在收到微信入站消息时填充），重启后映射为空 → `sendReply` 顶部守卫直接丢弃绑定会话的每条回复（`send_wechat` 工具同理返回 "user has not messaged yet"），直到用户下一次微信 ping 才恢复。修复分两层：
+  - **持久化 + 恢复**：每用户最新 `context_token` 写入 `state.json`（`UserState.lastContextToken`），`start()` / `reconnect()` 时回灌内存映射——重启后无需先发微信即可直接送达；若服务端拒绝已过期的旧 token，发送失败自动转入 `/next` 缓存队列，下一条微信消息到达时补发
+  - **不再静默丢弃**：彻底无 token（未登录 / 从未有微信交互）时，`sendReply` 改为把格式化分段后的回复暂存 outboundCache（下一条入站消息自动 flush），并新增 `MAX_OUTBOUND_CACHE=100` 上限防止离线期间无限增长（超出丢最旧）；新增 `tests/cold-start.test.ts` 覆盖持久化、重启恢复、暂存补发、队列上限四个场景
+
 ## [0.6.0] - 2026-08-22
 
 ### Changed
