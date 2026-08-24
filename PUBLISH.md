@@ -30,6 +30,22 @@ CHANGELOG.md 是 GitHub Release Notes 的数据源，以下情况**需要更新*
 
 ## 发布流程
 
+### 0. 本地构建与测试（必做）
+
+发版前先在本地跑一遍，确认 build 和 test 都通过再推 tag：
+
+```bash
+npm ci          # 安装依赖（lockfile 精确版本）
+npm run build   # tsc → dist/ + client bundle
+npm test        # vitest 全部用例
+```
+
+发布前可本地验证产物：
+
+```bash
+npm pack --dry-run   # 查看将发布的文件清单（dist/、README、LICENSE、cordis.patch.yml 等）
+```
+
 ### 1. 更新 CHANGELOG.md（必做）
 
 在 `[Unreleased]` 下方写好本次版本的变更说明，格式遵循 [Keep a Changelog](https://keepachangelog.com/)：
@@ -82,17 +98,3 @@ git push origin main --tags
 > **前置条件**：在仓库 Settings → Secrets and variables → Actions 中配置 `NPM` secret，值为 npm 的 Automation Token（`npm token create --type automation` 生成）。
 
 ---
-
-## 本地构建与测试
-
-```bash
-npm ci          # 安装依赖（lockfile 精确版本）
-npm run build   # tsc → dist/ + client bundle
-npm test        # vitest 全部用例
-```
-
-发布前可本地验证产物：
-
-```bash
-npm pack --dry-run   # 查看将发布的文件清单（dist/、README、LICENSE、cordis.patch.yml 等）
-```
