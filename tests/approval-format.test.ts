@@ -12,23 +12,23 @@ function card(rpcId: string, toolName = "pwsh"): PendingApprovalCard {
 describe("formatApprovalCard", () => {
   it("renders tool name, reason and the two GUI-equivalent choices", () => {
     const text = formatApprovalCard(card("r1", "bash"));
-    expect(text).toContain("🔒 Permission requested");
-    expect(text).toContain("Tool: bash");
-    expect(text).toContain("1. once   — allow this call only");
-    expect(text).toContain("2. reject — deny this call");
+    expect(text).toContain("🔒 需要权限确认");
+    expect(text).toContain("工具: bash");
+    expect(text).toContain("1. once   — 仅允许这一次");
+    expect(text).toContain("2. reject — 拒绝这次调用");
     // No third "always" option — the GUI card has exactly two choices.
     expect(text).not.toContain("always");
   });
 
   it("renders the reason in Details", () => {
     const text = formatApprovalCard({ ...card("r1"), reason: "escalate sandbox" });
-    expect(text).toContain("Details:");
+    expect(text).toContain("详情:");
     expect(text).toContain("escalate sandbox");
   });
 
   it("renders index/total for multiple pending cards", () => {
     const text = formatApprovalCard(card("r1"), 1, 2);
-    expect(text).toContain("🔒 Permission 1/2");
+    expect(text).toContain("🔒 权限 1/2");
     expect(text).toContain("P1=1 P2=2");
   });
 });
@@ -60,7 +60,7 @@ describe("parseApprovalReply", () => {
   it("out-of-range Pn warns", () => {
     const { decisions, warnings } = parseApprovalReply("P9=1", [card("r1")]);
     expect(decisions).toEqual([]);
-    expect(warnings.some((w) => w.includes("out of range"))).toBe(true);
+    expect(warnings.some((w) => w.includes("超出范围"))).toBe(true);
   });
 
   it("single decision applies to all when multiple pending", () => {
@@ -69,7 +69,7 @@ describe("parseApprovalReply", () => {
       { rpcId: "r1", reply: "reject" },
       { rpcId: "r2", reply: "reject" },
     ]);
-    expect(warnings.some((w) => w.includes("all 2"))).toBe(true);
+    expect(warnings.some((w) => w.includes("全部 2"))).toBe(true);
   });
 
   it("unrecognized input warns", () => {
@@ -81,6 +81,6 @@ describe("parseApprovalReply", () => {
   it("empty input warns", () => {
     const { decisions, warnings } = parseApprovalReply("  ", [card("r1")]);
     expect(decisions).toEqual([]);
-    expect(warnings).toContain("empty input");
+    expect(warnings).toContain("回复为空");
   });
 });

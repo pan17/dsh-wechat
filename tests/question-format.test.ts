@@ -31,11 +31,13 @@ describe("formatQuestionForWeChat", () => {
     expect(out).toContain("1. Yes, continue — proceed with the change");
     expect(out).toContain("2. No, stop — abort");
     expect(out).toContain("/rq");
+    expect(out).toContain("回复选项编号");
+    expect(out).toContain("跳过：发送 `/rq`");
   });
 
   it("renders multi-question with Qn hints", () => {
     const out = formatQuestionForWeChat(multi);
-    expect(out).toContain("Question 1/2");
+    expect(out).toContain("问题 1/2");
     expect(out).toContain('Q1=1 Q2=2');
   });
 });
@@ -85,7 +87,7 @@ describe("parseQuestionReply", () => {
 
   it("out-of-range Qn emits a warning", () => {
     const parsed = parseQuestionReply("Q5=1", multi);
-    expect(parsed.warnings.some((w) => w.includes("out of range"))).toBe(true);
+    expect(parsed.warnings.some((w) => w.includes("超出范围"))).toBe(true);
   });
 });
 

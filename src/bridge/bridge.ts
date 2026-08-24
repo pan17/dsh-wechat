@@ -620,16 +620,16 @@ export class WeChatDSHBridge {
 
   /**
    * Clear the typing indicator for `userId`. Idempotent: no-op when nothing
-   * is active. `reason` is recorded in the bridge log only.
+   * is active. `reason` names the call site (safety-timeout / plugin-stop /
+   * turn-end, …) and is not logged.
    */
-  private endTyping(userId: string, reason: string): void {
+  private endTyping(userId: string, _reason: string): void {
     const active = this.typingActive.get(userId);
     if (!active) return;
     clearInterval(active.keepAliveTimer);
     clearTimeout(active.safetyTimer);
     this.typingActive.delete(userId);
     void this.sendTypingStatus(userId, TypingStatus.CANCEL);
-    this.log(`typing ended for ${userId} (${reason})`);
   }
 
   /** Start the bridge: resume with a stored token or begin QR login. */
@@ -1974,8 +1974,8 @@ export class WeChatDSHBridge {
           await this.sendReply(userId, `⚠️ 无法创建工作区: ${cmd.path}（目录不存在或不是目录）`);
           return;
         }
-        await this.switchUserWorkspace(user, ws.path);
-        await this.sendReply(userId, `✅ 已添加并切换到工作区: ${ws.title} — ${ws.path}`);
+        const restored = await this.switchUserWorkspace(user, ws.path);
+        await this.sendReply(userId, await this.formatWorkspaceSwitchReply("已添加并切换到工作区", ws.title, ws.path, restored));
         return;
       }
       case "switch": {
@@ -1999,29 +1999,54 @@ export class WeChatDSHBridge {
           await this.sendReply(userId, `⚠️ 找不到工作区: ${cmd.target}`);
           return;
         }
-        await this.switchUserWorkspace(user, ws.path);
-        await this.sendReply(userId, `✅ 已切换到工作区: ${ws.title} — ${ws.path}`);
+        const restored = await this.switchUserWorkspace(user, ws.path);
+        await this.sendReply(userId, await this.formatWorkspaceSwitchReply("已切换到工作区", ws.title, ws.path, restored));
         return;
       }
     }
   }
 
   /**
-   * Rebind the user to the workspace's most recent session (or create a
-   * fresh one in that directory when none is recoverable).
+   * Rebind the user to the workspace's most recent visible session.
+   * Returns the restored session id, or "" when the workspace has none
+   * (the next user message will create one — this method does not mint).
    */
-  private async switchUserWorkspace(user: UserState, workspacePath: string): Promise<void> {
+  private async switchUserWorkspace(user: UserState, workspacePath: string): Promise<string> {
     user.cwd = workspacePath;
     user.cwdExplicit = true;
     user.sessionId = "";
-    // Prefer the workspace's newest candidate session.
+    // Prefer the workspace's newest non-archived candidate session.
     const ws = this.ops.listWorkspaces().find((w) => w.path === workspacePath);
-    const candidate = ws?.sessionIds[0];
+    const archived = new Set(this.ops.archivedSessionIds());
+    const candidate = ws?.sessionIds.find((id) => !archived.has(id));
     if (candidate) {
       user.sessionId = candidate;
     }
     this.state.update(user.userId, { cwd: workspacePath, cwdExplicit: true, sessionId: user.sessionId });
     this.trackWatchedSession(user.userId, user.sessionId);
+    return user.sessionId;
+  }
+
+  /** Two-line workspace switch/add reply: workspace row + restored session. */
+  private async formatWorkspaceSwitchReply(
+    verb: string,
+    title: string,
+    path: string,
+    sessionId: string,
+  ): Promise<string> {
+    const head = `✅ ${verb}: ${title} — ${path}`;
+    if (!sessionId) {
+      return `${head}\n💬 该工作区暂无会话，发送消息将创建`;
+    }
+    return `${head}\n💬 已恢复会话: ${await this.formatSessionLabel(sessionId)}`;
+  }
+
+  /**
+   * WeChat-facing session label: cleaned title (id prefix fallback) + full id.
+   */
+  private async formatSessionLabel(sessionId: string): Promise<string> {
+    const raw = (await this.ops.readSessionTitle(sessionId)) ?? sessionId.slice(0, 12);
+    return `${cleanSessionTitle(raw)}（${sessionId}）`;
   }
 
   private async handleSessionCommand(userId: string, cmd: SessionCommand): Promise<void> {
@@ -2092,7 +2117,8 @@ export class WeChatDSHBridge {
         this.state.update(user.userId, { sessionId: user.sessionId, cwd: user.cwd, cwdExplicit: user.cwdExplicit });
         this.trackWatchedSession(user.userId, user.sessionId);
         const agent = await this.agents.ensure(user);
-        await this.sendReply(userId, `✅ 已切换到会话 ${record.header.id.slice(0, 12)}（${record.header.cwd ?? "?"}）${agent ? `，Agent ${agent.status}` : ""}。`);
+        const label = await this.formatSessionLabel(record.header.id);
+        await this.sendReply(userId, `✅ 已切换到会话 ${label} — ${record.header.cwd ?? "?"}${agent ? `，Agent ${agent.status}` : ""}。`);
         // Flush any pending cards for the session just switched into
         // (notified earlier, or silently when nothing was pending).
         await this.flushPendingCardsForSession(user.userId, user.sessionId);

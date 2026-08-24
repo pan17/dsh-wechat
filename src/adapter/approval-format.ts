@@ -38,31 +38,31 @@ export function formatApprovalCard(entry: PendingApprovalCard, index?: number, t
   const lines: string[] = [];
   const header =
     index !== undefined && total !== undefined && total > 1
-      ? `🔒 Permission ${index}/${total}`
-      : "🔒 Permission requested";
+      ? `🔒 权限 ${index}/${total}`
+      : "🔒 需要权限确认";
   lines.push(header);
   lines.push("");
 
-  lines.push(`Tool: ${entry.toolName}`);
+  lines.push(`工具: ${entry.toolName}`);
   lines.push("");
 
   if (entry.reason) {
-    lines.push("Details:");
+    lines.push("详情:");
     lines.push(`  ${entry.reason}`);
     lines.push("");
   }
 
-  lines.push("Choose one reply:");
-  lines.push("  1. once   — allow this call only");
-  lines.push("  2. reject — deny this call");
+  lines.push("请回复其中一个：");
+  lines.push("  1. once   — 仅允许这一次");
+  lines.push("  2. reject — 拒绝这次调用");
   lines.push("");
 
   if (index !== undefined && total !== undefined && total > 1) {
-    lines.push(`💡 ${total} permissions pending. Send:`);
-    lines.push(`  • 1 | 2        — apply to ALL ${total} permissions`);
-    lines.push(`  • P${index}=1 P${nextIndex(index)}=2 …  — set per-permission`);
+    lines.push(`💡 当前有 ${total} 张权限卡待处理。可发送：`);
+    lines.push(`  • 1 | 2        — 对全部 ${total} 张卡生效`);
+    lines.push(`  • P${index}=1 P${nextIndex(index)}=2 …  — 分别指定`);
   } else {
-    lines.push("Reply with: 1 | 2");
+    lines.push("回复：1 或 2");
   }
   lines.push("");
   lines.push("（30 分钟未回复自动移除此卡；可在 DSH 界面继续处理）");
@@ -88,10 +88,10 @@ export function parseApprovalReply(
 ): { decisions: ApprovalDecision[]; warnings: string[] } {
   const trimmed = input.trim();
   if (!trimmed) {
-    return { decisions: [], warnings: ["empty input"] };
+    return { decisions: [], warnings: ["回复为空"] };
   }
   if (pending.length === 0) {
-    return { decisions: [], warnings: ["no pending approvals"] };
+    return { decisions: [], warnings: ["没有待处理的权限卡"] };
   }
 
   const decisions: ApprovalDecision[] = [];
@@ -108,7 +108,7 @@ export function parseApprovalReply(
     const rest = (pnMatch[3] ?? "").trim();
 
     if (n < 1 || n > pending.length) {
-      warnings.push(`P${n} out of range (have ${pending.length} card(s))`);
+      warnings.push(`P${n} 超出范围（共 ${pending.length} 张卡）`);
       continue;
     }
     const idx = n - 1;
@@ -118,7 +118,7 @@ export function parseApprovalReply(
     if (marker === "-") {
       // Dash forces reject (message allowed as trailing text).
       if (!rest) {
-        warnings.push(`P${n} dash with empty content; skipping`);
+        warnings.push(`P${n} 短横线后没有内容，已跳过`);
         continue;
       }
       upsertDecision(decisions, { rpcId: target.rpcId, reply: "reject" });
@@ -127,16 +127,16 @@ export function parseApprovalReply(
 
     // "=" marker: parse the value.
     if (rest === "") {
-      warnings.push(`P${n} empty content; skipping`);
+      warnings.push(`P${n} 内容为空，已跳过`);
       continue;
     }
     if (/[,;、]/.test(rest)) {
-      warnings.push(`P${n} multi-select not supported; reply with a single 1/2 or P1=once|reject`);
+      warnings.push(`P${n} 不支持多选；请回单个 1/2，或 P1=once|reject`);
       continue;
     }
     const parsed = parseValue(rest);
     if (!parsed) {
-      warnings.push(`P${n} unrecognized value "${truncate(rest, 40)}"`);
+      warnings.push(`P${n} 无法识别「${truncate(rest, 40)}」`);
       continue;
     }
     upsertDecision(decisions, { rpcId: target.rpcId, reply: parsed });
@@ -145,18 +145,18 @@ export function parseApprovalReply(
   // Step 2: fall back to positional/keyword against all pending cards.
   if (decisions.length === 0 && matchedIndices.size === 0) {
     if (/[,;、]/.test(trimmed)) {
-      warnings.push("multi-select not supported; reply with a single 1/2 or P1=once|reject");
+      warnings.push("不支持多选；请回单个 1/2，或 P1=once|reject");
     } else {
       const positional = parseValue(trimmed);
       if (positional) {
         if (pending.length > 1) {
-          warnings.push(`single decision applies to all ${pending.length} pending cards`);
+          warnings.push(`该回复将对全部 ${pending.length} 张待处理权限卡生效`);
         }
         for (const target of pending) {
           upsertDecision(decisions, { rpcId: target.rpcId, reply: positional });
         }
       } else {
-        warnings.push(`unrecognized reply "${truncate(trimmed, 50)}"; expected 1|2 or once|reject`);
+        warnings.push(`无法识别「${truncate(trimmed, 50)}」；请回 1|2 或 once|reject`);
       }
     }
   }

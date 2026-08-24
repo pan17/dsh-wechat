@@ -70,7 +70,7 @@ export function parseQuestionReply(
     return {
       answers: items.map((q) => defaultAnswerFor(q)),
       allAnswered: false,
-      warnings: ["empty input"],
+      warnings: ["回复为空"],
     };
   }
 
@@ -96,7 +96,7 @@ export function parseQuestionReply(
     ],
     allAnswered: false,
     warnings: [
-      'multi-question reply without "Q{n}=" prefix; only Q1 captured, rest defaulted',
+      "多题回复未写 Q{n}=，只收下了第 1 题，其余用默认",
     ],
   };
 }
@@ -105,7 +105,7 @@ export function parseQuestionReply(
 
 function formatSingle(q: AskUserQuestionItem): string {
   const lines: string[] = [];
-  lines.push(`❓ [${q.header ?? "Question"}]`);
+  lines.push(`❓ [${q.header ?? "提问"}]`);
   lines.push(q.question);
   if (q.detail) lines.push(q.detail);
   lines.push("");
@@ -120,7 +120,7 @@ function formatMulti(items: ReadonlyArray<AskUserQuestionItem>): string {
   const lines: string[] = [];
   for (let i = 0; i < total; i++) {
     const q = items[i]!;
-    lines.push(`❓ Question ${i + 1}/${total} [${q.header ?? "Question"}]`);
+    lines.push(`❓ 问题 ${i + 1}/${total} [${q.header ?? "提问"}]`);
     lines.push(q.question);
     if (q.detail) lines.push(q.detail);
     lines.push("");
@@ -141,37 +141,35 @@ function appendOptions(lines: string[], q: AskUserQuestionItem): void {
     lines.push(`  ${line}`);
   }
   if (q.multiSelect === true) {
-    lines.push("  (multi-select; reply with comma-separated numbers)");
+    lines.push("  （可多选；用逗号分隔数字回复）");
   }
 }
 
 function buildHint(q: AskUserQuestionItem): string {
   const base =
     (q.options?.length ?? 0) === 0
-      ? "💡 Reply with your own answer."
-      : '💡 Reply with the option number (e.g. "1"), numbers (e.g. "1, 3" for multi-select), or type your own answer.';
-  return base + "\n   To skip: send `/rq` (alias `/reject-question`) to dismiss.";
+      ? "💡 直接回复你的答案。"
+      : "💡 回复选项编号（如 1），多选可用 1, 3，也可以直接打自己的话。";
+  return base + "\n   跳过：发送 `/rq`（别名 `/reject-question`）关闭此卡。";
 }
 
 function buildMultiHint(items: ReadonlyArray<AskUserQuestionItem>): string {
   const lines: string[] = [
-    '💡 Reply with "Q{n}={value}" for choices / "Q{n}-{value}" for custom (space-separated; order doesn\'t matter):',
+    "💡 回复格式：选选项用 Q{n}={值}，自定义用 Q{n}-{文字}（空格分隔，顺序不限）：",
   ];
   if (items.length === 2) {
-    lines.push('   • Single-select: "Q1=1 Q2=2"');
-    lines.push('   • Multi-select:  "Q1=1, 3 Q2=2"');
-    lines.push('   • Custom:        "Q2-这题我有自己想法"  (the dash forces free-form text)');
+    lines.push("   • 单选：Q1=1 Q2=2");
+    lines.push("   • 多选：Q1=1, 3 Q2=2");
+    lines.push("   • 自定义：Q2-这题我有自己想法（短横线表示自由文本）");
   } else {
-    lines.push('   • Mixed:         "Q1=1 Q2-这题我有自己想法 Q3=3"');
-    lines.push("   • Skip (use default): just don't include that Qn-");
+    lines.push("   • 混答：Q1=1 Q2-这题我有自己想法 Q3=3");
+    lines.push("   • 跳过某题（用默认）：不要写那个 Qn");
   }
-  lines.push(
-    '   Mobile-friendly: spaces around the marker are ignored — "Q1 = 1", "Q1 =1" and "Q1= 1" all work.',
-  );
+  lines.push("   标记两侧空格可忽略：Q1 = 1、Q1 =1、Q1= 1 都可以。");
   lines.push("");
-  lines.push("   To dismiss: send `/rq` (alias `/reject-question`) to skip all questions.");
+  lines.push("   全部跳过：发送 `/rq`（别名 `/reject-question`）。");
   lines.push("");
-  lines.push('   Short form (positional, must be in order): "1 --- 2 --- 3"');
+  lines.push("   简写（按顺序）：1 --- 2 --- 3");
   return lines.join("\n");
 }
 
@@ -198,7 +196,7 @@ function parseQnFormat(input: string, items: ReadonlyArray<AskUserQuestionItem>)
     const rest = (match[3] ?? "").trim();
 
     if (n < 1 || n > items.length) {
-      warnings.push(`Q${n} out of range (have ${items.length} questions)`);
+      warnings.push(`Q${n} 超出范围（共 ${items.length} 题）`);
       continue;
     }
 
@@ -209,7 +207,7 @@ function parseQnFormat(input: string, items: ReadonlyArray<AskUserQuestionItem>)
     if (marker === "-") {
       // "-" marker: force custom (even pure digits stay as text)
       if (rest === "") {
-        warnings.push(`Q${n} dash with empty content; using default`);
+        warnings.push(`Q${n} 短横线后没有内容，已用默认`);
         parsed = defaultAnswerFor(q);
       } else {
         parsed = capAnswer([rest]);
@@ -217,7 +215,7 @@ function parseQnFormat(input: string, items: ReadonlyArray<AskUserQuestionItem>)
     } else {
       // "=" marker: parse normally (numberList or customText)
       if (rest === "") {
-        warnings.push(`Q${n} empty content; using default`);
+        warnings.push(`Q${n} 内容为空，已用默认`);
         parsed = defaultAnswerFor(q);
       } else {
         parsed = parseSegment(rest, q);
@@ -258,7 +256,7 @@ function parseDashFormat(input: string, items: ReadonlyArray<AskUserQuestionItem
         }
       }
       answers[lastIdx] = capAnswer(lastAnswer);
-      warnings.push(`extra segment "${truncate(seg, 30)}" merged into Q${lastIdx + 1}`);
+      warnings.push(`多出的一段「${truncate(seg, 30)}」已并入 Q${lastIdx + 1}`);
     }
   }
 

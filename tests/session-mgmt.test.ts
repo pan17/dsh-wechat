@@ -244,3 +244,112 @@ describe("/workspace list counts exclude archived sessions", () => {
     );
   });
 });
+
+describe("/workspace switch reports the restored session", () => {
+  let bridge: WeChatDSHBridge;
+  let mock: ReturnType<typeof makeMockAgent>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock = makeMockAgent("session-aaaaaaaa-0000-4000-8000-000000000000");
+    bridge = makeBridge(mock);
+  });
+
+  function setupWorkspaces(
+    workspaces: Array<{ id: string; path: string; title: string; sessionIds: string[] }>,
+    archived: string[],
+    titles: Record<string, string | undefined>,
+  ) {
+    const anyBridge = bridge as unknown as {
+      state: {
+        ensureUser(u: string, c: string): { userId: string; cwd: string; sessionId: string; silent: boolean };
+        getUser(u: string): { userId: string; cwd: string; sessionId: string };
+      };
+      ops: {
+        listWorkspaces(): Array<{ id: string; path: string; title: string; sessionIds: string[] }>;
+        archivedSessionIds(): string[];
+        readSessionTitle(id: string): Promise<string | undefined>;
+      };
+      handleWorkspaceCommand(u: string, cmd: { kind: "switch"; target: string }): Promise<void>;
+    };
+    anyBridge.ops.listWorkspaces = () => workspaces;
+    anyBridge.ops.archivedSessionIds = () => archived;
+    anyBridge.ops.readSessionTitle = async (id: string) => titles[id];
+    anyBridge.state.ensureUser("u1", "C:\\work");
+    return anyBridge;
+  }
+
+  it("shows restored session name and full id", async () => {
+    const anyBridge = setupWorkspaces(
+      [{ id: "w1", path: "C:\\work", title: "work", sessionIds: ["session-visible-1"] }],
+      [],
+      { "session-visible-1": "修切换回显" },
+    );
+    await anyBridge.handleWorkspaceCommand("u1", { kind: "switch", target: "1" });
+    const user = anyBridge.state.getUser("u1");
+    expect(user.sessionId).toBe("session-visible-1");
+    const body = String(sendTextMessage.mock.calls[0]?.[1]);
+    expect(body).toContain("已切换到工作区: work — C:\\work");
+    expect(body).toContain("已恢复会话: 修切换回显（session-visible-1）");
+  });
+
+  it("skips archived sessions and restores the next visible one", async () => {
+    const anyBridge = setupWorkspaces(
+      [{ id: "w1", path: "C:\\work", title: "work", sessionIds: ["s-archived", "s-visible"] }],
+      ["s-archived"],
+      { "s-visible": "可见会话" },
+    );
+    await anyBridge.handleWorkspaceCommand("u1", { kind: "switch", target: "1" });
+    const user = anyBridge.state.getUser("u1");
+    expect(user.sessionId).toBe("s-visible");
+    const body = String(sendTextMessage.mock.calls[0]?.[1]);
+    expect(body).toContain("已恢复会话: 可见会话（s-visible）");
+    expect(body).not.toContain("s-archived");
+  });
+
+  it("says no session when the workspace has none visible", async () => {
+    const anyBridge = setupWorkspaces(
+      [{ id: "w1", path: "C:\\work", title: "work", sessionIds: ["s-archived"] }],
+      ["s-archived"],
+      {},
+    );
+    await anyBridge.handleWorkspaceCommand("u1", { kind: "switch", target: "1" });
+    const user = anyBridge.state.getUser("u1");
+    expect(user.sessionId).toBe("");
+    const body = String(sendTextMessage.mock.calls[0]?.[1]);
+    expect(body).toContain("已切换到工作区: work — C:\\work");
+    expect(body).toContain("该工作区暂无会话，发送消息将创建");
+  });
+});
+
+describe("/session switch reports the session name", () => {
+  let bridge: WeChatDSHBridge;
+  let mock: ReturnType<typeof makeMockAgent>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock = makeMockAgent("session-aaaaaaaa-0000-4000-8000-000000000000");
+    bridge = makeBridge(mock);
+  });
+
+  it("includes title and full id in the switch reply", async () => {
+    const anyBridge = bridge as unknown as {
+      state: { ensureUser(u: string, c: string): { userId: string; cwd: string; sessionId: string; silent: boolean } };
+      ops: {
+        listSessions(): Promise<Array<{ header: { id: string; createdAt: number; cwd?: string } }>>;
+        readSessionTitle(id: string): Promise<string | undefined>;
+      };
+      handleSessionCommand(u: string, cmd: { kind: "switch"; index: number }): Promise<void>;
+    };
+    anyBridge.ops.listSessions = async () => [
+      { header: { id: "session-old", createdAt: 100, cwd: "C:\\work" } },
+      { header: { id: "session-new", createdAt: 200, cwd: "C:\\work" } },
+    ];
+    anyBridge.ops.readSessionTitle = async (id: string) => (id === "session-new" ? "最新会话" : "旧会话");
+    anyBridge.state.ensureUser("u1", "C:\\work");
+    await anyBridge.handleSessionCommand("u1", { kind: "switch", index: 1 });
+    const body = String(sendTextMessage.mock.calls[0]?.[1]);
+    expect(body).toContain("已切换到会话 最新会话（session-new） — C:\\work");
+    expect(body).toContain("Agent");
+  });
+});
