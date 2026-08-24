@@ -35,6 +35,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # CI quality gate: when the tag push and the main push happen in the
+      # same `git push origin main --tags`, CI on the main commit and
+      # Release on the tag fire in parallel. Block here until CI settles on
+      # a green conclusion before any artifact goes to npm — a red CI must
+      # never silently ship. Polls up to ~5 minutes (CI itself runs ~15s,
+      # the slack is for queue + the parallel-release runner).
+      - name: Wait for CI on this commit to be green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA="$GITHUB_SHA"
+          echo "Checking CI conclusion for $SHA..."
+          for i in $(seq 1 60); do
+            CONCLUSION=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=$SHA" \
+              --jq '.workflow_runs[] | select(.name=="CI") | "\(.conclusion)\t\(.status)"' | head -1)
+            case "$CONCLUSION" in
+              "success	completed")
+                echo "CI is green ✓"; exit 0 ;;
+              "failure	completed"|"cancelled	completed"|"timed_out	completed")
+                echo "::error::CI conclusion '$CONCLUSION' — blocking npm publish"
+                exit 1 ;;
+              *)
+                echo "Attempt $i/60 — CI status: '${CONCLUSION:-pending}' (sleeping 5s)"
+                sleep 5 ;;
+            esac
+          done
+          echo "::error::Timed out waiting for CI to settle on $SHA"
+          exit 1
       - uses: actions/setup-node@v4
         with:
           node-version: 20
