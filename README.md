@@ -35,12 +35,14 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 DSH 自带插件管理命令 `dsh plugin`（在 profile 目录转发 pnpm，并自动把
 声明了 `dsh.bundle` 的依赖加入 bundle 层）：
 
+> ⚠️ **别用** `npx dsh plugin`——npm 上 `dsh` 这个名字早在 2016 年就被一个不相关的 JS shell 包占了（`dsh@1.0.1`，作者 `infusion`），它没暴露 CLI bin，会报 `could not determine executable to run`。DSH 的 CLI 在 scoped 包 `@deepseek-ai/dsh` 下，必须用完整名。
+
 ```bash
 # 安装（自动添加依赖 + 注册 bundle 层）
-dsh plugin --profile <profile> add dsh-wechat
+npx @deepseek-ai/dsh plugin --profile <profile> add dsh-wechat
 
 # 验证组合配置
-dsh --profile <profile> --dump-config   # 应看到 "- id: dsh-wechat" 行
+npx @deepseek-ai/dsh --profile <profile> --dump-config   # 应看到 "- id: dsh-wechat" 行
 
 # 重启 DSH（必须），然后：
 #   - 浏览器打开 设置 → WeChat：扫码登录、查看状态、重连、改配置
@@ -50,8 +52,8 @@ dsh --profile <profile> --dump-config   # 应看到 "- id: dsh-wechat" 行
 其他管理命令（同样自动维护 bundle 层）：
 
 ```bash
-dsh plugin --profile <profile> update dsh-wechat   # 升级
-dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除）
+npx @deepseek-ai/dsh plugin --profile <profile> update dsh-wechat   # 升级
+npx @deepseek-ai/dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除）
 ```
 
 > 插件从 npm 官方源安装（`dsh plugin add` 即 `pnpm add dsh-wechat`）。
