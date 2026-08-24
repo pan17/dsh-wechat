@@ -158,9 +158,19 @@ export interface PermissionPresetsService {
  * never correlates across sessions.
  */
 export interface CommandsService {
+  /**
+   * Mirrors `@deepseek-ai/dsh-commands.CommandRuntime.execute`. The host
+   * signature is `(agent, line, images, signal)` — `images` is the composer
+   * attachment batch (always `[]` from WeChat; there is no composer), and
+   * `signal` is the UI request's cancellation signal. The previous 3-arg
+   * shape put the signal in `images`'s slot, leaving `signal` undefined
+   * inside the host and breaking every native command with
+   * `Cannot read properties of undefined (reading 'aborted')`.
+   */
   execute(
     agent: Agent,
     line: string,
+    images: readonly unknown[],
     signal: AbortSignal,
   ): Promise<{ commandId: unknown; result: CommandResultShape } | undefined>;
 }

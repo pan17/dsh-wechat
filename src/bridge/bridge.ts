@@ -27,6 +27,7 @@ import { formatQuestionForWeChat, parseQuestionReply, buildAnswer } from "../ada
 import { formatApprovalCard, parseApprovalReply } from "../adapter/approval-format.js";
 import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
+import type { ModelSelection } from "../dsh/ops.js";
 import type { Agent, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
 import { StateStore, type UserState } from "../state.js";
 import type { WeChatDSHConfig } from "../config.js";
@@ -183,9 +184,20 @@ export interface NativeCommandsSurface {
     agent: Agent,
     name: string,
   ): { name: string; description?: string; input?: { hint?: string } } | undefined;
+  /**
+   * Mirrors `@deepseek-ai/dsh-commands.CommandRuntime.execute`. The host
+   * signature is `(agent, line, images, signal)` — `images` is the composer
+   * attachment batch (base64-encoded), and `signal` is the UI request's
+   * cancellation signal. WeChat has no composer attachment surface, so the
+   * bridge always passes `[]`; the previous 3-arg call placed the signal
+   * in `images`'s slot, leaving `signal` undefined inside the host handler
+   * and triggering `Cannot read properties of undefined (reading
+   * 'aborted')` on every native command.
+   */
   execute(
     agent: Agent,
     line: string,
+    images: readonly unknown[],
     signal: AbortSignal,
   ): Promise<
     | {
@@ -389,7 +401,13 @@ export class WeChatDSHBridge {
       def = this.commandsCtx.find(agent, name);
       if (!def) return false;
       const abort = new AbortController();
-      result = await this.commandsCtx.execute(agent, text, abort.signal);
+      // The host's execute signature is `(agent, line, images, signal)`.
+      // WeChat has no composer attachment surface, so the images batch is
+      // always empty; passing the signal in the third slot (the previous
+      // behavior) made the host's `signal` argument undefined and threw
+      // `Cannot read properties of undefined (reading 'aborted')` on every
+      // native command. See NativeCommandsSurface for the contract.
+      result = await this.commandsCtx.execute(agent, text, [], abort.signal);
     } catch (err) {
       console.warn(`[dsh-wechat] native command ${name} threw: ${String(err)}`);
       const detail = err instanceof Error ? err.message : String(err);
@@ -2413,12 +2431,43 @@ export class WeChatDSHBridge {
         }
         // Apply to the live agent (via agent/request) and as the new default.
         const agent = this.agents.get(user);
-        if (agent) {
-          this.modelOverrides.set(agent.id, { provider: matchedProvider.id, model: matchedModel.id });
+        // Preserve the user's current reasoning effort across the model
+        // switch — the override carries the per-session effort set by
+        // `/reasoning switch`, and the persisted default may carry a
+        // GUI-set effort. Pick the more local of the two and keep it on
+        // the new model only when the new model actually supports that
+        // effort id; otherwise drop it so the LLM call never sees an
+        // unsupported value. The contract documented on
+        // `applyModelOverride` — "`/model switch` does not clear a set
+        // effort" — finally holds for the override AND the persisted
+        // default, so `/status` (which reads the override via
+        // `resolveEffectiveModel`) keeps showing the effort.
+        const existingEffort =
+          (agent ? this.modelOverrides.get(agent.id)?.reasoningEffort : undefined) ??
+          this.ops.defaultModelSelection()?.reasoningEffort;
+        let preservedEffort: string | undefined;
+        let preservedLabel: string | undefined;
+        if (existingEffort !== undefined) {
+          const newReasoning = await this.ops.resolveModelReasoning(matchedProvider.id, matchedModel.id);
+          const supported = newReasoning?.efforts.find((e) => e.id === existingEffort);
+          if (supported) {
+            preservedEffort = existingEffort;
+            preservedLabel = supported.name;
+          }
         }
-        const saved = await this.ops.saveDefaultModel({ provider: matchedProvider.id, model: matchedModel.id });
+        const selection: ModelSelection =
+          preservedEffort !== undefined
+            ? { provider: matchedProvider.id, model: matchedModel.id, reasoningEffort: preservedEffort }
+            : { provider: matchedProvider.id, model: matchedModel.id };
+        if (agent) {
+          this.modelOverrides.set(agent.id, selection);
+        }
+        const saved = await this.ops.saveDefaultModel(selection);
         const lines = [`✅ 已切换到模型: ${matchedProvider.id}/${matchedModel.id}`];
         if (agent) lines.push("（已应用到当前会话，下一步生效）");
+        if (preservedLabel) {
+          lines.push(`（推理等级 ${preservedLabel} 保留，用 /reasoning 调整）`);
+        }
         if (!saved) lines.push("⚠️ 无法更新默认模型（仅当前会话生效）");
         await this.sendReply(userId, lines.join("\n"));
         return;
@@ -2580,6 +2629,14 @@ export class WeChatDSHBridge {
    * the `agent/request` waterfall listener (registered in index.ts) for
    * WeChat-bound agents. An override without a reasoning effort leaves the
    * caller's effort untouched (`/model switch` does not clear a set effort).
+   *
+   * The override itself is preserved by `handleModelCommand` when the user
+   * issues `/model switch`: the new selection carries the existing effort
+   * (from the override first, then the persisted default) IF the new
+   * model supports the same effort id. So in practice this merge is the
+   * last-line defense for the live request; the displayed selection (in
+   * `/status` via `resolveEffectiveModel`) reads the effort straight off
+   * the override.
    */
   applyModelOverride(
     config: { provider: string; model: string; reasoningEffort?: string },
@@ -2718,13 +2775,36 @@ export class WeChatDSHBridge {
    * (`/model switch`) > the session's latest logged request config > the
    * agent's creation options > the deployment default model. Same precedence
    * as the GUI's `selectionFor`.
+   *
+   * `reasoningEffort` follows the same precedence chain, with one defensive
+   * branch: when the override carries a model selection but no effort AND
+   * the persisted default has an effort for the SAME model, borrow that
+   * effort. This rescues users whose override was written by an older
+   * `/model switch` that did not preserve the effort — they see the
+   * preserved effort in `/status` immediately on upgrade instead of
+   * needing to re-issue `/reasoning switch`. Only triggers when the
+   * default's provider/model matches the override; otherwise the default's
+   * effort belongs to a different model and must not be applied.
    */
   private resolveEffectiveModel(
     user: UserState,
     agent: Agent | undefined,
   ): { provider?: string; model?: string; reasoningEffort?: string } | undefined {
     const override = agent ? this.modelOverrides.get(agent.id) : undefined;
-    if (override) return override;
+    if (override) {
+      if (override.reasoningEffort === undefined) {
+        const def = this.ops.defaultModelSelection();
+        if (
+          def &&
+          def.provider === override.provider &&
+          def.model === override.model &&
+          def.reasoningEffort !== undefined
+        ) {
+          return { ...override, reasoningEffort: def.reasoningEffort };
+        }
+      }
+      return override;
+    }
     const logged = agent?.session?.requestHeader?.()?.config;
     if (logged?.provider && logged.model) return logged;
     if (agent?.options?.provider && agent.options.model) return agent.options;

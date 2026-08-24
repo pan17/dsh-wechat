@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-24
+
+### Fixed
+
+- 设置页 WeChat 卡点击「重新扫码」后二维码不刷新、扫码成功状态不变：原来只在 mount 和 save/relogin/reconnect/logout 之后单次调 `refresh()`，但 host 的 `/relogin` 同步把 phase 设为 `idle`、再异步 (`void startLoginFlow()`) 启动 QR 生成，客户端那一次 refresh 看到的还是 `idle`；扫码成功阶段 (`waiting-qr → scaned → logged-in`) 也是纯 host 端异步转换，客户端无任何 in-flight action 可等。修法：客户端 `WechatSection` 在 phase 不是 `logged-in` 时每 2 秒轮询一次 `/status`，进入 `logged-in` 后自动停止（和独立 `/wechat/qr` 页面 `setTimeout(poll, 2000)` 一致）。`refresh()` 的 `setForm((prev) => prev ?? ...)` 仍然只在首次填充，轮询不会覆盖用户正在编辑的表单
+- DSH 原生命令(`/plan`、`/goal`、`/compact` 等)在微信端全部抛 `⚠️ 命令执行异常：Cannot read properties of undefined (reading 'aborted')`：桥接把 `abort.signal` 当作 `ctx.commands.execute` 的第 3 个参数传入，但 host 实际签名是 `(agent, line, images, signal)` 4 个参数——`signal` 被错误地放到 `images` 槽位里，host 内的 `signal` 形参实际为 `undefined`，于是 `if (signal.aborted)` 那一行立刻炸。修复：调用改为 `execute(agent, line, [], abort.signal)`；同时把 `NativeCommandsSurface` 与 `DshOps.CommandsService` 的 `execute` 签名改为 `(agent, line, images, signal)`，并在 `tests/native-command.test.ts` 增加 1 个回归用例 + 在已有 rawInput 用例里增加 `images`/`signal` 形状断言，防止再次退回到 3-arg 形态
+- `/model switch` 把之前 `/reasoning switch` 设过的推理等级 (`reasoningEffort`) 擦掉，导致 `/status`（和 `/reasoning status`）的 `• 模型: X/Y（推理: <name>）` 附注在切模型后消失、`默认` 一行也丢失、`/next` 之后的新会话继承不到 effort：写覆盖项与持久化默认时本就不该覆盖 user 已经选过的 effort（`applyModelOverride` 注释也承诺「`/model switch` does not clear a set effort」），实际实现却没做到。修复分两层：
+  - **写时保留**：`handleModelCommand` 的 `switch` 分支先读「覆盖项 → 持久化默认」里的 effort，若新模型 `resolveModelInfo` 仍支持同一个 effort id，则把 `reasoningEffort` 一起写进新的 `selection` / `saveSelection`；不支持则清空（避免 LLM 拿到非法值）。命令回复追加「（推理等级 <name> 保留，用 /reasoning 调整）」一行提示
+  - **读时回退**：`resolveEffectiveModel` 在覆盖项缺 effort 但持久化默认对同模型有 effort 时把默认 effort 合并进来——升级前已处于损坏状态的用户无需重新 `/reasoning switch` 也能在 `/status` 立刻看到原本的 effort；仅当 provider/model 一致才回退，避免默认的 effort 串到不同模型上
+- 新增 `tests/model-reasoning.test.ts`（11 个用例）覆盖：覆盖项 / 默认优先级排序、新模型支持/不支持 effort、不支持推理能力的模型、`applyModelOverride` 合并契约（无 effort 保留 caller 的、有 effort 覆盖 caller 的）；README `/model` 命令行同步注明「当前推理等级若新模型支持则一并保留，否则清空」
+- 设置页 README 描述中的登录阶段标签与代码 `PHASE_LABEL` 对齐（`已扫码，待确认` / `登录失败`，原简写为 `已扫码` / `失败`）
+
 ## [0.6.1] - 2026-08-22
 
 ### Fixed

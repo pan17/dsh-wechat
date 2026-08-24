@@ -72,11 +72,19 @@ function makeMockCommands({ registry, executeThrows, findThrows, listSnapshot }:
     },
     // The real `execute` returns `CommandExecution` = `{ commandId, result }`,
     // where `result` is the `CommandResult` = `{ kind: 'success', text? } |
-    // { kind: 'error', text }` that the handler returned. We key on the
-    // name parsed off the leading-slash line so the bridge sees a
-    // faithful surface.
-    execute: async (agent: unknown, line: string) => {
+    // { kind: 'error', text }` that the handler returned. The host signature
+    // is `(agent, line, images, signal)` — `images` is the composer
+    // attachment batch (always `[]` from WeChat), `signal` is the UI request
+    // cancellation signal. We key on the name parsed off the leading-slash
+    // line so the bridge sees a faithful surface.
+    execute: async (agent: unknown, line: string, images: readonly unknown[] = [], signal?: AbortSignal) => {
       if (executeThrows) throw executeThrows;
+      if (images.length > 0) {
+        throw new Error(`native command mock received non-empty images: ${JSON.stringify(images)}`);
+      }
+      if (signal === undefined) {
+        throw new Error("native command mock received undefined signal — bridge must pass an AbortSignal");
+      }
       const nameMatch = /^\/([a-z_][a-z0-9_-]*)/.exec(line);
       if (!nameMatch) return undefined;
       const entry = registry.get(nameMatch[1]!);
@@ -295,9 +303,14 @@ describe("Native command dispatch via ctx.commands", () => {
     const commands = {
       find: (agent: unknown, name: string) =>
         name === "goal" ? { name, description: "set or view the goal for a long-running task" } : undefined,
-      // Real `execute` returns `CommandExecution` = `{ commandId, result }`.
-      execute: async (agent: unknown, line: string) => {
+      // Real `execute` returns `CommandExecution` = `{ commandId, result }`,
+      // signature `(agent, line, images, signal)`.
+      execute: async (agent: unknown, line: string, images: readonly unknown[], signal: AbortSignal) => {
         capturedLines.push(line);
+        // Throw on contract drift so future regressions to a 3-arg call
+        // are caught by this test instead of leaking into production.
+        if (images.length !== 0) throw new Error(`expected empty images, got ${images.length}`);
+        if (!(signal instanceof AbortSignal)) throw new Error("expected AbortSignal as the 4th arg");
         return { commandId: "cmd-goal", result: { kind: "success" as const, text: "ok" } };
       },
       list: () => [],
@@ -332,6 +345,36 @@ describe("Native command dispatch via ctx.commands", () => {
     // We must NOT fall through and forward the malformed command as a
     // user prompt — a thrown handler must not masquerade as text input.
     expect(mock.received.length).toBe(0);
+  });
+
+  it("calls execute with the host's 4-arg contract (images=[], signal=AbortSignal)", async () => {
+    // Regression guard for the "Cannot read properties of undefined
+    // (reading 'aborted')" bug: the host's CommandRuntime.execute is
+    // `(agent, line, images, signal)`. The bridge previously called it
+    // with `(agent, line, abort.signal)` — placing the signal in the
+    // images slot left `signal` undefined inside the host, and every
+    // native command (e.g. /plan) crashed on `signal.aborted`. The fix
+    // passes an empty images array and a real AbortSignal in slot 4.
+    const mock = makeMockAgent("wx-s1");
+    const calls: Array<{ images: unknown; signal: unknown }> = [];
+    const commands = {
+      find: (agent: unknown, name: string) =>
+        name === "plan" ? { name, description: "Enter or leave plan mode" } : undefined,
+      execute: async (agent: unknown, line: string, images: readonly unknown[], signal: AbortSignal) => {
+        calls.push({ images, signal });
+        return { commandId: "cmd-plan", result: { kind: "success" as const, text: "Plan mode off." } };
+      },
+      list: () => [],
+    };
+    const bridge = makeBridge({ agent: mock, commands });
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/plan off"),
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.images).toEqual([]); // WeChat has no composer surface
+    expect(calls[0]!.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("does NOT treat /rp or /rq as native commands (card semantics preserved)", async () => {

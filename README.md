@@ -22,15 +22,9 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
   由 bridge 直接处理（见下方命令表）
 - **审批/提问卡（双端同卡）** — 微信与 GUI 弹一致的原生审批/提问卡，
   谁先回复谁生效（原生防双决）
-- **微信渠道提示词（动态注入）** — 微信消息进入会话时，agent 的系统提示
-  自动注入"你正在通过微信(WeChat)与用户聊天"（runtime context，微信会话
-  才知道要调整回复格式）；从 GUI 发消息时该提示词自动消失——按消息来源
-  动态切换，新旧会话（GUI/微信创建）一视同仁
+- **微信渠道提示词（动态注入）** — 微信消息注入「通过微信」提示；GUI 消息时自动消失
 - **静默模式** — `/silent on` 后每轮只发送最终回复，设置页可切换
-- **繁忙时投递（与 DSH 同源）** — agent 运行中收到微信消息时，按 DSH 设置
-  `ui-conversation.busyEnter`（GUI 通用设置的「繁忙时 Enter 键行为」）决定
-  排队（`queue`，默认）还是插话（`steer`，立即插入当前轮次）；微信
-  `/enter queue|steer` 直接读写同一份设置文档，双端实时同步
+- **繁忙时投递（与 DSH 同源）** — 按 `busyEnter` 排队/插话；微信 `/enter` 同步
 - **跨会话通知** — 后台会话的已完成/报错/卡片通过微信提醒，`/notify on|off|status` 切换，默认关闭（单用户单闸）
 - **二维码登录** — `http://127.0.0.1:3080/wechat/qr` 扫码登录，设置页内嵌
 - **设置页 UI** — DSH 设置 → **WeChat**：单卡展示状态、扫码、重连、退出登录、连接配置与通知/静默开关（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
@@ -102,7 +96,7 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 | `/workspace (ws) — list \| status \| switch <编号\|路径> \| add <路径>` | 工作区管理（list 显示各工作区会话数，不含已归档；switch 恢复该目录最近会话，无则新建） |
 | `/session (s) — list [current] \| switch <编号> \| new \| status` | 会话管理（list 最近 20 个，标记当前，不显示 GUI 已归档会话；`current` 只看当前工作目录；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建） |
 | `/preset (p) — list \| switch <名称\|编号> \| status` | Preset 管理（默认写入 DSH 设置，与 GUI 同步；当前会话无内容时立即应用） |
-| `/model — list [提供商] \| switch <提供商/模型> \| status` | 模型管理（切换立即作用于当前会话 + 设为默认） |
+| `/model — list [提供商] \| switch <提供商/模型> \| status` | 模型管理（切换立即作用于当前会话 + 设为默认；当前推理等级若新模型支持则一并保留，否则清空） |
 | `/perm — status \| list \| switch <名称\|编号> \| default [名称\|编号]` | 权限管理（switch 实时切当前会话；default 写 DSH 设置，新会话生效） |
 | `/reasoning — [list \| default \| switch <等级>]` | 推理等级：查看当前/默认与模型支持的等级；`switch <等级>` 切换（实时 + 写默认）；`default` 恢复模型默认 |
 | `/enter queue\|steer\|status`（`/busy`） | 繁忙时投递：agent 运行中收到微信消息时排队（`queue`）还是插话进当前轮次（`steer`）；读写 DSH 设置 `ui-conversation.busyEnter`，与 GUI「繁忙时 Enter 键行为」同源同步；空闲会话始终新开一轮 |
@@ -135,32 +129,14 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
     │        tools.register ── send_wechat 工具
 ```
 
-| 参考项目 wechat-opencode | 本插件 |
-|---|---|
-| `src/weixin/`（iLink 协议） | 原样移植 |
-| `src/server/`（OpenCode Server HTTP/SSE，240KB+） | 删除，改用 DSH 服务 |
-| `bridge.ts` 会话映射 | `src/bridge/bridge.ts` + `src/dsh/sessions.ts` |
-| workspace/session/agent/model 等 18+ 命令 | 移植并映射到 DSH 服务 |
-| question 卡片 | `apiProxy.events.mux` 帧 → 微信卡 → `respond()` 注入 |
-| permission 卡片（OpenCode 规则引擎） | 无自定义触发；原生 `approval.request` → 帧流双端同卡 |
-| 终端二维码 | `webServer` 路由 `/wechat/qr` |
-
-> 设计说明：微信端是 GUI 的**第二客户端**，功能不多也不少。审批/提问的
-> 决策点始终在 apiproxy 的原生 pending 表（审计、`ApprovalPolicy` 策略、
-> GUI 卡全部原生），插件只做两件事——订阅 `events.mux` 帧流把同样的卡
-> 渲染到微信，以及把微信回复通过 `respond()` 注入（与浏览器客户端同一
-> 协议）。审批**触发**也完全原生：不设自定义敏感工具名单、无自动放行
-> 模式，沙箱升级等原生触发产生什么卡，微信就镜像什么卡。
-> "谁先回复谁生效"由原生 settle 防双决保证；`respond` 返回 `not-pending`
-> 时微信提示"已在其他端处理"。微信卡 30 分钟软超时是唯一工程差异
-> （GUI 卡无超时、可继续处理）。
+> 设计说明：微信端是 GUI 的**第二客户端**，功能不多也不少。
 
 ## 设置页（DSH 设置 → WeChat）
 
 客户端半部通过 `dsh.client` + `exports["./client"]` 声明（与 dsh-mcp-manager
 同款交付），挂载到 `settings.section` slot（nav 顺序 40）：
 
-- **状态卡** — 登录阶段（未登录/等待扫码/已扫码/已登录/失败）、Bot ID、
+- **状态卡** — 登录阶段（未登录/等待扫码/已扫码，待确认/已登录/登录失败）、Bot ID、
   监控运行状态、已绑定用户数，与 `跨会话通知` / `静默` 开关同卡展示
 - **扫码** — 未登录时页面内直接显示二维码，扫码确认后自动进入已登录
 - **操作按钮** — `重新扫码`（清除 token 重新登录）、`重连`（重启长轮询
@@ -195,10 +171,6 @@ reconnect|logout`），客户端零 `@deepseek-ai` 依赖。
 | `cardTimeoutMs` | `1800000` | 提问/权限卡软超时（30 分钟） |
 | `crossSessionNotify` | `false` | 跨会话通知总闸（已完成/报错/卡片，单用户） |
 
-> 新会话的 agent preset 由 DSH 设置文档（`agent-presets` namespace，GUI
-> 设置页或微信 `/preset switch` 修改）决定，插件不再提供 `agentPreset`
-> 配置键。
-
 ## 开发
 
 ```bash
@@ -207,14 +179,8 @@ npm run build    # tsc → dist/
 npm test         # vitest（64 个用例：splitText/格式化/解析/帧处理/状态存储/命令解析）
 ```
 
-## 与参考项目的差异与已知边界
+## 已知边界
 
-- 审批/提问**双端同卡**：微信通过 `apiProxy.events.mux` 帧流渲染与 GUI
-  相同的卡，决策经 `apiProxy.respond()` 注入原生 pending 表（浏览器
-  客户端同款协议）——不是自建第二套审批，触发也完全原生（无自定义
-  敏感工具名单、无自动放行模式）。
-- 微信卡 30 分钟软超时本地移除（不发 respond），GUI 卡无超时、可继续
-  处理——这是唯一工程差异。
 - 帧流 `events.mux`/`respond` 是 ApiProxy 正式契约；若 DSH 版本调整帧
   结构，按契约适配即可。
 - `send_wechat` 工具对所有 agent 可见；任何会话的 agent 都能调用——绑定会话发送到绑定用户，未绑定会话回退到首个已知微信用户（单用户部署默认行为）。

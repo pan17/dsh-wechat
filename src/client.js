@@ -107,10 +107,10 @@ window.__ModuleLoader__.load({
 					setStatus(r.body);
 					const firstUser = r.body.users && r.body.users[0];
 					// Fill the form once — only when first entering the page.
-					// No polling: user edits stay locally until Save, and are
-					// only re-synced when the user refreshes the page or after
-					// a successful save/relogin/reconnect/logout (which all call
-					// refresh() explicitly).
+					// Polling below only ever calls setStatus; user edits stay
+					// locally until Save, and are only re-synced when the user
+					// refreshes the page or after a successful save/relogin/
+					// reconnect/logout (which all call refresh() explicitly).
 					setForm((prev) => prev ?? {
 						baseUrl: r.body.config?.baseUrl ?? "",
 						cdnBaseUrl: r.body.config?.cdnBaseUrl ?? "",
@@ -126,6 +126,28 @@ window.__ModuleLoader__.load({
 			react.useEffect(() => {
 				refresh();
 			}, [refresh]);
+
+			// Poll /status while the login flow is in flight. The host's
+			// `/relogin` resets phase to `idle` synchronously and then fires
+			// the async QR generation — a single refresh right after the
+			// action returns still sees `idle` and the QR never appears
+			// until the user manually refreshes. Same after a successful
+			// scan: phase transitions `waiting-qr → scaned → logged-in`
+			// happen on the host without any in-flight action the client
+			// can wait on. Polling at 2s while in any non-terminal phase
+			// (`idle` / `waiting-qr` / `scaned` / `failed`) keeps the
+			// section in sync; the interval stops automatically once the
+			// user reaches `logged-in` (the only true terminal state for
+			// the login flow — `failed` is kept in the poll set so a
+			// retried relogin picks up the next phase change).
+			react.useEffect(() => {
+				const phase = status?.phase;
+				if (phase === "logged-in") return undefined;
+				const id = setInterval(() => {
+					refresh();
+				}, 2000);
+				return () => clearInterval(id);
+			}, [status?.phase, refresh]);
 
 			const run = async (action, next) => {
 				setBusy(action);
