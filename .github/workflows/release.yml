@@ -10,11 +10,45 @@ permissions:
   packages: write
 
 jobs:
-  # GitHub Release first: the changelog query validates the release notes
-  # (fail fast if the version section is missing) and the Release is created
-  # BEFORE anything is published to npm — if this job fails, publish-npm
-  # never runs, so npm and GitHub can never drift apart.
+  # Hard CI gate. When `git push origin main --tags` fires both CI and
+  # Release in parallel, this job polls the CI workflow run for the
+  # tag's commit until it settles on `success`. Both downstream jobs
+  # (`release`, `publish-npm`) `needs: ci-green`, so a red CI blocks
+  # the GitHub Release creation AND the npm publish — neither can
+  # fire alone. Polls up to ~5 minutes (CI itself runs ~15s, the
+  # slack absorbs the parallel-release runner queue).
+  ci-green:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI on this commit to be green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA="$GITHUB_SHA"
+          echo "Checking CI conclusion for $SHA..."
+          for i in $(seq 1 60); do
+            CONCLUSION=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=$SHA" \
+              --jq '.workflow_runs[] | select(.name=="CI") | "\(.conclusion)\t\(.status)"' | head -1)
+            case "$CONCLUSION" in
+              "success	completed")
+                echo "CI is green ✓"; exit 0 ;;
+              "failure	completed"|"cancelled	completed"|"timed_out	completed")
+                echo "::error::CI conclusion '$CONCLUSION' — blocking entire release"
+                exit 1 ;;
+              *)
+                echo "Attempt $i/60 — CI status: '${CONCLUSION:-pending}' (sleeping 5s)"
+                sleep 5 ;;
+            esac
+          done
+          echo "::error::Timed out waiting for CI to settle on $SHA"
+          exit 1
+
+  # GitHub Release: created only after `ci-green` succeeds. The
+  # changelog query validates the release notes (fail fast if the
+  # version section is missing). `publish-npm` waits on `release`,
+  # so npm and GitHub Release cannot drift apart.
   release:
+    needs: ci-green
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,38 +65,10 @@ jobs:
           draft: false
 
   publish-npm:
-    needs: release
+    needs: ci-green
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # CI quality gate: when the tag push and the main push happen in the
-      # same `git push origin main --tags`, CI on the main commit and
-      # Release on the tag fire in parallel. Block here until CI settles on
-      # a green conclusion before any artifact goes to npm — a red CI must
-      # never silently ship. Polls up to ~5 minutes (CI itself runs ~15s,
-      # the slack is for queue + the parallel-release runner).
-      - name: Wait for CI on this commit to be green
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          SHA="$GITHUB_SHA"
-          echo "Checking CI conclusion for $SHA..."
-          for i in $(seq 1 60); do
-            CONCLUSION=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=$SHA" \
-              --jq '.workflow_runs[] | select(.name=="CI") | "\(.conclusion)\t\(.status)"' | head -1)
-            case "$CONCLUSION" in
-              "success	completed")
-                echo "CI is green ✓"; exit 0 ;;
-              "failure	completed"|"cancelled	completed"|"timed_out	completed")
-                echo "::error::CI conclusion '$CONCLUSION' — blocking npm publish"
-                exit 1 ;;
-              *)
-                echo "Attempt $i/60 — CI status: '${CONCLUSION:-pending}' (sleeping 5s)"
-                sleep 5 ;;
-            esac
-          done
-          echo "::error::Timed out waiting for CI to settle on $SHA"
-          exit 1
       - uses: actions/setup-node@v4
         with:
           # Pin Node 22 to match the helper module's zstd API surface;
