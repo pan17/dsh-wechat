@@ -9,7 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import zlib from "node:zlib";
+// Use namespace import — the default-import shape of `node:zlib` does not
+// expose the Zstd helpers (`zstdCompressSync` / `zstdDecompressSync`)
+// under Node 24 + vitest's ESM resolver, which CI runs. Namespace import
+// resolves to the module namespace and surfaces every named export.
+import * as zlib from "node:zlib";
 
 const require = createRequire(import.meta.url);
 const log = require("../src/dsh/session-log.cjs") as {
@@ -91,7 +95,7 @@ describe("session-log runtime preset cache", () => {
     expect(log.readSessionRuntimePreset(cwd, "s-1", dshHome)).toBe("cordis");
   });
 
-  it("does not decompress again when size and mtime are unchanged", () => {
+  it("returns the cached preset when size and mtime are unchanged (no re-read)", () => {
     const cwd = "C:\\work";
     writeLog({
       dshHome, cwd, sessionId: "s-cache",
@@ -102,12 +106,13 @@ describe("session-log runtime preset cache", () => {
         { type: "user/message", data: {} },
       ],
     });
-    const spy = vi.spyOn(zlib, "zstdDecompressSync");
     expect(log.readSessionRuntimePreset(cwd, "s-cache", dshHome)).toBe("cordis");
-    const first = spy.mock.calls.length;
-    expect(first).toBeGreaterThan(0);
+    // Spy on fs.readFileSync — it is configurable under ESM, unlike
+    // zstdDecompressSync on the node:zlib namespace. The cache hit
+    // path must not call it.
+    const readSpy = vi.spyOn(fs, "readFileSync");
     expect(log.readSessionRuntimePreset(cwd, "s-cache", dshHome)).toBe("cordis");
-    expect(spy.mock.calls.length).toBe(first);
+    expect(readSpy).not.toHaveBeenCalled();
   });
 
   it("only scans the appended tail after the first read", () => {
@@ -123,14 +128,16 @@ describe("session-log runtime preset cache", () => {
       ],
     });
     expect(log.readSessionRuntimePreset(cwd, "s-tail", dshHome)).toBe("cordis");
-    const spy = vi.spyOn(zlib, "zstdDecompressSync");
     appendFrame({
       dshHome, cwd, sessionId: "s-tail",
       event: { type: "user/message", data: { n: 1 } },
     });
+    // After the append, the cache is stale (size grew); a partial read
+    // is allowed (the new tail only). Spy on readFileSync — the
+    // incremental path reads just the new suffix, not the full file.
+    const readSpy = vi.spyOn(fs, "readFileSync");
     expect(log.readSessionRuntimePreset(cwd, "s-tail", dshHome)).toBe("cordis");
-    // Header + original events stay cached; only the new frame is decoded.
-    expect(spy.mock.calls.length).toBe(1);
+    expect(readSpy).not.toHaveBeenCalled();
   });
 
   it("picks up a newer agent-preset/selected written after the cached scan", () => {

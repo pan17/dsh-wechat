@@ -18,7 +18,11 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import zlib from "node:zlib";
+// Use namespace import — the default-import shape of `node:zlib` does not
+// expose the Zstd helpers (`zstdCompressSync` / `zstdDecompressSync`)
+// under Node 24 + vitest's ESM resolver, which CI runs. Namespace import
+// resolves to the module namespace and surfaces every named export.
+import * as zlib from "node:zlib";
 
 const sendTextMessage = vi.fn().mockResolvedValue(undefined);
 const sendMediaMessage = vi.fn().mockResolvedValue(undefined);
