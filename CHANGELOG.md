@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-08-25
+
+### Changed
+
+- `/s list` 现在显示每条会话实际运行的 Preset（事件感知），而非会话创建时的 header 值；当一条会话在创建后用 `/preset switch cordis` 切到过 cordis 但 header 仍是 standard，会列成「Preset:创造模式」。新增 `src/dsh/session-log.cjs`（多 frame Zstandard，按 `(path, size, mtime)` 缓存，追加只扫尾巴）直接读 `session.jsonl.zstd`，避免走 `sessionQuery.listEvents`（该接口不带 `data.agentPreset`）；`resolveSessionPreset` 接受可选 `cwd`，`/s list` 直接传 header 里的 cwd，每行不再单独查表
+- `/status` 把一行 `Preset:` 拆成两行：「当前会话 Preset」跟在 Agent 后，「默认 Preset」放在权限之后；默认与当前会话一致时默认行始终存在，未绑定会话时为「（未绑定）」
+- `/preset status` 改为显示全局默认 Preset（与 `/preset list` 同源），不再误读当前会话 live preset；当前会话与全局默认不一致时另起一行「当前会话」
+
+### Added
+
+- 新增 `tests/preset-display.test.ts`（6 个用例）覆盖 `/s list`、`/status`、`/preset status` 的展示合约
+- 新增 `tests/session-log.test.ts`（4 个用例）覆盖 `session-log.cjs` 的缓存命中、追加只扫、新切换覆盖旧值
+- `scripts/copy-client.mjs` 同步把 `src/dsh/session-log.cjs` 拷到 `dist/dsh/`，避免 tsc 不复制 `.cjs` 造成运行时缺文件
+
 ## [0.6.3] - 2026-08-24
 
 ### Changed

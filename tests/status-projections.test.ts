@@ -373,9 +373,13 @@ describe("/status — session-level projection section (generic)", () => {
     expect(text).toContain("• 工作区:");
     expect(text).toContain("• 会话:");
     expect(text).toContain("• Agent:");
-    expect(text).toContain("• Preset:");
+    expect(text).toContain("• 当前会话 Preset:");
     expect(text).toContain("• 模型:");
+    expect(text).toContain("• 默认 Preset:");
     expect(text).toContain("• 静默模式:");
+    expect(text.indexOf("• 当前会话 Preset:")).toBeLessThan(text.indexOf("• 模型:"));
+    expect(text.indexOf("• 模型:")).toBeLessThan(text.indexOf("• 默认 Preset:"));
+    expect(text.indexOf("• 默认 Preset:")).toBeLessThan(text.indexOf("• 静默模式:"));
     // The new section appears AFTER the existing rows.
     expect(text.indexOf("• 静默模式:")).toBeLessThan(text.indexOf("── 会话级状态 ──"));
   });

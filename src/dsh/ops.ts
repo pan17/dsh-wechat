@@ -268,6 +268,65 @@ export class DshOps {
   }
 
   /**
+   * The preset a session actually runs under, with the same precedence the
+   * host reads (`@deepseek-ai/dsh-agent-presets.resolveSessionPreset`):
+   * newest `agent-preset/selected` event wins, else the header's frozen
+   * creation value, else undefined.
+   *
+   * Reading the header alone silently reverts a session that was switched
+   * after creation — the same bug class the host module's doc-comment calls
+   * out: "Reconstruction reads resolveSessionPreset, never the header alone."
+   * The bridge surfaces `/s list` and `/status` from this path.
+   * `/preset status` reports the deployment default instead.
+   *
+   * Why a raw log read here, not `sessionQuery.listEvents`: that service
+   * returns lightweight `{sessionId, seq, type, time, surface}` records
+   * (a recency-recovery shape) and intentionally drops `data` to keep the
+   * surface small. The `agent-preset/selected` payload lives in
+   * `data.agentPreset`, so the bridge has to reach the persistence layer.
+   * `session-log.cjs` reproduces the host's frame-scanning path
+   * (multi-frame Zstandard) so this stays a single-process, dependency-
+   * free read — no `@deepseek-ai/*` imports.
+   *
+   * @param sessionId - the durable session id (the same format the GUI
+   *   mints via `mintSessionId()`).
+   * @param cwd - optional recorded working directory. `/s list` already
+   *   has this from the first `listSessions()`; passing it avoids a
+   *   second full roster scan per row. When omitted, the roster is
+   *   consulted once to recover `header.cwd`.
+   * @returns the preset id, or undefined when the session has none on
+   *   record (no header value, no switch events, no readable log).
+   */
+  async resolveSessionPreset(sessionId: string, cwd?: string): Promise<string | undefined> {
+    if (!sessionId) return undefined;
+    let resolvedCwd = typeof cwd === "string" && cwd.length > 0 ? cwd : undefined;
+    if (!resolvedCwd) {
+      // Fallback for callers that only have the id (`/status`). The
+      // roster header is enough to locate the log; we do not walk
+      // events here.
+      const query = this.get<SessionQuery>("sessionQuery");
+      if (!query) return undefined;
+      try {
+        const all = await query.listSessions();
+        resolvedCwd = all.find((r) => r.header.id === sessionId)?.header.cwd;
+      } catch {
+        resolvedCwd = undefined;
+      }
+    }
+    if (!resolvedCwd) return undefined;
+    // Defer to the CJS helper for the actual frame scan + event walk.
+    // The helper catches its own errors and returns `undefined`, so a
+    // missing log or a corrupt frame degrades gracefully (the bridge
+    // renders "no preset" rather than a wrong preset).
+    try {
+      const runtime = await import("./session-log.cjs");
+      return runtime.readSessionRuntimePreset(resolvedCwd, sessionId, undefined);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Time of the session's last user-prompt event (`user/message`), read from
    * the raw log. Used to recover recency after a restart, when the in-memory
    * activity map is empty; undefined when the log holds no user prompt.

@@ -2083,18 +2083,28 @@ export class WeChatDSHBridge {
         const lines = [cmd.scope === "current"
           ? `💬 最近会话（${user.cwd}，/session switch <编号> 切换）`
           : "💬 最近会话（按最近活动排序，/session switch <编号> 切换）"];
+        // Pass each row's already-known cwd so we don't re-query the
+        // session roster per line. Reads run in parallel; session-log.cjs
+        // caches by (path, size, mtime) so a second `/s list` is a stat.
+        const [titles, presetIds, presets] = await Promise.all([
+          Promise.all(recent.map((r) => this.ops.readSessionTitle(r.header.id))),
+          Promise.all(recent.map((r) => this.ops.resolveSessionPreset(r.header.id, r.header.cwd))),
+          this.ops.listPresets(),
+        ]);
         for (let i = 0; i < recent.length; i++) {
           const record = recent[i]!;
           const marker = record.header.id === user.sessionId ? " ◀ 当前" : "";
-          const title = cleanSessionTitle(
-            (await this.ops.readSessionTitle(record.header.id)) ?? record.header.id.slice(0, 12),
-          );
+          const title = cleanSessionTitle(titles[i] ?? record.header.id.slice(0, 12));
           const when = this.formatRelativeTime(this.sessionActivityTime(record));
+          const presetId = presetIds[i];
+          const presetLabel = presetId
+            ? (presets.find((p) => p.id === presetId)?.name ?? presetId)
+            : undefined;
           // One line per entry: WeChat renders `\n` in BOT text unreliably
           // (entries collapse together), so every field rides the same line
           // and each entry stays identifiable by its `N.` prefix.
           lines.push(
-            `${i + 1}. ${title}${marker} — ${record.header.cwd ?? "?"} · ${when}${record.header.agentPreset ? ` · Preset:${record.header.agentPreset}` : ""}`,
+            `${i + 1}. ${title}${marker} — ${record.header.cwd ?? "?"} · ${when}${presetLabel ? ` · Preset:${presetLabel}` : ""}`,
           );
         }
         await this.sendReply(userId, lines.join("\n"));
@@ -2238,11 +2248,22 @@ export class WeChatDSHBridge {
         return;
       }
       case "status": {
-        const agent = this.agents.get(user);
-        await this.sendReply(
-          userId,
-          `🤖 Preset: ${await this.resolveEffectivePreset(user)}\nAgent: ${agent ? agent.status : "未加载"}`,
-        );
+        // `/preset` is the deployment-default family (`list` / `switch`
+        // write the DSH settings document). Status must report that
+        // default — not the bound session's live preset. `/status` and
+        // `/s list` remain the session-live views. Agent status belongs
+        // on `/status`, not here.
+        const defaultId = this.ops.defaultPresetId();
+        const defaultLabel = (await this.resolvePresetLabel(defaultId)) ?? "（未设置）";
+        const lines = [`🤖 默认 Preset: ${defaultLabel}`];
+        const liveId = user.sessionId
+          ? await this.ops.resolveSessionPreset(user.sessionId)
+          : undefined;
+        if (liveId && liveId !== defaultId) {
+          const liveLabel = (await this.resolvePresetLabel(liveId)) ?? liveId;
+          lines.push(`当前会话: ${liveLabel}`);
+        }
+        await this.sendReply(userId, lines.join("\n"));
         return;
       }
     }
@@ -2713,15 +2734,17 @@ export class WeChatDSHBridge {
     }
 
     const crossEffective = this.shouldNotifyCrossSession(user.userId) ? "on" : "off";
+    const presetLines = await this.formatStatusPresetLines(user);
     const lines = [
       "📊 当前状态",
       `• 工作区: ${user.cwd}`,
       `• 会话: ${sessionLabel}`,
       `• Agent: ${agent ? agent.status : "（未加载）"}`,
-      `• Preset: ${await this.resolveEffectivePreset(user)}`,
+      presetLines.sessionLine,
       `• 模型: ${active?.provider && active?.model ? `${active.provider}/${active.model}${effortSuffix}` : "（默认）"}`,
       ...(contextLabel ? [contextLabel] : []),
       ...(permission ? [`• 权限: ${permission}`] : []),
+      presetLines.defaultLine,
       `• 静默模式: ${user.silent ? "on" : "off"}`,
       `• 繁忙投递: ${this.ops.busyEnter() === "steer" ? "steer（插话）" : "queue（排队）"}`,
       `• 跨会话通知: ${crossEffective}`,
@@ -2759,23 +2782,43 @@ export class WeChatDSHBridge {
   }
 
   /**
-   * The preset actually composing the user's session: the session header's
-   * recorded preset (fixed at creation), else the roster/settings default.
-   * The settings document (`agent-presets` namespace) is the single source
-   * of truth for the default; the header records what a specific session
-   * actually runs. Falls back to "（默认）" when none is discoverable.
+   * `/status` preset rows: deployment default (settings document) and
+   * the bound session's live preset (event-aware). Shown as two lines
+   * so a switched session is not mistaken for the global default.
+   * The default row sits after permission; the session row stays with
+   * the session/agent block.
    */
-  private async resolveEffectivePreset(user: UserState): Promise<string> {
-    let preset: string | undefined;
-    if (user.sessionId) {
-      const sessions = await this.ops.listSessions();
-      preset = sessions.find((r) => r.header.id === user.sessionId)?.header.agentPreset;
+  private async formatStatusPresetLines(user: UserState): Promise<{
+    defaultLine: string;
+    sessionLine: string;
+  }> {
+    const defaultId = this.ops.defaultPresetId();
+    const defaultLabel = (await this.resolvePresetLabel(defaultId)) ?? "（未设置）";
+    const defaultLine = `• 默认 Preset: ${defaultLabel}`;
+    if (!user.sessionId) {
+      return { defaultLine, sessionLine: "• 当前会话 Preset: （未绑定）" };
     }
-    if (!preset) {
-      const defaultPreset = this.ops.defaultPresetId();
-      if (defaultPreset) return `${defaultPreset}（默认）`;
-    }
-    return preset ?? "（默认）";
+    const liveId = await this.ops.resolveSessionPreset(user.sessionId);
+    const liveLabel = liveId
+      ? ((await this.resolvePresetLabel(liveId)) ?? liveId)
+      : "（无记录）";
+    return { defaultLine, sessionLine: `• 当前会话 Preset: ${liveLabel}` };
+  }
+
+  /**
+   * Preset id → metadata display name (`/preset list` 同款 `preset.name ?? preset.id`).
+   * Used everywhere the bridge shows a preset (session list, /status, /preset status default),
+   * so a session actually running `cordis` shows up as "创造模式" rather than the
+   * raw id. Returns undefined when the id is missing; returns the id itself when
+   * the roster has no matching entry or no `name` field — both edges preserve
+   * `/preset list`'s fallback semantics so a deleted/broken preset never produces
+   * an empty label.
+   */
+  private async resolvePresetLabel(presetId: string | undefined): Promise<string | undefined> {
+    if (!presetId) return undefined;
+    const presets = await this.ops.listPresets();
+    const hit = presets.find((p) => p.id === presetId);
+    return hit?.name ?? presetId;
   }
 
   /**
