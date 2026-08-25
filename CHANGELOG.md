@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-08-26
+
+### Fixed
+
+- iLink `getUpdates` / `sendMessage` 在 `errcode: -14 "session timeout"` 时陷入 60 分钟死循环。原先 monitor 命中 -14 就 pauseSession 60 分钟，60 分钟后重试 `getUpdates` 但**从不重建服务端会话**，立刻再次拿到 -14，再 pause 60 分钟——无限循环。改动沿用 Tencent/openclaw-weixin [PR #161](https://github.com/Tencent/openclaw-weixin/pull/161) 的恢复合约：`src/weixin/monitor.ts` 命中 -14（包括解析得到的 `resp.errcode === -14` **和** undici `InvalidArgumentError: invalid content-length header`——后者的根因是 iLink 对 -14 返回 HTTP 200 + 畸形 Content-Length，body 还没读就抛了）时先调 `ilink/bot/msg/notifystart`（10s timeout）重建服务端会话；成功 → 重置状态 + 5s 后重试；失败 → 指数退避（5s → 10s → 20s → … 封顶 5 min），连续 6 次失败才提示「请重新扫码」；任何成功的 poll 会重置恢复状态，避免单次 -14 拖出的大 backoff 污染未来。`src/weixin/api.ts` 顺手修了上游 [PR #118/#120](https://github.com/Tencent/openclaw-weixin/pull/120) 的手动 `Content-Length` 头（Node 24+ 的 undici 严格校验 body 字节数会抛 `RequestContentLengthMismatchError`，让 fetch 自己算就好）。参考 issue #1
+- 新增 `tests/api-session-timeout.test.ts`（8 个用例：谓词匹配 / cause 链 / 环状 cause 不死循环 / 不误报普通 fetch 错 / `getUpdates` 不重试不包装地传播）+ `tests/monitor-session-timeout.test.ts`（7 个用例：parseable -14 与 content-length 错误共走恢复路径、notifyStart 成功后状态重置、失败 backoff 远低于 60 min、正常流量不调 notifyStart、连续两次 -14 都能恢复、6 次持续失败后 re-scan 提示出现）
+
 ## [0.6.4] - 2026-08-25
 
 ### Changed
