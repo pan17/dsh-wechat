@@ -21,6 +21,43 @@ const CHANNEL_VERSION = "1.0.2";
 
 export { isRetryableNetworkError };
 
+/**
+ * Detect undici's `InvalidArgumentError: invalid content-length header`.
+ *
+ * The iLink gateway returns HTTP 200 with body
+ * `{"errcode":-14,"errmsg":"session timeout"}` when a session is no longer
+ * valid, but it ships a malformed `Content-Length` header alongside it. undici
+ * refuses to parse such a response and throws this error before we can ever
+ * see the JSON, so the real reason is buried under "fetch failed: …". Walking
+ * the cause chain lets callers classify the error whether fetch wrapped it
+ * (the typical case) or surfaced it directly.
+ */
+export function isSessionTimeoutContentLengthError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  let current: unknown = err;
+  const seen = new Set<unknown>();
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const obj = current as {
+      name?: unknown;
+      code?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
+    const isInvalidArg =
+      obj.name === "InvalidArgumentError" || obj.code === "UND_ERR_INVALID_ARG";
+    if (
+      isInvalidArg &&
+      typeof obj.message === "string" &&
+      /content-length/i.test(obj.message)
+    ) {
+      return true;
+    }
+    current = obj.cause;
+  }
+  return false;
+}
+
 export interface ApiPostOptions {
   /** How many retries to attempt on transient network failures. Default: 2. */
   retries?: number;
@@ -38,15 +75,12 @@ function randomWechatUin(): string {
   return Buffer.from(String(uint32), "utf-8").toString("base64");
 }
 
-function buildHeaders(opts: { token?: string; body?: string }): Record<string, string> {
+function buildHeaders(opts: { token?: string }): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     AuthorizationType: "ilink_bot_token",
     "X-WECHAT-UIN": randomWechatUin(),
   };
-  if (opts.body) {
-    headers["Content-Length"] = String(Buffer.byteLength(opts.body, "utf-8"));
-  }
   if (opts.token?.trim()) {
     headers["Authorization"] = `Bearer ${opts.token.trim()}`;
   }
@@ -102,7 +136,7 @@ async function apiPost<T>(
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: buildHeaders({ token, body: bodyStr }),
+        headers: buildHeaders({ token }),
         body: bodyStr,
         signal: controller.signal,
       });
@@ -117,6 +151,14 @@ async function apiPost<T>(
       // AbortError sentinel: getUpdates long-poll timed out, no messages.
       if ((err as Error).name === "AbortError") {
         return { ret: 0, msgs: [] } as T;
+      }
+      // Session timeout (-14) arrives with a malformed Content-Length so
+      // undici throws before we can read the body. Skip retries — the token
+      // is rejected server-side, hammering the endpoint just spams the log
+      // and the user. Callers detect this via isSessionTimeoutContentLengthError.
+      if (isSessionTimeoutContentLengthError(err)) {
+        lastError = err;
+        break;
       }
       lastError = err;
 
@@ -250,5 +292,51 @@ export async function getQrcodeStatus(params: {
   return apiGet(
     params.baseUrl,
     `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(params.qrcode)}`,
+  );
+}
+
+/**
+ * Notify iLink that this channel client is starting (gateway startup /
+ * channel start, and the `-14` recovery path).
+ *
+ * Used by the monitor loop to rebuild a dead server-side session before
+ * retrying `getUpdates`. On success the existing long-poll token is
+ * typically still valid; on failure we back off and try again. Mirrors
+ * `ilink/bot/msg/notifystart` from upstream `@tencent-weixin/openclaw-weixin`.
+ */
+export async function notifyStart(params: {
+  baseUrl: string;
+  token?: string;
+  timeoutMs?: number;
+  abortSignal?: AbortSignal;
+}): Promise<void> {
+  await apiPost(
+    params.baseUrl,
+    "ilink/bot/msg/notifystart",
+    { base_info: buildBaseInfo() },
+    params.token,
+    params.timeoutMs ?? 10_000,
+    { abortSignal: params.abortSignal },
+  );
+}
+
+/**
+ * Notify iLink that this channel client is stopping. Symmetric counterpart
+ * to `notifyStart`; not used by the current monitor but kept for parity
+ * with upstream and for any future graceful-shutdown path.
+ */
+export async function notifyStop(params: {
+  baseUrl: string;
+  token?: string;
+  timeoutMs?: number;
+  abortSignal?: AbortSignal;
+}): Promise<void> {
+  await apiPost(
+    params.baseUrl,
+    "ilink/bot/msg/notifystop",
+    { base_info: buildBaseInfo() },
+    params.token,
+    params.timeoutMs ?? 10_000,
+    { abortSignal: params.abortSignal },
   );
 }
