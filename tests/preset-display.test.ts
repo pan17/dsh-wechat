@@ -18,11 +18,32 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { Readable } from "node:stream";
 // Use namespace import — the default-import shape of `node:zlib` does not
-// expose the Zstd helpers (`zstdCompressSync` / `zstdDecompressSync`)
-// under Node 24 + vitest's ESM resolver, which CI runs. Namespace import
-// resolves to the module namespace and surfaces every named export.
+// expose the Zstd helpers under Node 24 + vitest's ESM resolver, which CI
+// runs. Namespace import resolves to the module namespace and surfaces
+// every named export. Decompression (`zstdDecompressSync`) is the only
+// sync API guaranteed present on every supported Node build.
 import * as zlib from "node:zlib";
+
+// `zstdCompressSync` is unstable (Stability 1) and missing in some
+// Node 24 builds (CI Ubuntu 24.04 has no sync Zstd API). Build zstd
+// frames via the stable stream API (`createZstdCompress`, available
+// since Node 22.15) which is shipped alongside the decompressor.
+async function zstdCompressBuffer(buf: Buffer): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  const source = Readable.from([buf]);
+  const compressor = zlib.createZstdCompress();
+  compressor.on("data", (c) => chunks.push(c));
+  const done = new Promise<void>((res, rej) => {
+    compressor.on("end", () => res());
+    compressor.on("error", rej);
+  });
+  source.pipe(compressor);
+  source.on("end", () => compressor.end());
+  await done;
+  return Buffer.concat(chunks);
+}
 
 const sendTextMessage = vi.fn().mockResolvedValue(undefined);
 const sendMediaMessage = vi.fn().mockResolvedValue(undefined);
@@ -74,7 +95,7 @@ function projectKey(cwd) {
  * shape so the scanner in `session-log.cjs` (and the host's own
  * scanner) both decode cleanly.
  */
-function writeSessionLog(opts: {
+async function writeSessionLog(opts: {
   dshHome: string;
   cwd: string;
   sessionId: string;
@@ -96,16 +117,15 @@ function writeSessionLog(opts: {
   };
   const lines: string[] = [JSON.stringify(headerObj)];
   for (const ev of events) lines.push(JSON.stringify(ev));
-  const text = lines.join("\n") + "\n";
   // The host writes frames of ~1024 lines or until close; here we
   // split the header off (its own frame) and the rest as one frame,
   // matching the simplest realistic layout.
   const headerLine = lines[0]!;
   const eventText = lines.slice(1).join("\n") + "\n";
   // One frame for the header, one frame for events (if any).
-  const headerFrame = zlib.zstdCompressSync(Buffer.from(headerLine + "\n"));
+  const headerFrame = await zstdCompressBuffer(Buffer.from(headerLine + "\n"));
   const eventFrame = events.length > 0
-    ? zlib.zstdCompressSync(Buffer.from(eventText))
+    ? await zstdCompressBuffer(Buffer.from(eventText))
     : null;
   const buf = eventFrame
     ? Buffer.concat([headerFrame, eventFrame])
@@ -192,11 +212,11 @@ describe("preset display — session list uses live preset (event-aware)", () =>
     // exact bug repro on disk. Headers are all "standard" (frozen
     // at creation).
     const cwd = "C:\\work";
-    writeSessionLog({
+    await writeSessionLog({
       dshHome, cwd, sessionId: "s-a",
       headerAgentPreset: "standard",
     });
-    writeSessionLog({
+    await writeSessionLog({
       dshHome, cwd, sessionId: "s-b",
       headerAgentPreset: "standard",
       events: [
@@ -204,7 +224,7 @@ describe("preset display — session list uses live preset (event-aware)", () =>
         { type: "agent-preset/selected", data: { agentPreset: "cordis" }, seq: 3, time: 1100 },
       ],
     });
-    writeSessionLog({
+    await writeSessionLog({
       dshHome, cwd, sessionId: "s-c",
       headerAgentPreset: "standard",
     });
@@ -246,9 +266,9 @@ describe("preset display — session list uses live preset (event-aware)", () =>
 
   it("does not re-scan the session roster once per /s list row", async () => {
     const cwd = "C:\\work";
-    writeSessionLog({ dshHome, cwd, sessionId: "s-a", headerAgentPreset: "standard" });
-    writeSessionLog({ dshHome, cwd, sessionId: "s-b", headerAgentPreset: "standard" });
-    writeSessionLog({ dshHome, cwd, sessionId: "s-c", headerAgentPreset: "standard" });
+    await writeSessionLog({ dshHome, cwd, sessionId: "s-a", headerAgentPreset: "standard" });
+    await writeSessionLog({ dshHome, cwd, sessionId: "s-b", headerAgentPreset: "standard" });
+    await writeSessionLog({ dshHome, cwd, sessionId: "s-c", headerAgentPreset: "standard" });
     const sessions = [
       { header: { id: "s-a", createdAt: 100, cwd, agentPreset: "standard" }, live: true, persisted: true },
       { header: { id: "s-b", createdAt: 200, cwd, agentPreset: "standard" }, live: true, persisted: true },
@@ -279,7 +299,7 @@ describe("preset display — session list uses live preset (event-aware)", () =>
 
   it("shows '（默认）' suffix when the session has no preset on record", async () => {
     const cwd = "C:\\work";
-    writeSessionLog({
+    await writeSessionLog({
       dshHome, cwd, sessionId: "s-empty",
       // header has no agentPreset at all
     });
@@ -313,7 +333,7 @@ describe("preset display — session list uses live preset (event-aware)", () =>
 
   it("shows the live preset in /status (event-aware, not header-only)", async () => {
     const cwd = "C:\\work";
-    writeSessionLog({
+    await writeSessionLog({
       dshHome, cwd, sessionId: "s-live",
       headerAgentPreset: "standard",
       events: [
@@ -358,7 +378,7 @@ describe("preset display — session list uses live preset (event-aware)", () =>
     // A session that flipped standard → cordis → minimal must end up
     // as "minimal" — same newest-wins rule the host applies.
     const cwd = "C:\\work";
-    writeSessionLog({
+    await writeSessionLog({
       dshHome, cwd, sessionId: "s-flips",
       headerAgentPreset: "standard",
       events: [
@@ -399,7 +419,7 @@ describe("preset display — session list uses live preset (event-aware)", () =>
 
   it("shows the deployment default on /preset status, not the session live preset", async () => {
     const cwd = "C:\\work";
-    writeSessionLog({
+    await writeSessionLog({
       dshHome, cwd, sessionId: "s-live",
       headerAgentPreset: "standard",
       events: [

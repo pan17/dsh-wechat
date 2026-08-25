@@ -5,15 +5,34 @@
  */
 
 import { createRequire } from "node:module";
+import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-// Use namespace import — the default-import shape of `node:zlib` does not
-// expose the Zstd helpers (`zstdCompressSync` / `zstdDecompressSync`)
-// under Node 24 + vitest's ESM resolver, which CI runs. Namespace import
-// resolves to the module namespace and surfaces every named export.
 import * as zlib from "node:zlib";
+
+// `zstdCompressSync` is unstable (Stability 1) and missing in some
+// Node 24 builds (CI Ubuntu 24.04 has no sync Zstd API). Build zstd
+// frames via the stable stream API (`createZstdCompress`, available
+// since Node 22.15) which is shipped alongside the decompressor.
+async function zstdCompressBuffer(buf: Buffer): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  const source = Readable.from([buf]);
+  const compressor = zlib.createZstdCompress();
+  compressor.on("data", (c) => chunks.push(c));
+  // Manually drive the pipeline — source → compressor, then end the
+  // source to flush. Using `pipeline(source, compressor)` closes the
+  // compressor's readable side prematurely; pump + wait works.
+  const done = new Promise<void>((res, rej) => {
+    compressor.on("end", () => res());
+    compressor.on("error", rej);
+  });
+  source.pipe(compressor);
+  source.on("end", () => compressor.end());
+  await done;
+  return Buffer.concat(chunks);
+}
 
 const require = createRequire(import.meta.url);
 const log = require("../src/dsh/session-log.cjs") as {
@@ -22,7 +41,7 @@ const log = require("../src/dsh/session-log.cjs") as {
   readSessionRuntimePreset: (cwd: string, sessionId: string, root?: string) => string | undefined;
 };
 
-function writeLog(opts: {
+async function writeLog(opts: {
   dshHome: string;
   cwd: string;
   sessionId: string;
@@ -40,14 +59,14 @@ function writeLog(opts: {
     cwd,
     ...(headerAgentPreset ? { agentPreset: headerAgentPreset } : {}),
   });
-  const frames = [zlib.zstdCompressSync(Buffer.from(header + "\n"))];
+  const frames = [await zstdCompressBuffer(Buffer.from(header + "\n"))];
   for (const ev of events) {
-    frames.push(zlib.zstdCompressSync(Buffer.from(JSON.stringify(ev) + "\n")));
+    frames.push(await zstdCompressBuffer(Buffer.from(JSON.stringify(ev) + "\n")));
   }
   fs.writeFileSync(path.join(dir, "session.jsonl.zstd"), Buffer.concat(frames));
 }
 
-function appendFrame(opts: {
+async function appendFrame(opts: {
   dshHome: string;
   cwd: string;
   sessionId: string;
@@ -60,7 +79,7 @@ function appendFrame(opts: {
     encodeURIComponent(opts.sessionId),
     "session.jsonl.zstd",
   );
-  const extra = zlib.zstdCompressSync(Buffer.from(JSON.stringify(opts.event) + "\n"));
+  const extra = await zstdCompressBuffer(Buffer.from(JSON.stringify(opts.event) + "\n"));
   fs.appendFileSync(file, extra);
 }
 
@@ -82,9 +101,9 @@ describe("session-log runtime preset cache", () => {
     else process.env.DSH_HOME = originalEnv;
   });
 
-  it("returns the newest agent-preset/selected, else the header", () => {
+  it("returns the newest agent-preset/selected, else the header", async () => {
     const cwd = "C:\\work";
-    writeLog({
+    await writeLog({
       dshHome, cwd, sessionId: "s-1",
       headerAgentPreset: "standard",
       events: [
@@ -95,9 +114,9 @@ describe("session-log runtime preset cache", () => {
     expect(log.readSessionRuntimePreset(cwd, "s-1", dshHome)).toBe("cordis");
   });
 
-  it("returns the cached preset when size and mtime are unchanged (no re-read)", () => {
+  it("returns the cached preset when size and mtime are unchanged (no re-read)", async () => {
     const cwd = "C:\\work";
-    writeLog({
+    await writeLog({
       dshHome, cwd, sessionId: "s-cache",
       headerAgentPreset: "standard",
       events: [
@@ -115,9 +134,9 @@ describe("session-log runtime preset cache", () => {
     expect(readSpy).not.toHaveBeenCalled();
   });
 
-  it("only scans the appended tail after the first read", () => {
+  it("only scans the appended tail after the first read", async () => {
     const cwd = "C:\\work";
-    writeLog({
+    await writeLog({
       dshHome, cwd, sessionId: "s-tail",
       headerAgentPreset: "standard",
       events: [
@@ -128,7 +147,7 @@ describe("session-log runtime preset cache", () => {
       ],
     });
     expect(log.readSessionRuntimePreset(cwd, "s-tail", dshHome)).toBe("cordis");
-    appendFrame({
+    await appendFrame({
       dshHome, cwd, sessionId: "s-tail",
       event: { type: "user/message", data: { n: 1 } },
     });
@@ -140,15 +159,15 @@ describe("session-log runtime preset cache", () => {
     expect(readSpy).not.toHaveBeenCalled();
   });
 
-  it("picks up a newer agent-preset/selected written after the cached scan", () => {
+  it("picks up a newer agent-preset/selected written after the cached scan", async () => {
     const cwd = "C:\\work";
-    writeLog({
+    await writeLog({
       dshHome, cwd, sessionId: "s-flip",
       headerAgentPreset: "standard",
       events: [{ type: "agent-preset/selected", data: { agentPreset: "cordis" } }],
     });
     expect(log.readSessionRuntimePreset(cwd, "s-flip", dshHome)).toBe("cordis");
-    appendFrame({
+    await appendFrame({
       dshHome, cwd, sessionId: "s-flip",
       event: { type: "agent-preset/selected", data: { agentPreset: "minimal" } },
     });
