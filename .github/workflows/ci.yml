@@ -13,7 +13,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Pin Node 22 — the helper module relies on `zlib.zstdDecompressSync`
+          # (Stable in 22.x / Experimental in 23+/24) to read DSH's
+          # session.jsonl.zstd artifacts. GitHub-hosted runners default to
+          # Node 24 now and that build does not ship the Zstd API surface.
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run build
