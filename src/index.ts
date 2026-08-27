@@ -45,10 +45,14 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
 
   // ─── Session event feed: assistant output → WeChat ───
   context.on("session/event", (session, event) => {
-    const sessionId = (session as { id?: string })?.id;
-    if (!sessionId) return;
+    const sessionId = sessionIdFrom(session);
+    if (!sessionId) {
+      console.warn("[dsh-wechat] session/event dropped: no session id on payload");
+      return;
+    }
     bridge.handleSessionEvent(sessionId, event as { type: string; [k: string]: unknown });
   });
+  console.log("[dsh-wechat] session/event listener attached");
 
   // ─── Agent errors → WeChat notification ───
   context.on("agent/error", (payload) => {
@@ -125,7 +129,9 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
   // subscription renders the same frames as the GUI and injects the WeChat
   // user's decision through apiProxy.respond() (whoever answers first wins).
   if (typeof context.inject === "function") {
+    let apiProxyInjected = false;
     context.inject(["apiProxy"], (apiCtx) => {
+      apiProxyInjected = true;
       const apiProxy = (apiCtx as {
         get<T = unknown>(name: string): T | undefined;
       }).get<{
@@ -133,11 +139,19 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
         events?: unknown;
       }>("apiProxy");
       if (!apiProxy) {
-        console.warn("[dsh-wechat] apiProxy unavailable; approval/question cards disabled");
+        console.warn("[dsh-wechat] apiProxy inject fired but get('apiProxy') is undefined; approval/question cards disabled");
         return;
       }
+      console.log("[dsh-wechat] apiProxy inject resolved; attaching mux");
       bridge.attachMux(apiProxy as never);
     });
+    setTimeout(() => {
+      if (!apiProxyInjected) {
+        console.warn("[dsh-wechat] apiProxy inject callback never ran (10s); approval/question cards may be disabled");
+      }
+    }, 10_000);
+  } else {
+    console.warn("[dsh-wechat] ctx.inject unavailable; approval/question cards disabled");
   }
 
   // ─── DSH native command registry (ctx.commands) ───
@@ -389,6 +403,20 @@ if (typeof context.inject === "function") {
   });
 
   return () => bridge.stop();
+}
+
+export function sessionIdFrom(session: unknown): string | undefined {
+  if (!session || typeof session !== "object") return undefined;
+  const s = session as {
+    id?: unknown;
+    header?: { id?: unknown };
+    session?: { id?: unknown; header?: { id?: unknown } };
+  };
+  const candidates = [s.id, s.header?.id, s.session?.header?.id, s.session?.id];
+  for (const c of candidates) {
+    if (typeof c === "string" && c) return c;
+  }
+  return undefined;
 }
 
 function pickDefined(raw: PluginConfig): Partial<WeChatDSHConfig> {

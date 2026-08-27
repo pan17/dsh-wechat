@@ -31,16 +31,6 @@ export interface UserState {
   crossSessionNotify?: "inherit" | "on" | "off";
   /** Sessions this user has ever been bound to — used for cross-session recipient resolution. */
   watchedSessions?: string[];
-  /**
-   * Last inbound iLink `context_token` — the gateway requires it to send TO
-   * this user. Persisted so replies triggered from the Web UI right after a
-   * restart can still be delivered: the in-memory map alone left a dead
-   * window until the user's next WeChat message, silently dropping every
-   * GUI-triggered reply in between. A restored (stale) token MAY be rejected
-   * by the gateway; such sends fail into the outbound cache and flush on the
-   * user's next message, so nothing is lost either way.
-   */
-  lastContextToken?: string;
 }
 
 export interface BridgeStateFile {

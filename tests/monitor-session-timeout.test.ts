@@ -113,6 +113,8 @@ describe("startMonitor: errcode -14 recovery (PR #161 contract)", () => {
     globalThis.fetch = dispatch.fetch as unknown as typeof fetch;
 
     const abort = new AbortController();
+    const invalid = vi.fn();
+    const recovered = vi.fn();
     const monitorPromise = startMonitor({
       baseUrl: "https://gw",
       token: "t",
@@ -120,6 +122,8 @@ describe("startMonitor: errcode -14 recovery (PR #161 contract)", () => {
       abortSignal: abort.signal,
       log: (m) => logMessages.push(m),
       onMessage: () => {},
+      onSessionInvalid: invalid,
+      onSessionRecovered: recovered,
     });
 
     // Cycle 1: getUpdates → -14 → notifyStart → success → 5s retry sleep.
@@ -137,6 +141,7 @@ describe("startMonitor: errcode -14 recovery (PR #161 contract)", () => {
     // The recovery hint is explicit.
     expect(joined).toMatch(/notifyStart/i);
     expect(joined).toMatch(/rebuild the server-side session/i);
+    expect(invalid).toHaveBeenCalled();
   });
 
   it("InvalidArgumentError(content-length) takes the SAME recovery path as parseable -14", async () => {
@@ -245,6 +250,8 @@ describe("startMonitor: errcode -14 recovery (PR #161 contract)", () => {
     globalThis.fetch = dispatch.fetch as unknown as typeof fetch;
 
     const abort = new AbortController();
+    const recovered = vi.fn();
+    const invalid = vi.fn();
     const monitorPromise = startMonitor({
       baseUrl: "https://gw",
       token: "t",
@@ -252,12 +259,16 @@ describe("startMonitor: errcode -14 recovery (PR #161 contract)", () => {
       abortSignal: abort.signal,
       log: (m) => logMessages.push(m),
       onMessage: () => {},
+      onSessionRecovered: recovered,
+      onSessionInvalid: invalid,
     });
 
     await sleep(500);
     abort.abort();
     await monitorPromise;
 
+    expect(invalid).not.toHaveBeenCalled();
+    expect(recovered).toHaveBeenCalled();
     expect(dispatch.counts.notifystart).toBe(0);
     expect(dispatch.counts.notifystop).toBe(0);
     expect(dispatch.counts.getupdates).toBeGreaterThanOrEqual(1);
@@ -326,6 +337,7 @@ describe("startMonitor: re-scan hint threshold (fake timers)", () => {
     globalThis.fetch = dispatch.fetch as unknown as typeof fetch;
 
     const abort = new AbortController();
+    const giveUp = vi.fn();
     const monitorPromise = startMonitor({
       baseUrl: "https://gw",
       token: "t",
@@ -333,6 +345,7 @@ describe("startMonitor: re-scan hint threshold (fake timers)", () => {
       abortSignal: abort.signal,
       log: (m) => logMessages.push(m),
       onMessage: () => {},
+      onSessionGiveUp: giveUp,
     });
 
     // Advance enough fake time to clear every backoff between cycles.
@@ -349,5 +362,6 @@ describe("startMonitor: re-scan hint threshold (fake timers)", () => {
     const joined = logMessages.join("\n");
     expect(joined).toMatch(/re-scan/i);
     expect(joined).toMatch(/fresh bot_token/i);
+    expect(giveUp).toHaveBeenCalledTimes(1);
   });
 });

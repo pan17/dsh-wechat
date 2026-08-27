@@ -51,6 +51,7 @@ vi.mock("../src/weixin/send.js", () => ({
 vi.mock("../src/weixin/api.js", () => ({
   sendTyping: (...args: unknown[]) => sendTypingMock(...args),
   getConfig: (...args: unknown[]) => getConfigMock(...args),
+  isSessionTimeoutError: () => false,
 }));
 
 import { WeChatDSHBridge } from "../src/bridge/bridge.js";
@@ -93,7 +94,6 @@ function makeBridge(agent: { agent: unknown }) {
     userId: "bot",
     savedAt: "",
   };
-  (bridge as unknown as { contextTokens: Map<string, string> }).contextTokens.set("u1", "ctx-token");
   return bridge;
 }
 
@@ -531,7 +531,6 @@ describe("typing indicator: clear on agent error and stop", () => {
       state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
       handleSessionEvent(s: string, e: unknown): void;
       stop(): Promise<void>;
-      contextTokens: Map<string, string>;
       token: unknown;
     };
     // Two bound sessions to simulate multiple users.
@@ -539,7 +538,6 @@ describe("typing indicator: clear on agent error and stop", () => {
     anyBridge.state.update("u1", { sessionId: "wx-s1" });
     anyBridge.state.ensureUser("u2", "C:\\work2");
     anyBridge.state.update("u2", { sessionId: "wx-s2" });
-    anyBridge.contextTokens.set("u2", "ctx-token-2");
     (bridge as unknown as { token: unknown }).token = {
       baseUrl: "https://gw",
       token: "t",

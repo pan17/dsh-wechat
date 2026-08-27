@@ -9,7 +9,7 @@ import path from "node:path";
 import {
   getUpdates,
   notifyStart,
-  isSessionTimeoutContentLengthError,
+  isSessionTimeoutError,
 } from "./api.js";
 import type { WeixinMessage, GetUpdatesResp } from "./types.js";
 
@@ -44,6 +44,15 @@ export interface MonitorOpts {
   longPollTimeoutMs?: number;
   log: (msg: string) => void;
   onMessage: (msg: WeixinMessage) => void;
+  /** Gateway rejected the bot session (`-14`). Outbound should park. */
+  onSessionInvalid?: () => void;
+  /** A subsequent getUpdates succeeded; outbound may resume and flush. */
+  onSessionRecovered?: () => void;
+  /**
+   * notifyStart failed enough times that the user should re-scan.
+   * Fired once when the hint threshold is first crossed.
+   */
+  onSessionGiveUp?: () => void;
 }
 
 function getSyncBufPath(storageDir: string): string {
@@ -75,7 +84,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export async function startMonitor(opts: MonitorOpts): Promise<void> {
-  const { baseUrl, token, storageDir, abortSignal, log, onMessage } = opts;
+  const { baseUrl, token, storageDir, abortSignal, log, onMessage, onSessionInvalid, onSessionRecovered, onSessionGiveUp } = opts;
 
   let getUpdatesBuf = loadSyncBuf(storageDir);
   if (getUpdatesBuf) {
@@ -152,6 +161,9 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
           `(current backoff ${waitMs / 1000}s, next ${recoveryBackoffMs / 1000}s). ` +
           `If this persists, please re-scan the QR code to get a fresh bot_token.`,
       );
+      if (consecutiveNotifyStartFailures === RESCAN_HINT_AFTER_FAILURES) {
+        onSessionGiveUp?.();
+      }
     } else {
       log(
         `notifyStart failed; backing off ${waitMs / 1000}s before retrying ` +
@@ -189,6 +201,7 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
           resp.ret === SESSION_EXPIRED_ERRCODE;
 
         if (isSessionExpired) {
+          onSessionInvalid?.();
           const recovered = await tryRecover();
           if (abortSignal?.aborted) return;
           await applyRecoveryOutcome(recovered);
@@ -210,6 +223,7 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
 
       consecutiveFailures = 0;
       resetRecoveryState();
+      onSessionRecovered?.();
 
       if (resp.get_updates_buf != null && resp.get_updates_buf !== "") {
         saveSyncBuf(storageDir, resp.get_updates_buf);
@@ -222,12 +236,13 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
     } catch (err) {
       if (abortSignal?.aborted) return;
 
-      if (isSessionTimeoutContentLengthError(err)) {
-        // The iLink gateway returns HTTP 200 with a malformed
-        // Content-Length for errcode -14 "session timeout", so undici
-        // throws InvalidArgumentError before we can read the JSON body.
-        // Funnel this through the same notifyStart recovery flow used
-        // for the parseable -14 path.
+      if (isSessionTimeoutError(err)) {
+        // Parseable JSON `-14` now throws SessionTimeoutError from apiPost
+        // (HTTP 200 + body). The iLink gateway can also return HTTP 200
+        // with a malformed Content-Length so undici throws before we read
+        // the JSON. Both mean the bot session is dead — disable outbound
+        // and rebuild via notifyStart.
+        onSessionInvalid?.();
         const recovered = await tryRecover();
         if (abortSignal?.aborted) return;
         await applyRecoveryOutcome(recovered);

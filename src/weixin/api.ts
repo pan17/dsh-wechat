@@ -21,6 +21,28 @@ const CHANNEL_VERSION = "1.0.2";
 
 export { isRetryableNetworkError };
 
+const SESSION_EXPIRED_ERRCODE = -14;
+
+/**
+ * Thrown when the iLink gateway returns a parseable session-timeout body
+ * (`errcode` / `ret` === -14). Distinct from the undici content-length
+ * shape: that one never yields a JSON body at all.
+ */
+export class SessionTimeoutError extends Error {
+  readonly code = "SESSION_TIMEOUT";
+  constructor(message = "session timeout") {
+    super(message);
+    this.name = "SessionTimeoutError";
+  }
+}
+
+/** True when a parsed iLink JSON body reports session timeout. */
+export function isSessionTimeoutApiBody(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const obj = value as { errcode?: unknown; ret?: unknown };
+  return obj.errcode === SESSION_EXPIRED_ERRCODE || obj.ret === SESSION_EXPIRED_ERRCODE;
+}
+
 /**
  * Detect undici's `InvalidArgumentError: invalid content-length header`.
  *
@@ -56,6 +78,14 @@ export function isSessionTimeoutContentLengthError(err: unknown): boolean {
     current = obj.cause;
   }
   return false;
+}
+
+/** Session timeout whether it arrived as JSON `-14` or the undici header fault. */
+export function isSessionTimeoutError(err: unknown): boolean {
+  if (isSessionTimeoutContentLengthError(err)) return true;
+  if (!err || typeof err !== "object") return false;
+  const obj = err as { name?: unknown; code?: unknown };
+  return obj.name === "SessionTimeoutError" || obj.code === "SESSION_TIMEOUT";
 }
 
 export interface ApiPostOptions {
@@ -145,18 +175,26 @@ async function apiPost<T>(
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${text}`);
       }
-      return JSON.parse(text) as T;
+      const parsed = (text.trim() ? JSON.parse(text) : {}) as T;
+      if (isSessionTimeoutApiBody(parsed)) {
+        const errmsg =
+          parsed && typeof parsed === "object" && "errmsg" in parsed && typeof (parsed as { errmsg?: unknown }).errmsg === "string"
+            ? (parsed as { errmsg: string }).errmsg
+            : "session timeout";
+        throw new SessionTimeoutError(errmsg);
+      }
+      return parsed;
     } catch (err) {
       clearTimeout(timer);
       // AbortError sentinel: getUpdates long-poll timed out, no messages.
       if ((err as Error).name === "AbortError") {
         return { ret: 0, msgs: [] } as T;
       }
-      // Session timeout (-14) arrives with a malformed Content-Length so
-      // undici throws before we can read the body. Skip retries — the token
-      // is rejected server-side, hammering the endpoint just spams the log
-      // and the user. Callers detect this via isSessionTimeoutContentLengthError.
-      if (isSessionTimeoutContentLengthError(err)) {
+      // Session timeout (-14): either a parseable JSON body we just threw
+      // as SessionTimeoutError, or undici's InvalidArgumentError from a
+      // malformed Content-Length. Skip retries — the token is rejected
+      // server-side; hammering the endpoint just spams the log.
+      if (isSessionTimeoutError(err)) {
         lastError = err;
         break;
       }

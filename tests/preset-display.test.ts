@@ -174,10 +174,6 @@ function makeBridge(opts: {
     userId: "u",
     savedAt: "",
   };
-  (bridge as unknown as { contextTokens: Map<string, string> }).contextTokens.set(
-    "u1",
-    "ctx-token",
-  );
   return bridge;
 }
 

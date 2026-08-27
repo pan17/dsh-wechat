@@ -126,7 +126,6 @@ function makeBridge(opts: {
     userId: "u",
     savedAt: "",
   };
-  (bridge as unknown as { contextTokens: Map<string, string> }).contextTokens.set("u1", "ctx-token");
   // Bind the user to the mock agent so `agents.get(user)` resolves; the
   // model/reasoning handlers read the agent via the user→session→agent
   // chain and skip the override entirely when no agent is bound.

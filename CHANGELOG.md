@@ -5,6 +5,36 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-27
+
+### Changed
+
+- 单用户：只服务第一个微信 peer，后续不同 `from_user_id` 入站记录日志并忽略。
+- 取消应用层 context token 门闩：不再持久化 / 回灌 `lastContextToken`，也不再因「没有 context token」把出站 park 进 outbound cache。iLink 请求体里若入站带过 `context_token` 仍会附上，但发送只看 bot token。
+- bot token **没有**（未登录 / 退出 / 重新扫码中）：出站丢弃并打 `drop outbound (bot token missing)`，不进缓存。
+- bot token **`-14` 恢复中**：消息和审批/提问卡写入 outbound cache（`park outbound (-14 recovering)`）；`getUpdates` 恢复成功后自动静默补发（`flushing N parked item(s)`）。连续 notifyStart 失败达到重扫阈值则丢弃缓存（`re-scan required — discarding parked outbound`）。
+- 退出登录 / 重新扫码：仍清空 outbound 队列，不把 GUI 窗口里的回复补发到微信。
+
+### Added
+
+- `/status` 在当前会话有未回答的提问卡 / 权限卡时增加 `• 待处理:` 行。
+- `/history` 在聊天摘要之后完整重发当前会话仍 pending 的提问卡 / 权限卡（可直接回复）；无历史但有卡时也会重发。
+- `/history` 单条摘要截断从 300 字提到 800 字，超出仍加 `…`，完整原文（≤ 800）原样输出。
+- `/history` 最近的助手消息不再截断，完整原文原样输出（即使超过 800 字）；其它条目仍按 800 字 + `…` 截断。长助手消息会被 `splitText`（`textChunkLimit=4000`）自动拆到下一条微信。
+- `/status` 加 emoji 颜色标记（iLink 文本消息不支持 `<font color>`，靠 emoji glyph 在微信端彩显）——
+  - 静默模式 `on` (停止转发到微信) → 🔴，`off` → 🟢
+  - 跨会话通知 `on` → 🟢，`off` → ⚪
+  - Agent `running` → 🟢，`idle` → ⚪，`（未加载）` → 🔴
+  - 繁忙投递 `steer` → 🟢，`queue` → ⚪
+  - 权限 `danger-*` 行加 🔴
+  - `• 待处理:` 行整行加 🔴（需要立即回复）
+
+### Fixed
+
+- HTTP 200 + `errcode: -14` 的 `sendmessage` 不再被当成发送成功。
+- `logout` / `relogin` 清空 outbound 队列和静默缓冲，避免退出后在 GUI 聊的回复在重新扫码后被下一条微信 flush 出去。
+- 重启 / 点「重连」后 `session/event` 与 mux 整条 feed 静默：`reconnect`/`logout`/`relogin` 只停 iLink 长轮询，不再 `stopMux`；`attachMux` 做成单例循环（HMR 不再双开）；`session/event` 兼容 `session.id` / `header.id`；inject 10s 未回调、mux 开流/断流都打日志。
+
 ## [0.6.5] - 2026-08-26
 
 ### Fixed

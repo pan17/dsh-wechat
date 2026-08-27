@@ -18,7 +18,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getUpdates,
+  sendMessage,
   isSessionTimeoutContentLengthError,
+  isSessionTimeoutError,
+  SessionTimeoutError,
 } from "../src/weixin/api.js";
 
 function makeUndiciContentLengthError(): Error {
@@ -108,5 +111,43 @@ describe("getUpdates: session-timeout content-length propagation", () => {
 
     // getUpdates uses retries: 0 — a single fetch attempt, no busy loop.
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("sendMessage: parseable -14 is a thrown SessionTimeoutError", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("rejects HTTP 200 + errcode -14 instead of treating it as success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ errcode: -14, errmsg: "session timeout" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      sendMessage({
+        baseUrl: "https://gw",
+        token: "t",
+        body: { msg: { to_user_id: "u1" } },
+        retries: 0,
+      }),
+    ).rejects.toBeInstanceOf(SessionTimeoutError);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("isSessionTimeoutError matches both JSON and undici shapes", () => {
+    expect(isSessionTimeoutError(new SessionTimeoutError())).toBe(true);
+    const undici = new Error("invalid content-length header");
+    undici.name = "InvalidArgumentError";
+    (undici as Error & { code?: string }).code = "UND_ERR_INVALID_ARG";
+    expect(isSessionTimeoutError(undici)).toBe(true);
+    expect(isSessionTimeoutError(new Error("fetch failed"))).toBe(false);
   });
 });

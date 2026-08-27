@@ -65,7 +65,6 @@ function makeBridgeWithConfig(crossSessionNotify: boolean) {
   state.update("u1", { sessionId: "sess-A" });
   // Ensure watchedSessions includes sess-B for history test
   state.watchSession("u1", "sess-B");
-  (bridge as any).contextTokens.set("u1", "tok");
   (bridge as any).token = { baseUrl: "https://x", token: "t" };
   return bridge as any;
 }

@@ -18,7 +18,7 @@ import path from "node:path";
 import { login, loadToken, type TokenData } from "../weixin/auth.js";
 import { startMonitor } from "../weixin/monitor.js";
 import { sendTextMessage, sendMediaMessage, splitText } from "../weixin/send.js";
-import { sendTyping as apiSendTyping, getConfig as apiGetConfig } from "../weixin/api.js";
+import { sendTyping as apiSendTyping, getConfig as apiGetConfig, isSessionTimeoutError } from "../weixin/api.js";
 import { MessageType, TypingStatus, UploadMediaType } from "../weixin/types.js";
 import type { WeixinMessage } from "../weixin/types.js";
 import { extractText, weixinMessageToPrompt } from "../adapter/inbound.js";
@@ -90,11 +90,10 @@ const TYPING_KEEPALIVE_MS = 10_000;
  */
 const TYPING_SAFETY_TIMEOUT_MS = 2 * 60_000;
 /**
- * Hard cap on one user's outbound cache. The cache normally holds only
- * rate-limit overflow, but the cold-start path (`sendReply` with no login /
- * context token) parks GUI-triggered replies there too — a long logged-out
- * stretch must not grow it without bound. Oldest items drop first: for a
- * chat backlog, recent output matters more than stale output.
+ * Hard cap on one user's outbound cache. The cache holds rate-limit
+ * overflow and transient send failures while the bot is logged in.
+ * Missing / invalid bot tokens never park here — those drops are logged
+ * and discarded. Oldest items drop first.
  */
 const MAX_OUTBOUND_CACHE = 100;
 
@@ -225,13 +224,32 @@ export class WeChatDSHBridge {
   private readonly ops: DshOps;
 
   private token: TokenData | null = null;
+  /**
+   * Gateway rejected the current bot session (`-14` / session timeout).
+   * Distinct from `token === null` (never logged in / mid re-login).
+   * While invalid and not given up, outbound is parked and flushed on recover.
+   * Cleared when getUpdates succeeds again or a fresh QR login lands.
+   */
+  private tokenInvalid = false;
+  /**
+   * `-14` recovery exhausted (re-scan hint). Further outbound is dropped,
+   * and any parked items are discarded.
+   */
+  private tokenGiveUp = false;
+  /**
+   * Single WeChat peer. First inbound user wins; later distinct
+   * `from_user_id`s are ignored. Single-user deployments only.
+   */
+  private peerUserId: string | null = null;
+  /**
+   * Latest inbound iLink `context_token` for the peer. Wired into the
+   * send payload when present; never used as a send gate.
+   */
+  private wireContextToken: string | null = null;
   /** Per-run monitor cancellation; recreated on every reconnect. */
   private monitorAbort: AbortController | null = null;
   private monitorRunning = false;
   private loginState: LoginState = { phase: "idle" };
-
-  /** Last inbound context token per WeChat user (required to send). */
-  private readonly contextTokens = new Map<string, string>();
   /** Pending question cards per user (rpcId-keyed, first = active). */
   private readonly pendingQuestions = new Map<string, PendingQuestion[]>();
   /** Pending approval cards per user (rpcId-keyed). */
@@ -279,7 +297,12 @@ export class WeChatDSHBridge {
   private readonly wechatMessageIds = new Map<string, number>();
   /** apiProxy for respond() injection; set by attachMux. */
   private apiProxy: ApiProxySurface | null = null;
+  /** Current mux stream abort; replaced on each reopen. */
   private muxAbort: AbortController | null = null;
+  /** True after plugin dispose; the mux loop must not reopen. */
+  private muxStopped = false;
+  /** True while a mux loop is running (attachMux is idempotent). */
+  private muxLoopStarted = false;
   /**
    * DSH native command registry (ctx.commands) when present in the host.
    * Set late by `attachCommands` once the cordis commands child has
@@ -536,14 +559,64 @@ export class WeChatDSHBridge {
    * for `TYPING_TICKET_TTL_MS`. Returns undefined when the bot is not
    * logged in or the iLink call fails (caller treats this as "skip").
    */
-  private async getTypingTicket(userId: string, contextToken: string): Promise<string | undefined> {
+  /** Bot can talk to WeChat: logged in and the gateway has not rejected the session. */
+  private botReady(): boolean {
+    return this.token !== null && !this.tokenInvalid;
+  }
+
+  private markTokenInvalid(): void {
+    if (this.tokenInvalid) return;
+    this.tokenInvalid = true;
+    this.log("-14 session timeout: park outbound until recover (messages and cards)");
+  }
+
+  private markTokenRecovered(): void {
+    if (this.tokenGiveUp) {
+      this.log("-14 recovered after give-up; parked outbound already discarded");
+      this.tokenInvalid = false;
+      this.tokenGiveUp = false;
+      return;
+    }
+    if (!this.tokenInvalid) return;
+    this.tokenInvalid = false;
+    this.log("-14 recovered; flushing parked outbound");
+    void this.flushParkedAfterRecover();
+  }
+
+  private markTokenGiveUp(): void {
+    if (this.tokenGiveUp) return;
+    this.tokenGiveUp = true;
+    this.log("-14 recovery failed; re-scan required — discarding parked outbound");
+    this.discardQueuedOutbound("session-timeout-give-up");
+  }
+
+  private dropOutboundReason(): "missing" | "invalid" | "give-up" | null {
+    if (this.token === null) return "missing";
+    if (this.tokenGiveUp) return "give-up";
+    if (this.tokenInvalid) return "invalid";
+    return null;
+  }
+
+  private logDropOutbound(preview: string): void {
+    const reason = this.dropOutboundReason();
+    if (reason === "give-up") {
+      this.log(`drop outbound (bot token invalid, re-scan required): ${preview}`);
+    } else if (reason === "invalid") {
+      this.log(`park outbound (-14 recovering): ${preview}`);
+    } else {
+      this.log(`drop outbound (bot token missing): ${preview}`);
+    }
+  }
+
+  private async getTypingTicket(userId: string, contextToken: string | undefined): Promise<string | undefined> {
     const cached = this.typingTickets.get(userId);
     if (cached && cached.expiresAt > Date.now()) return cached.ticket;
-    if (!this.token) return undefined;
+    const token = this.token;
+    if (!token || this.tokenInvalid) return undefined;
     try {
       const resp = await apiGetConfig({
-        baseUrl: this.token.baseUrl,
-        token: this.token.token,
+        baseUrl: token.baseUrl,
+        token: token.token,
         ilinkUserId: userId,
         contextToken,
       });
@@ -564,15 +637,16 @@ export class WeChatDSHBridge {
    * iLink failure never breaks the surrounding message flow.
    */
   private async sendTypingStatus(userId: string, status: 1 | 2): Promise<void> {
-    if (!this.token) return;
-    const contextToken = this.contextTokens.get(userId);
-    if (!contextToken) return;
-    const ticket = await this.getTypingTicket(userId, contextToken);
+    const token = this.token;
+    if (!token || this.tokenInvalid) return;
+    const ticket = await this.getTypingTicket(userId, this.wireContextToken ?? undefined);
     if (!ticket) return;
+    const still = this.token;
+    if (!still || this.tokenInvalid) return;
     try {
       await apiSendTyping({
-        baseUrl: this.token.baseUrl,
-        token: this.token.token,
+        baseUrl: still.baseUrl,
+        token: still.token,
         body: { ilink_user_id: userId, typing_ticket: ticket, status },
       });
     } catch (err) {
@@ -635,7 +709,9 @@ export class WeChatDSHBridge {
   /** Start the bridge: resume with a stored token or begin QR login. */
   async start(): Promise<void> {
     this.token = loadToken(this.config.storageDir);
-    this.restoreContextTokens();
+    this.tokenInvalid = false;
+    this.tokenGiveUp = false;
+    this.lockPeerFromState();
     if (this.token) {
       this.loginState = { phase: "logged-in", botId: this.token.accountId };
       await this.startMonitor();
@@ -644,31 +720,29 @@ export class WeChatDSHBridge {
     }
   }
 
-  /**
-   * Seed the in-memory context-token map from the persisted per-user state.
-   *
-   * The gateway requires a `context_token` to send TO a user, and fresh
-   * tokens arrive only with inbound messages. Restoring the last persisted
-   * one at startup closes the cold-start window where GUI-triggered replies
-   * for a WeChat-bound session had no token to send with. A restored token
-   * may have expired server-side; such a send throws, `deliverOutbound`
-   * parks the item, and the next inbound message flushes it — degraded to
-   * "arrives after your next WeChat ping", never lost.
-   */
-  private restoreContextTokens(): void {
-    for (const user of this.state.all()) {
-      if (user.lastContextToken) this.contextTokens.set(user.userId, user.lastContextToken);
-    }
+  /** First persisted user is the single peer (legacy multi-user files keep only the first). */
+  private lockPeerFromState(): void {
+    const first = this.state.all()[0];
+    if (first) this.peerUserId = first.userId;
   }
 
+  /**
+   * Plugin dispose: stop the iLink monitor AND the DSH mux feed.
+   * WeChat reconnect/logout must NOT use this — they only bounce the
+   * gateway long-poll (`stopIlink`). Mux is a DSH-side subscription and
+   * stays alive across QR re-login.
+   */
   async stop(): Promise<void> {
+    this.stopIlink("plugin-stop");
+    this.stopMux();
+  }
+
+  /** Stop the WeChat long-poll and typing indicators; leave mux running. */
+  private stopIlink(typingReason: string): void {
     this.monitorAbort?.abort();
     this.monitorAbort = null;
-    this.stopMux();
-    // Clear every active typing indicator so a disconnecting bridge does
-    // not leave a phantom "正在输入" on any user's chat.
     for (const userId of [...this.typingActive.keys()]) {
-      this.endTyping(userId, "plugin-stop");
+      this.endTyping(userId, typingReason);
     }
   }
 
@@ -678,9 +752,11 @@ export class WeChatDSHBridge {
    * config changes that affect the gateway connection.
    */
   async reconnect(): Promise<{ ok: boolean; message: string }> {
-    this.stop();
+    this.stopIlink("reconnect");
     this.token = loadToken(this.config.storageDir);
-    this.restoreContextTokens();
+    this.tokenInvalid = false;
+    this.tokenGiveUp = false;
+    this.lockPeerFromState();
     if (this.token) {
       this.loginState = { phase: "logged-in", botId: this.token.accountId };
       await this.startMonitor();
@@ -694,21 +770,44 @@ export class WeChatDSHBridge {
    * Force re-login: drop the stored token and start a fresh QR flow.
    */
   async relogin(): Promise<{ ok: boolean; message: string }> {
-    this.stop();
+    this.stopIlink("relogin");
     this.deleteToken();
     this.token = null;
+    this.tokenInvalid = false;
+    this.tokenGiveUp = false;
     this.loginState = { phase: "idle" };
+    this.discardQueuedOutbound("relogin");
     void this.startLoginFlow();
     return { ok: true, message: "已开始重新扫码登录" };
   }
 
   /** Log out: stop the monitor and remove the stored token. */
   async logout(): Promise<{ ok: boolean; message: string }> {
-    this.stop();
+    this.stopIlink("logout");
     this.deleteToken();
     this.token = null;
+    this.tokenInvalid = false;
+    this.tokenGiveUp = false;
     this.loginState = { phase: "idle" };
+    this.discardQueuedOutbound("logout");
     return { ok: true, message: "已退出登录" };
+  }
+
+  /**
+   * Drop every not-yet-sent WeChat payload. Logout / re-login must not
+   * keep GUI replies from the logged-out window and then flush them on
+   * the next inbound ping.
+   */
+  private discardQueuedOutbound(reason: string): void {
+    let parked = 0;
+    for (const items of this.outboundCache.values()) parked += items.length;
+    this.outboundCache.clear();
+    this.cacheNoticeSent.clear();
+    this.wechatMsgCount.clear();
+    this.silentBuffers.clear();
+    if (parked > 0) {
+      this.log(`discarded ${parked} queued outbound item(s) on ${reason}`);
+    }
   }
 
   private deleteToken(): void {
@@ -736,6 +835,8 @@ export class WeChatDSHBridge {
         },
       });
       this.token = token;
+      this.tokenInvalid = false;
+      this.tokenGiveUp = false;
       this.loginState = { phase: "logged-in", botId: token.accountId };
       await this.startMonitor();
     } catch (err) {
@@ -760,6 +861,9 @@ export class WeChatDSHBridge {
           console.error(`[dsh-wechat] handleMessage error: ${String(err)}`);
         });
       },
+      onSessionInvalid: () => this.markTokenInvalid(),
+      onSessionRecovered: () => this.markTokenRecovered(),
+      onSessionGiveUp: () => this.markTokenGiveUp(),
     })
       .catch((err) => {
         console.error(`[dsh-wechat] monitor stopped: ${String(err)}`);
@@ -853,21 +957,21 @@ export class WeChatDSHBridge {
     if (msg.group_id) return;
 
     const userId = msg.from_user_id;
-    const contextToken = msg.context_token;
-    if (!userId || !contextToken) return;
+    if (!userId) return;
+
+    if (this.peerUserId && this.peerUserId !== userId) {
+      this.log(`ignore inbound from ${userId} (single-user peer is ${this.peerUserId})`);
+      return;
+    }
+    if (!this.peerUserId) this.peerUserId = userId;
+    if (typeof msg.context_token === "string" && msg.context_token) {
+      this.wireContextToken = msg.context_token;
+    }
 
     // Any incoming user message resets the WeChat gateway counter.
     this.wechatMsgCount.set(userId, 0);
-    this.contextTokens.set(userId, contextToken);
 
     const user = this.state.ensureUser(userId, this.config.cwd);
-    // Persist the freshest context token so a restart can still reach this
-    // user BEFORE their next inbound message. Without this, the in-memory
-    // map was empty after a DSH restart and every GUI-triggered reply for
-    // the bound session was silently dropped until the user pinged WeChat.
-    if (user.lastContextToken !== contextToken) {
-      this.state.update(userId, { lastContextToken: contextToken });
-    }
 
     // Pull text once so both the card handler and the slash command
     // bypass check see the same input.
@@ -1054,10 +1158,10 @@ export class WeChatDSHBridge {
       }
     }
 
-    await this.forwardToAgent(user, msg, contextToken);
+    await this.forwardToAgent(user, msg);
   }
 
-  private async forwardToAgent(user: UserState, msg: WeixinMessage, contextToken: string): Promise<void> {
+  private async forwardToAgent(user: UserState, msg: WeixinMessage): Promise<void> {
     const agent = await this.agents.ensure(user);
     if (!agent) {
       await this.sendReply(user.userId, "⚠️ 无法创建/恢复 DSH 会话，请检查 DSH 日志。");
@@ -1185,7 +1289,7 @@ export class WeChatDSHBridge {
           const preview = this.lastAssistantTextBySession.get(sessionId);
           const suffix = preview ? "\n> " + preview.slice(0, 80) + (preview.length > 80 ? "…" : "") : "";
           const body = ctx + "\n✅ 任务已完成" + suffix + "\n发送 /session switch <编号> 切换查看。";
-          if (!this.token || !this.contextTokens.has(r.userId)) continue;
+          if (!this.botReady()) continue;
           const set = this.notifiedCrossSessionTurns.get(r.userId) ?? new Set<string>();
           if (set.has(sessionId)) continue;
           set.add(sessionId);
@@ -1256,6 +1360,7 @@ export class WeChatDSHBridge {
    */
   attachMux(apiProxy: ApiProxySurface): void {
     this.apiProxy = apiProxy;
+    if (this.muxStopped) return;
     const events = (apiProxy as { events?: unknown }).events as
       | {
           mux(
@@ -1269,28 +1374,38 @@ export class WeChatDSHBridge {
           }>;
         }
       | undefined;
-    if (!events) {
+    if (!events?.mux) {
       console.warn("[dsh-wechat] apiProxy.events.mux unavailable; approval/question cards disabled");
       return;
     }
+    if (this.muxLoopStarted) {
+      this.log("mux already running; apiProxy updated");
+      return;
+    }
+    this.muxLoopStarted = true;
+    this.log("mux loop starting");
 
     const loop = async (): Promise<void> => {
-      while (!this.muxAbort?.signal.aborted) {
+      while (!this.muxStopped) {
         try {
           const abort = new AbortController();
           this.muxAbort = abort;
           const frames = events.mux({ rpcId: `wx-mux-${Date.now().toString(36)}`, payload: {} }, abort.signal);
+          let opened = false;
           for await (const frame of frames) {
-            if (abort.signal.aborted) break;
+            if (abort.signal.aborted || this.muxStopped) break;
+            if (!opened) {
+              opened = true;
+              this.log("mux stream opened");
+            }
             this.handleMuxFrame(frame);
           }
-          // Stream ended (server restart etc.): reopen.
-          if (!abort.signal.aborted) {
-            await new Promise((r) => setTimeout(r, 2000));
-          }
+          if (this.muxStopped) return;
+          if (opened) this.log("mux stream ended; reopening in 2s");
+          await new Promise((r) => setTimeout(r, 2000));
         } catch (err) {
+          if (this.muxStopped) return;
           console.error(`[dsh-wechat] mux stream error: ${String(err)}`);
-          if (this.muxAbort?.signal.aborted) return;
           await new Promise((r) => setTimeout(r, 5000));
         }
       }
@@ -1298,8 +1413,9 @@ export class WeChatDSHBridge {
     void loop();
   }
 
-  /** Stop the mux subscription (plugin dispose). */
+  /** Stop the mux subscription (plugin dispose only — not WeChat reconnect). */
   stopMux(): void {
+    this.muxStopped = true;
     this.muxAbort?.abort();
     this.muxAbort = null;
   }
@@ -1318,7 +1434,10 @@ export class WeChatDSHBridge {
         const toolName = String(payload.toolName ?? "?");
         if (!frame.rpcId || !sessionId || !approvalId) return;
         const userId = this.recipientForSession(sessionId);
-        if (!userId) return;
+        if (!userId) {
+          this.log(`mux approval/requested ignored (no WeChat peer for session ${sessionId})`);
+          return;
+        }
         const card: PendingApproval = {
           rpcId: frame.rpcId,
           sessionId,
@@ -1374,7 +1493,10 @@ export class WeChatDSHBridge {
         const questions = payload.questions as AskUserQuestionItem[] | undefined;
         if (!frame.rpcId || !sessionId || !Array.isArray(questions) || questions.length === 0) return;
         const userId = this.recipientForSession(sessionId);
-        if (!userId) return;
+        if (!userId) {
+          this.log(`mux question/requested ignored (no WeChat peer for session ${sessionId})`);
+          return;
+        }
         const card: PendingQuestion = {
           rpcId: frame.rpcId,
           sessionId,
@@ -1467,7 +1589,7 @@ export class WeChatDSHBridge {
   private async notifyCardPending(userId: string, sessionId: string): Promise<void> {
     const notified = this.notifiedCardSessions.get(userId) ?? new Set<string>();
     if (notified.has(sessionId)) return;
-    if (!this.token || !this.contextTokens.has(userId)) return;
+    if (!this.botReady()) return;
     notified.add(sessionId);
     this.notifiedCardSessions.set(userId, notified);
     const context = await this.sessionContextLabel(sessionId);
@@ -1548,7 +1670,7 @@ export class WeChatDSHBridge {
     for (const user of recipients) {
       if (user.sessionId === sessionId) continue;
       if (!this.shouldNotifyCrossSession(user.userId)) continue;
-      if (!this.token || !this.contextTokens.has(user.userId)) continue;
+      if (!this.botReady()) continue;
       const set = this.notifiedCrossSessionTurns.get(user.userId) ?? new Set<string>();
       if (set.has(sessionId)) continue;
       set.add(sessionId);
@@ -1567,7 +1689,7 @@ export class WeChatDSHBridge {
     for (const user of recipients) {
       if (user.sessionId === sessionId) continue;
       if (!this.shouldNotifyCrossSession(user.userId)) continue;
-      if (!this.token || !this.contextTokens.has(user.userId)) continue;
+      if (!this.botReady()) continue;
       void this.sendReply(user.userId, body).catch(() => {});
     }
   }
@@ -1628,6 +1750,19 @@ export class WeChatDSHBridge {
 
   private isBoundSession(sessionId: string): boolean {
     return this.userForAgent(sessionId) !== undefined;
+  }
+
+  /** Pending cards that belong to the user's *current* bound session. */
+  private pendingCardsForCurrentSession(userId: string): {
+    approvals: PendingApproval[];
+    questions: PendingQuestion[];
+  } {
+    const sessionId = this.state.getUser(userId)?.sessionId;
+    if (!sessionId) return { approvals: [], questions: [] };
+    return {
+      approvals: (this.pendingApprovals.get(userId) ?? []).filter((c) => c.sessionId === sessionId),
+      questions: (this.pendingQuestions.get(userId) ?? []).filter((c) => c.sessionId === sessionId),
+    };
   }
 
   // ─── Approval replies ───
@@ -2415,23 +2550,51 @@ export class WeChatDSHBridge {
     }
     if (entries.length === 0) {
       await this.sendReply(userId, "📜 暂无历史消息。");
-      return;
+    } else {
+      const HISTORY_TEXT_LIMIT = 800;
+      // The most recent assistant reply is the one the reader is most
+      // likely to want to read end-to-end — keep it untruncated so the
+      // answer to "what did the model just say" doesn't cut off at 800
+      // chars. Earlier entries still cap at HISTORY_TEXT_LIMIT; a long
+      // assistant reply flows into the next WeChat chunk via splitText.
+      let lastAssistantIdx = -1;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i]!.role === "assistant") {
+          lastAssistantIdx = i;
+          break;
+        }
+      }
+      const lines: string[] = [`📜 最近 ${entries.length} 条历史${entries.length >= HISTORY_MAX && count >= HISTORY_MAX ? "（最多展示 20 条）" : ""}`];
+      lines.push("");
+      entries.forEach((e, i) => {
+        const roleLabel = e.role === "user" ? "你" : "助手";
+        const when = e.time ? this.formatRelativeTime(e.time) : "未知时间";
+        const keepFull = i === lastAssistantIdx;
+        const body = keepFull
+          ? e.text
+          : e.text.length > HISTORY_TEXT_LIMIT
+            ? e.text.slice(0, HISTORY_TEXT_LIMIT - 1) + "…"
+            : e.text;
+        const compact = body.replace(/\s*\n\s*/g, " ").replace(/\s{2,}/g, " ").trim();
+        lines.push(`${i + 1}. [${when}] ${roleLabel}: ${compact}`);
+      });
+      lines.push("", `提示: /history [1-${HISTORY_MAX}] 查看不同条数（默认 5）`);
+      await this.sendReply(userId, lines.join("\n"));
     }
-    const HISTORY_TEXT_LIMIT = 300;
-    const lines: string[] = [`📜 最近 ${entries.length} 条历史${entries.length >= HISTORY_MAX && count >= HISTORY_MAX ? "（最多展示 20 条）" : ""}`];
-    // Show total hint when truncated and more history might exist: we only know
-    // we returned `count` entries, but not total size — avoid claiming total.
-    lines.push("");
-    entries.forEach((e, i) => {
-      const roleLabel = e.role === "user" ? "你" : "助手";
-      const when = e.time ? this.formatRelativeTime(e.time) : "未知时间";
-      const body = e.text.length > HISTORY_TEXT_LIMIT ? e.text.slice(0, HISTORY_TEXT_LIMIT - 1) + "…" : e.text;
-      // Collapse internal newlines to keep each entry readable on phone screen
-      const compact = body.replace(/\s*\n\s*/g, " ").replace(/\s{2,}/g, " ").trim();
-      lines.push(`${i + 1}. [${when}] ${roleLabel}: ${compact}`);
-    });
-    lines.push("", `提示: /history [1-${HISTORY_MAX}] 查看不同条数（默认 5）`);
-    await this.sendReply(userId, lines.join("\n"));
+    await this.resendPendingCardsForHistory(userId);
+  }
+
+  /** After `/history`, re-send every still-pending card of the current session in full. */
+  private async resendPendingCardsForHistory(userId: string): Promise<void> {
+    const { approvals, questions } = this.pendingCardsForCurrentSession(userId);
+    if (approvals.length === 0 && questions.length === 0) return;
+    await this.sendReply(userId, "⏳ 当前会话有待处理卡片，完整内容如下（直接回复即可）：");
+    for (const card of approvals) {
+      await this.sendApprovalCard(userId, card, approvals.length);
+    }
+    for (const card of questions) {
+      await this.sendQuestionCard(userId, card, card.items, questions.length);
+    }
   }
 
   private async handleModelCommand(userId: string, cmd: ModelCommand): Promise<void> {
@@ -2699,6 +2862,21 @@ export class WeChatDSHBridge {
     };
   }
 
+  /**
+   * Color marker for boolean toggles on /status. Each field has its own
+   * semantic — `on` for 静默模式 means "we stop forwarding to WeChat"
+   * (warning), `on` for 跨会话通知 means "extra delivery is enabled"
+   * (good). The colored glyph is field-specific; this helper just
+   * annotates an explicit `value` with `🟢` / `🔴`. iLink text items
+   * have no `<font color>` support — emoji glyphs are the only
+   * colored channel that survives the wire.
+   */
+  private paintBadge(value: string, polarity: "positive" | "warning" | "neutral"): string {
+    if (polarity === "positive") return `🟢 ${value}`;
+    if (polarity === "warning") return `🔴 ${value}`;
+    return `⚪ ${value}`;
+  }
+
   private async formatStatus(user: UserState): Promise<string> {
     const agent = this.agents.get(user);
 
@@ -2735,19 +2913,30 @@ export class WeChatDSHBridge {
 
     const crossEffective = this.shouldNotifyCrossSession(user.userId) ? "on" : "off";
     const presetLines = await this.formatStatusPresetLines(user);
+    const pendingLine = this.formatPendingStatusLine(user.userId);
+    const agentLabel = agent
+      ? agent.status === "running"
+        ? this.paintBadge("running", "positive")
+        : this.paintBadge("idle", "neutral")
+      : this.paintBadge("（未加载）", "warning");
     const lines = [
       "📊 当前状态",
       `• 工作区: ${user.cwd}`,
       `• 会话: ${sessionLabel}`,
-      `• Agent: ${agent ? agent.status : "（未加载）"}`,
+      `• Agent: ${agentLabel}`,
+      ...(pendingLine ? [pendingLine] : []),
       presetLines.sessionLine,
       `• 模型: ${active?.provider && active?.model ? `${active.provider}/${active.model}${effortSuffix}` : "（默认）"}`,
       ...(contextLabel ? [contextLabel] : []),
-      ...(permission ? [`• 权限: ${permission}`] : []),
+      ...(permission
+        ? [`• 权限: ${permission.startsWith("danger") ? this.paintBadge(permission, "warning") : permission}`]
+        : []),
       presetLines.defaultLine,
-      `• 静默模式: ${user.silent ? "on" : "off"}`,
-      `• 繁忙投递: ${this.ops.busyEnter() === "steer" ? "steer（插话）" : "queue（排队）"}`,
-      `• 跨会话通知: ${crossEffective}`,
+      // 静默模式 on = we stop forwarding (warning); off = normal delivery (good).
+      `• 静默模式: ${this.paintBadge(user.silent ? "on" : "off", user.silent ? "warning" : "positive")}`,
+      `• 繁忙投递: ${this.ops.busyEnter() === "steer" ? this.paintBadge("steer（插话）", "positive") : this.paintBadge("queue（排队）", "neutral")}`,
+      // 跨会话通知 on = extra notifications enabled (good); off = quiet (also fine, neutral).
+      `• 跨会话通知: ${this.paintBadge(crossEffective, crossEffective === "on" ? "positive" : "neutral")}`,
     ];
 
     // Session-level projection registry (`ctx.sessionProjections`). One
@@ -2779,6 +2968,17 @@ export class WeChatDSHBridge {
     }
 
     return lines.join("\n");
+  }
+
+  /** `/status` row for unanswered cards of the current session; omitted when none. */
+  private formatPendingStatusLine(userId: string): string | undefined {
+    const { approvals, questions } = this.pendingCardsForCurrentSession(userId);
+    const parts: string[] = [];
+    if (questions.length > 0) parts.push(`${questions.length} 张提问卡`);
+    if (approvals.length > 0) parts.push(`${approvals.length} 张权限卡`);
+    if (parts.length === 0) return undefined;
+    // Red marker — reader's eye should jump to "needs answer" rows.
+    return `🔴 • 待处理: ${parts.join(" · ")}`;
   }
 
   /**
@@ -2902,12 +3102,11 @@ export class WeChatDSHBridge {
     if (!user) {
       return { ok: false, message: "no WeChat user has interacted yet; a WeChat message must arrive before send_wechat can be used" };
     }
-    const contextToken = this.contextTokens.get(user.userId);
-    if (!contextToken) {
-      return { ok: false, message: "user has not messaged yet; a context token is required to send" };
-    }
     if (!this.token) {
       return { ok: false, message: "WeChat is not logged in" };
+    }
+    if (this.tokenGiveUp) {
+      return { ok: false, message: "WeChat bot token is invalid; re-scan the QR code" };
     }
 
     if (args.file_path) {
@@ -2919,11 +3118,16 @@ export class WeChatDSHBridge {
       const kind = mediaType === UploadMediaType.IMAGE ? "image" : mediaType === UploadMediaType.VIDEO ? "video" : "file";
       const outcome = await this.deliverOutbound(user.userId, { kind: "file", filePath, fileName });
       if (outcome === "failed") {
+        if (this.tokenGiveUp) {
+          return { ok: false, message: "WeChat bot token is invalid; re-scan the QR code" };
+        }
         return { ok: false, message: `file not found: ${filePath}` };
       }
       return outcome === "sent"
         ? { ok: true, message: `sent ${kind} ${fileName}` }
-        : { ok: true, message: `queued ${kind} ${fileName}; delivery deferred by WeChat rate limiting, the user can flush with /next` };
+        : { ok: true, message: this.tokenInvalid
+          ? `queued ${kind} ${fileName}; WeChat session timed out, will send after recover`
+          : `queued ${kind} ${fileName}; delivery deferred by WeChat rate limiting, the user can flush with /next` };
     }
     if (args.text) {
       const segments = splitText(args.text, this.config.textChunkLimit);
@@ -2933,16 +3137,17 @@ export class WeChatDSHBridge {
         const outcome = await this.deliverOutbound(user.userId, { kind: "text", text: segment });
         if (outcome === "sent") {
           sent++;
-        } else {
-          // "cached" parks the segment in outboundCache; "failed" cannot
-          // occur here (login + context token are guarded above), so any
-          // non-sent outcome is counted as queued.
+        } else if (outcome === "cached") {
           queued++;
+        } else {
+          return { ok: false, message: this.tokenGiveUp ? "WeChat bot token is invalid; re-scan the QR code" : "failed to send WeChat message" };
         }
       }
       return queued === 0
         ? { ok: true, message: `sent ${sent} message(s)` }
-        : { ok: true, message: `sent ${sent} message(s), queued ${queued} (WeChat rate limiting); the user can flush with /next` };
+        : { ok: true, message: this.tokenInvalid
+          ? `sent ${sent} message(s), queued ${queued} (session timeout; will send after recover)`
+          : `sent ${sent} message(s), queued ${queued} (WeChat rate limiting); the user can flush with /next` };
     }
     return { ok: false, message: "provide either text or file_path" };
   }
@@ -2971,11 +3176,23 @@ export class WeChatDSHBridge {
    */
   private async deliverOutbound(userId: string, item: CachedMessage): Promise<"sent" | "cached" | "failed"> {
     const token = this.token;
-    const contextToken = this.contextTokens.get(userId);
-    if (!token || !contextToken) {
-      this.log(`deliverOutbound skipped (not logged in / no context token for ${userId})`);
+    if (!token) {
+      const preview = item.kind === "text" ? item.text.slice(0, 60) : item.fileName;
+      this.logDropOutbound(preview);
       return "failed";
     }
+    if (this.tokenGiveUp) {
+      const preview = item.kind === "text" ? item.text.slice(0, 60) : item.fileName;
+      this.logDropOutbound(preview);
+      return "failed";
+    }
+    if (this.tokenInvalid) {
+      const preview = item.kind === "text" ? item.text.slice(0, 60) : item.fileName;
+      this.logDropOutbound(preview);
+      this.parkOutbound(userId, item);
+      return "cached";
+    }
+    const contextToken = this.wireContextToken ?? undefined;
 
     // File reads happen before the budget gate so an unreadable path is
     // reported as "failed" regardless of budget state.
@@ -3022,6 +3239,23 @@ export class WeChatDSHBridge {
       return "sent";
     } catch (err) {
       this.log(`outbound send error (${item.kind}): ${String(err)}`);
+      if (isSessionTimeoutError(err)) {
+        this.markTokenInvalid();
+        const preview = item.kind === "text" ? item.text.slice(0, 60) : item.fileName;
+        this.logDropOutbound(preview);
+        this.parkOutbound(userId, item);
+        return "cached";
+      }
+      // Logout / re-login can abort an in-flight send. Do not park: the
+      // next WeChat ping would otherwise flush GUI text from while logged out.
+      if (!this.token) {
+        this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
+        return "failed";
+      }
+      if (this.tokenGiveUp) {
+        this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
+        return "failed";
+      }
       this.parkOutbound(userId, item);
       await this.notifyCachePending(userId);
       return "cached";
@@ -3052,29 +3286,32 @@ export class WeChatDSHBridge {
     if (this.cacheNoticeSent.has(userId)) return;
     const pendingCount = this.outboundCache.get(userId)?.length ?? 0;
     const token = this.token;
-    const contextToken = this.contextTokens.get(userId);
-    if (!token || !contextToken || pendingCount === 0) return;
+    if (!token || this.tokenInvalid || pendingCount === 0) return;
     this.cacheNoticeSent.add(userId);
     const notice = `💾 有 ${pendingCount} 条消息暂存待发（微信限流或发送失败），发送 /next 可继续发送。`;
     try {
       await sendTextMessage(userId, notice, {
         baseUrl: token.baseUrl,
         token: token.token,
-        contextToken,
+        ...(this.wireContextToken ? { contextToken: this.wireContextToken } : {}),
       });
-    } catch {
+    } catch (err) {
       this.cacheNoticeSent.delete(userId);
+      if (isSessionTimeoutError(err)) this.markTokenInvalid();
     }
   }
 
   private async sendReply(userId: string, text: string): Promise<void> {
-    if (!this.token || !this.contextTokens.has(userId)) {
-      // Cold bridge (not logged in yet, or no context token since the last
-      // restart): park the reply instead of dropping it. The next inbound
-      // WeChat message auto-flushes the cache with a fresh token, so a
-      // GUI-triggered reply reaches the user right after their next ping.
-      // Segments are pre-split exactly as they would have been delivered.
-      this.log(`sendReply deferred to outbound cache (not logged in / no context token for ${userId}): ${text.slice(0, 60)}`);
+    if (!this.token) {
+      this.logDropOutbound(text.slice(0, 60));
+      return;
+    }
+    if (this.tokenGiveUp) {
+      this.logDropOutbound(text.slice(0, 60));
+      return;
+    }
+    if (this.tokenInvalid) {
+      this.logDropOutbound(text.slice(0, 60));
       const formatted = formatForWeChat(text);
       for (const segment of splitText(formatted, this.config.textChunkLimit)) {
         this.parkOutbound(userId, { kind: "text", text: segment });
@@ -3088,29 +3325,53 @@ export class WeChatDSHBridge {
     }
   }
 
+  /** After `-14` recover: flush every user's parked outbound without a 💾/✅ notice. */
+  private async flushParkedAfterRecover(): Promise<void> {
+    const userIds = [...this.outboundCache.keys()];
+    if (userIds.length === 0) {
+      this.log("-14 recovered; no parked outbound to flush");
+      return;
+    }
+    for (const userId of userIds) {
+      const n = this.outboundCache.get(userId)?.length ?? 0;
+      this.log(`-14 recovered; flushing ${n} parked item(s) for ${userId}`);
+      await this.flushPending(userId, { silent: true });
+    }
+  }
+
   /** Flush cached outbound messages (`/next` or auto on new user message). */
-  private async flushPending(userId: string): Promise<void> {
+  private async flushPending(userId: string, opts?: { silent?: boolean }): Promise<void> {
     const cache = this.outboundCache.get(userId);
     if (!cache || cache.length === 0) {
-      await this.sendReply(userId, "✅ 没有缓存的消息。");
+      if (!opts?.silent) await this.sendReply(userId, "✅ 没有缓存的消息。");
       return;
     }
     this.wechatMsgCount.set(userId, 0);
     const remaining: CachedMessage[] = [];
     let dropped = 0;
     for (const msg of cache) {
+      if (!this.token || this.tokenGiveUp) {
+        remaining.push(msg);
+        continue;
+      }
+      if (this.tokenInvalid) {
+        remaining.push(msg);
+        continue;
+      }
       const count = this.wechatMsgCount.get(userId) ?? 0;
       if (count >= MSG_LIMIT_MAX) {
         remaining.push(msg);
         continue;
       }
       this.wechatMsgCount.set(userId, count + 1);
+      const token = this.token;
+      const wire = this.wireContextToken ?? undefined;
       try {
         if (msg.kind === "text") {
           await sendTextMessage(userId, msg.text, {
-            baseUrl: this.token!.baseUrl,
-            token: this.token!.token,
-            contextToken: this.contextTokens.get(userId)!,
+            baseUrl: token.baseUrl,
+            token: token.token,
+            contextToken: wire,
           });
         } else {
           let buffer: Buffer;
@@ -3127,15 +3388,21 @@ export class WeChatDSHBridge {
           // re-flushes inline (mediaTypeForFile), not degraded to a plain
           // file attachment.
           await sendMediaMessage(userId, mediaTypeForFile(msg.fileName), buffer, {
-            baseUrl: this.token!.baseUrl,
-            token: this.token!.token,
-            contextToken: this.contextTokens.get(userId)!,
+            baseUrl: token.baseUrl,
+            token: token.token,
+            contextToken: wire,
             cdnBaseUrl: this.config.cdnBaseUrl,
             fileName: msg.fileName,
           });
         }
       } catch (err) {
         this.log(`flush send error: ${String(err)}`);
+        if (isSessionTimeoutError(err)) {
+          this.markTokenInvalid();
+          remaining.push(msg);
+          remaining.push(...cache.slice(cache.indexOf(msg) + 1));
+          break;
+        }
         remaining.push(msg);
       }
     }
@@ -3143,10 +3410,16 @@ export class WeChatDSHBridge {
     const dropSuffix = dropped > 0 ? `，${dropped} 条文件缓存因无法读取被丢弃` : "";
     if (remaining.length > 0) {
       this.outboundCache.set(userId, remaining);
-      await this.sendReply(userId, `✅ 已发送 ${sentCount} 条，剩余 ${remaining.length} 条缓存，/next 继续。${dropSuffix}`);
+      this.log(`flush leftover ${remaining.length} item(s) for ${userId} (sent ${sentCount})`);
+      if (!opts?.silent) {
+        await this.sendReply(userId, `✅ 已发送 ${sentCount} 条，剩余 ${remaining.length} 条缓存，/next 继续。${dropSuffix}`);
+      }
     } else {
       this.outboundCache.delete(userId);
-      await this.sendReply(userId, `✅ 全部 ${sentCount} 条缓存消息已发送${dropSuffix}。`);
+      this.log(`flush completed ${sentCount} item(s) for ${userId}${dropSuffix}`);
+      if (!opts?.silent) {
+        await this.sendReply(userId, `✅ 全部 ${sentCount} 条缓存消息已发送${dropSuffix}。`);
+      }
     }
   }
 

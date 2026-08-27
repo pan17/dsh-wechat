@@ -50,7 +50,6 @@ function makeBridge() {
   // User currently in session A. Session B is the "other" (non-current) session.
   store.ensureUser("u1", "C:\\work");
   store.update("u1", { sessionId: "A" });
-  (bridge as unknown as { contextTokens: Map<string, string> }).contextTokens.set("u1", "tok");
   (bridge as unknown as { token: unknown }).token = { baseUrl: "https://x", token: "t" };
   return bridge;
 }

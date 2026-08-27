@@ -58,7 +58,6 @@ function makeBridge(agent: { agent: unknown; received: unknown[] }) {
   cfg.storageDir = dir;
   const bridge = new WeChatDSHBridge(ctx, cfg);
   (bridge as unknown as { token: unknown }).token = { baseUrl: "https://gw", token: "t", accountId: "b1", userId: "u", savedAt: "" };
-  (bridge as unknown as { contextTokens: Map<string, string> }).contextTokens.set("u1", "ctx-token");
   return bridge;
 }
 
@@ -112,10 +111,9 @@ describe("WeChat → agent forwarding chain", () => {
     });
 
     expect(sendTextMessage).toHaveBeenCalledTimes(1);
-    const [to, text, opts] = sendTextMessage.mock.calls[0]! as [string, string, { contextToken: string }];
+    const [to, text] = sendTextMessage.mock.calls[0]! as [string, string];
     expect(to).toBe("u1");
     expect(text).toContain("你好，这是回复");
-    expect(opts.contextToken).toBe("ctx-token");
   });
 
   it("assistant/message with only non-text content is skipped silently", () => {
@@ -165,5 +163,19 @@ describe("WeChat → agent forwarding chain", () => {
     expect(sendTextMessage).toHaveBeenCalledTimes(1);
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
     expect(text).toContain("最终回复");
+  });
+
+  it("ignores inbound from a second WeChat user (single-user peer)", async () => {
+    const anyBridge = bridge as unknown as { handleMessage(m: unknown): Promise<void> };
+    await anyBridge.handleMessage(wechatTextMessage("先到先得"));
+    expect(mock.received.length).toBe(1);
+
+    await anyBridge.handleMessage({
+      message_type: MessageType.USER,
+      from_user_id: "u2",
+      context_token: "other",
+      item_list: [{ type: 1, text_item: { text: "第二个人" } }],
+    });
+    expect(mock.received.length).toBe(1);
   });
 });

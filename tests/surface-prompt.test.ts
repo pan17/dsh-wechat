@@ -65,7 +65,6 @@ function makeBridge(agent: { agent: unknown; received: unknown[] }) {
   cfg.storageDir = dir;
   const bridge = new WeChatDSHBridge(ctx, cfg);
   (bridge as unknown as { token: unknown }).token = { baseUrl: "https://gw", token: "t", accountId: "b1", userId: "u", savedAt: "" };
-  (bridge as unknown as { contextTokens: Map<string, string> }).contextTokens.set("u1", "ctx-token");
   return bridge;
 }
 

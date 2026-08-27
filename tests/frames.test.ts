@@ -33,7 +33,6 @@ function makeBridge() {
   const store = (bridge as unknown as { state: { ensureUser(u: string, c: string): unknown } }).state;
   store.ensureUser("u1", "C:\\work");
   (bridge as unknown as { state: { update(u: string, p: unknown): void } }).state.update("u1", { sessionId: "wx-1" });
-  (bridge as unknown as { contextTokens: Map<string, string> }).contextTokens.set("u1", "tok");
   (bridge as unknown as { token: unknown }).token = { baseUrl: "https://x", token: "t" };
   return bridge;
 }
@@ -133,6 +132,20 @@ describe("frame-driven approval cards", () => {
       payload: { type: "approval/resolved", sessionId: "wx-1", approvalId: "a-4", outcome: "allowed-once" },
     });
     expect(anyBridge.pendingApprovals.get("u1") ?? []).toHaveLength(0);
+  });
+
+  it("approval/requested still registers when bot token is missing, and does not park the card", () => {
+    const loggedOut = makeBridge();
+    (loggedOut as unknown as { token: unknown }).token = null;
+    const anyBridge = loggedOut as unknown as {
+      handleMuxFrame(f: unknown): void;
+      pendingApprovals: Map<string, unknown[]>;
+      outboundCache: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(approvalFrame("rpc-offline", "a-off", "pwsh"));
+    expect(anyBridge.pendingApprovals.get("u1")?.length).toBe(1);
+    expect(anyBridge.outboundCache.get("u1") ?? []).toHaveLength(0);
+    expect(sendTextMessage).not.toHaveBeenCalled();
   });
 
   it("parallel cards support Pn= replies", async () => {
@@ -260,10 +273,57 @@ describe("card-bypass for slash commands", () => {
       pendingQuestions: Map<string, unknown[]>;
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    sendTextMessage.mockClear();
     await anyBridge.handleMessage(userTextMessage("/status"));
     expect(sendTextMessage).toHaveBeenCalled();
+    const statusText = sendTextMessage.mock.calls.map((c) => String(c[1])).join("\n");
+    expect(statusText).toContain("🔴 • 待处理: 1 张提问卡");
     expect(respondMock).not.toHaveBeenCalled();
     expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
+  });
+
+  it("/status lists both question and approval cards", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    anyBridge.handleMuxFrame(approvalFrame("a-rpc", "a-id", "pwsh"));
+    sendTextMessage.mockClear();
+    await anyBridge.handleMessage(userTextMessage("/status"));
+    const statusText = sendTextMessage.mock.calls.map((c) => String(c[1])).join("\n");
+    expect(statusText).toContain("🔴 • 待处理: 1 张提问卡 · 1 张权限卡");
+  });
+
+  it("/history resends the full pending question card after the empty-history notice", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+      pendingQuestions: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    sendTextMessage.mockClear();
+    await anyBridge.handleMessage(userTextMessage("/history"));
+    const texts = sendTextMessage.mock.calls.map((c) => String(c[1]));
+    expect(texts.some((t) => t.includes("暂无历史消息") || t.includes("最近"))).toBe(true);
+    expect(texts.some((t) => t.includes("待处理卡片"))).toBe(true);
+    expect(texts.some((t) => t.includes("Continue?"))).toBe(true);
+    expect(respondMock).not.toHaveBeenCalled();
+    expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
+  });
+
+  it("/history resends the full pending approval card", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleMessage(m: unknown): Promise<void>;
+      pendingApprovals: Map<string, unknown[]>;
+    };
+    anyBridge.handleMuxFrame(approvalFrame("a-rpc", "a-id", "pwsh"));
+    sendTextMessage.mockClear();
+    await anyBridge.handleMessage(userTextMessage("/history"));
+    const texts = sendTextMessage.mock.calls.map((c) => String(c[1]));
+    expect(texts.some((t) => t.includes("需要权限确认") || t.includes("pwsh"))).toBe(true);
+    expect(anyBridge.pendingApprovals.get("u1")?.length).toBe(1);
   });
 
   it("question card + /help shows help and leaves the card pending", async () => {

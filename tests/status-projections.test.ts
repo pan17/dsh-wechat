@@ -101,10 +101,6 @@ function makeBridge(opts: {
     userId: "u",
     savedAt: "",
   };
-  (bridge as unknown as { contextTokens: Map<string, string> }).contextTokens.set(
-    "u1",
-    "ctx-token",
-  );
   return bridge;
 }
 
@@ -380,6 +376,7 @@ describe("/status — session-level projection section (generic)", () => {
     expect(text.indexOf("• 当前会话 Preset:")).toBeLessThan(text.indexOf("• 模型:"));
     expect(text.indexOf("• 模型:")).toBeLessThan(text.indexOf("• 默认 Preset:"));
     expect(text.indexOf("• 默认 Preset:")).toBeLessThan(text.indexOf("• 静默模式:"));
+    expect(text).not.toContain("• 待处理:");
     // The new section appears AFTER the existing rows.
     expect(text.indexOf("• 静默模式:")).toBeLessThan(text.indexOf("── 会话级状态 ──"));
   });

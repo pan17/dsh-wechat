@@ -6,7 +6,7 @@
  *     (single-user deployments are the norm)
  *   - no known users at all → returns a clear error
  *   - WeChat not logged in → returns "WeChat is not logged in"
- *   - fallback user has no context token → returns "user has not messaged yet"
+ *   - invalid bot token → returns "WeChat bot token is invalid"
  *   - empty / unknown agentId → falls back gracefully (no throw)
  */
 
@@ -28,6 +28,7 @@ vi.mock("../src/weixin/send.js", () => ({
 vi.mock("../src/weixin/api.js", () => ({
   sendTyping: () => Promise.resolve(undefined),
   getConfig: () => Promise.resolve({ typing_ticket: "tk-default" }),
+  isSessionTimeoutError: () => false,
 }));
 
 import { WeChatDSHBridge } from "../src/bridge/bridge.js";
@@ -51,7 +52,9 @@ function makeBridge() {
   const bridge = new WeChatDSHBridge(ctx, cfg);
   return bridge as unknown as {
     token?: { baseUrl: string; token: string; accountId: string; userId: string; savedAt: string };
-    contextTokens: Map<string, string>;
+    tokenInvalid: boolean;
+    tokenGiveUp: boolean;
+    wireContextToken: string | null;
     state: {
       ensureUser(u: string, c: string): { userId: string; cwd: string; sessionId: string; silent: boolean };
       update(u: string, p: Partial<{ sessionId: string; silent: boolean; cwd: string; cwdExplicit?: boolean }>): void;
@@ -86,7 +89,7 @@ describe("send_wechat: bound session", () => {
     setLoggedIn(bridge);
     bridge.state.ensureUser("u1", "C:\\work");
     bridge.state.update("u1", { sessionId: "wx-s1" });
-    bridge.contextTokens.set("u1", "ctx-1");
+    bridge.wireContextToken = "ctx-1";
 
     const result = await bridge.handleSendWeChat("wx-s1", { text: "hello" });
     expect(result).toEqual({ ok: true, message: "sent 1 message(s)" });
@@ -99,7 +102,7 @@ describe("send_wechat: bound session", () => {
     setLoggedIn(bridge);
     bridge.state.ensureUser("u1", "C:\\work");
     bridge.state.update("u1", { sessionId: "wx-s1" });
-    bridge.contextTokens.set("u1", "ctx-1");
+    bridge.wireContextToken = "ctx-1";
 
     const tmpFile = path.join(os.tmpdir(), `send-wechat-${Date.now()}.txt`);
     fs.writeFileSync(tmpFile, "payload");
@@ -127,7 +130,7 @@ describe("send_wechat: unbound session falls back to first known user", () => {
     // ensureUser call also seeds sessionId: "". We set it explicitly to ""
     // and verify the tool still resolves to u1.
     bridge.state.update("u1", { sessionId: "" });
-    bridge.contextTokens.set("u1", "ctx-1");
+    bridge.wireContextToken = "ctx-1";
 
     // Calling from an entirely different (GUI) session — never bound.
     const result = await bridge.handleSendWeChat("gui-session-xyz", { text: "ping" });
@@ -143,8 +146,7 @@ describe("send_wechat: unbound session falls back to first known user", () => {
     bridge.state.update("u1", { sessionId: "wx-s1" });
     bridge.state.ensureUser("u2", "C:\\work");
     bridge.state.update("u2", { sessionId: "wx-s2" });
-    bridge.contextTokens.set("u1", "ctx-1");
-    bridge.contextTokens.set("u2", "ctx-2");
+    bridge.wireContextToken = "ctx-1";
 
     // Calling from a session bound to NOTHING → fallback should pick u1.
     const result = await bridge.handleSendWeChat("gui-session-xyz", { text: "ping" });
@@ -156,7 +158,7 @@ describe("send_wechat: unbound session falls back to first known user", () => {
     const bridge = makeBridge();
     setLoggedIn(bridge);
     bridge.state.ensureUser("u1", "C:\\work");
-    bridge.contextTokens.set("u1", "ctx-1");
+    bridge.wireContextToken = "ctx-1";
 
     const result = await bridge.handleSendWeChat("", { text: "hi" });
     expect(result.ok).toBe(true);
@@ -183,22 +185,32 @@ describe("send_wechat: error paths (regression)", () => {
     const bridge = makeBridge();
     // No setLoggedIn — token stays undefined.
     bridge.state.ensureUser("u1", "C:\\work");
-    bridge.contextTokens.set("u1", "ctx-1");
 
     const result = await bridge.handleSendWeChat("wx-s1", { text: "hi" });
     expect(result).toEqual({ ok: false, message: "WeChat is not logged in" });
     expect(sendTextMessage).not.toHaveBeenCalled();
   });
 
-  it("returns 'user has not messaged yet' when fallback user has no context token", async () => {
+  it("queues text while -14 is recovering", async () => {
     const bridge = makeBridge();
     setLoggedIn(bridge);
+    bridge.tokenInvalid = true;
     bridge.state.ensureUser("u1", "C:\\work");
-    // No contextTokens.set — token is missing for the fallback user.
 
     const result = await bridge.handleSendWeChat("gui-session-xyz", { text: "hi" });
-    expect(result.ok).toBe(false);
-    expect(result.message).toMatch(/user has not messaged yet/i);
+    expect(result.ok).toBe(true);
+    expect(result.message).toMatch(/queued/i);
+    expect(sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns invalid-token after -14 recovery gives up", async () => {
+    const bridge = makeBridge();
+    setLoggedIn(bridge);
+    bridge.tokenGiveUp = true;
+    bridge.state.ensureUser("u1", "C:\\work");
+
+    const result = await bridge.handleSendWeChat("gui-session-xyz", { text: "hi" });
+    expect(result).toEqual({ ok: false, message: "WeChat bot token is invalid; re-scan the QR code" });
     expect(sendTextMessage).not.toHaveBeenCalled();
   });
 
@@ -206,7 +218,6 @@ describe("send_wechat: error paths (regression)", () => {
     const bridge = makeBridge();
     setLoggedIn(bridge);
     bridge.state.ensureUser("u1", "C:\\work");
-    bridge.contextTokens.set("u1", "ctx-1");
 
     const result = await bridge.handleSendWeChat("wx-s1", {});
     expect(result).toEqual({ ok: false, message: "provide either text or file_path" });
@@ -238,7 +249,6 @@ describe("send_wechat: shared gateway budget & cache", () => {
     setLoggedIn(bridge);
     bridge.state.ensureUser("u1", "C:\\work");
     bridge.state.update("u1", { sessionId: "wx-s1" });
-    bridge.contextTokens.set("u1", "ctx-1");
     return bridge;
   }
 

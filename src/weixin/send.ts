@@ -32,10 +32,6 @@ export async function sendTextMessage(
   text: string,
   opts: WeixinSendOpts,
 ): Promise<string> {
-  if (!opts.contextToken) {
-    throw new Error("contextToken is required to send a message");
-  }
-
   const clientId = `wechat-acp-${crypto.randomUUID()}`;
   await sendMessage({
     baseUrl: opts.baseUrl,
@@ -48,7 +44,7 @@ export async function sendTextMessage(
         client_id: clientId,
         message_type: MessageType.BOT,
         message_state: MessageState.FINISH,
-        context_token: opts.contextToken,
+        ...(opts.contextToken ? { context_token: opts.contextToken } : {}),
         item_list: [{ type: 1, text_item: { text } }],
       },
     },
@@ -79,10 +75,6 @@ export async function sendMediaMessage(
   buffer: Buffer,
   opts: SendMediaOpts,
 ): Promise<string> {
-  if (!opts.contextToken) {
-    throw new Error("contextToken is required to send a media message");
-  }
-
   const clientId = crypto.randomBytes(16).toString("hex"); // 32-char hex, like openclaw-weixin
   const rawSize = buffer.length;
   const rawMd5 = crypto.createHash("md5").update(buffer).digest("hex");
@@ -216,7 +208,7 @@ export async function sendMediaMessage(
         client_id: clientId,
         message_type: MessageType.BOT,
         message_state: MessageState.FINISH,
-        context_token: opts.contextToken,
+        ...(opts.contextToken ? { context_token: opts.contextToken } : {}),
         item_list: itemList,
       },
     },

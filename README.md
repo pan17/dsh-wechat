@@ -29,6 +29,7 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 - **二维码登录** — `http://127.0.0.1:3080/wechat/qr` 扫码登录，设置页内嵌
 - **设置页 UI** — DSH 设置 → **WeChat**：单卡展示状态、扫码、重连、退出登录、连接配置与通知/静默开关（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
 - **断点续传** — `sync-buf` 与微信会话映射持久化，重启 DSH 后自动恢复会话
+- **单用户** — 只服务第一个微信用户；bot token 缺失/失效时不向微信推送，日志会写明原因（需重新扫码或等会话恢复）
 
 ## 安装（部署到 DSH profile）
 
@@ -94,7 +95,7 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 | 命令 | 说明 |
 |---|---|
 | `/help`（`/h`、`/?`） | 帮助 |
-| `/status` | 当前状态：工作区、会话、Agent、当前会话 Preset、模型、上下文、权限、默认 Preset、静默、繁忙投递、跨会话通知；末尾追加 DSH 通过 `ctx.sessionProjections` 注册的所有会话级状态，分四段显示——`[模式]`（plan / goal / subagent / todos）、`[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类）；DSH 加新 plugin 自动出现 |
+| `/status` | 当前状态：工作区、会话、Agent、待处理提问/权限卡、当前会话 Preset、模型、上下文、权限、默认 Preset、静默、繁忙投递、跨会话通知；末尾追加 DSH 通过 `ctx.sessionProjections` 注册的所有会话级状态，分四段显示——`[模式]`（plan / goal / subagent / todos）、`[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类）；DSH 加新 plugin 自动出现 |
 | `/workspace (ws) — list \| status \| switch <编号\|路径> \| add <路径>` | 工作区管理（list 显示各工作区会话数，不含已归档；switch/add 回复会写明恢复的会话名字和完整 id，跳过已归档；该目录无可见会话时提示发送消息将创建） |
 | `/session (s) — list [current] \| switch <编号> \| new \| status` | 会话管理（list 最近 20 个，标记当前，不显示 GUI 已归档会话；`current` 只看当前工作目录；switch 回复同时带会话名字和完整 id；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建） |
 | `/preset (p) — list \| switch <名称\|编号> \| status` | 默认 Preset（写入 DSH 设置，与 GUI 同步；`status` 看全局默认，不是当前会话；当前会话无内容时 `switch` 立即应用） |
@@ -104,7 +105,7 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 | `/enter queue\|steer\|status`（`/busy`） | 繁忙时投递：agent 运行中收到微信消息时排队（`queue`）还是插话进当前轮次（`steer`）；读写 DSH 设置 `ui-conversation.busyEnter`，与 GUI「繁忙时 Enter 键行为」同源同步；空闲会话始终新开一轮 |
 | `/silent on\|off`（`/sl`） | 静默模式：开启后 agent 每轮的中间过程输出（工具调用、思考等）不再逐条推送，只在轮次结束时发送最终回复，避免刷屏；跨重启持久化，设置页可切换 |
 | `/notify on\|off\|status`（`/watch`） | 跨会话通知：后台会话的已完成/报错/卡片提醒，默认关闭（单用户单闸，设置页可切换） |
-| `/history [数量]` | 查看最近历史消息（默认 5 条，最多 20 条） |
+| `/history [数量]` | 查看最近历史消息（默认 5 条，最多 20 条）；当前会话有未回答的提问/权限卡时会完整重发，可直接回复 |
 | `/stop` | 中断当前任务 |
 | `/next` | 继续发送因微信限制被缓存的消息 |
 | `/rp` / `/rq` | 拒绝所有待处理权限卡 / 提问卡（微信端） |
@@ -178,7 +179,7 @@ reconnect|logout`），客户端零 `@deepseek-ai` 依赖。
 ```bash
 npm install
 npm run build    # tsc → dist/
-npm test         # vitest（64 个用例：splitText/格式化/解析/帧处理/状态存储/命令解析）
+npm test         # vitest（317 个用例：splitText/格式化/解析/帧处理/状态存储/命令解析/超时恢复/状态颜色/历史截断）
 ```
 
 ## 已知边界
