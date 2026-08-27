@@ -2,7 +2,7 @@
  * DSH feed lifecycle (issue #2 supplementary):
  *   - session/event session-id extraction
  *   - attachMux is a single loop (HMR / double inject must not dual-open)
- *   - WeChat reconnect/logout must NOT abort mux
+ *   - WeChat logout / gateway restart must NOT abort mux
  *   - plugin stop() does abort mux
  */
 
@@ -97,7 +97,7 @@ describe("mux loop lifecycle", () => {
     await bridge.stop();
   });
 
-  it("reconnect does not abort the mux stream", async () => {
+  it("gateway restart (internal reconnect) does not abort the mux stream", async () => {
     const bridge = makeBridge();
     const { mux, getCalls } = hangingMux();
     const api: ApiProxySurface = { respond: vi.fn() as never, events: { mux } };

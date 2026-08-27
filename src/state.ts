@@ -225,4 +225,14 @@ export class StateStore {
   all(): UserState[] {
     return Object.values(this.state.users);
   }
+
+  /**
+   * Drop every persisted WeChat user. Logout / re-login must not keep the
+   * previous single-user peer, or a newly scanned account is ignored.
+   */
+  clearUsers(): void {
+    if (Object.keys(this.state.users).length === 0) return;
+    this.state.users = {};
+    this.save();
+  }
 }

@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-27
+
+### Changed
+
+- 设置页去掉「重连」按钮，并移除 `/wechat/api/reconnect`。重新扫码已经覆盖换号/重新登录；保存网关配置后仍会在内部重启长轮询。
+
+### Fixed
+
+- 退出登录 / 重新扫码不再继续锁定上一个微信用户：会清空内存里的 single-user peer、`state.json` 用户表和旧 bot 的 `sync-buf.json`。换微信扫码后，新号的入站不再被记成 `ignore inbound … (single-user peer is <旧号>)`。无 token 启动时同样释放旧绑定；保存网关配置触发的内部重连仍保留当前用户。
+
 ## [0.7.1] - 2026-08-27
 
 ### Fixed

@@ -27,7 +27,7 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 - **繁忙时投递（与 DSH 同源）** — 按 `busyEnter` 排队/插话；微信 `/enter` 同步
 - **跨会话通知** — 后台会话的已完成/报错/卡片通过微信提醒，`/notify on|off|status` 切换，默认关闭（单用户单闸）
 - **二维码登录** — `http://127.0.0.1:3080/wechat/qr` 扫码登录，设置页内嵌
-- **设置页 UI** — DSH 设置 → **WeChat**：单卡展示状态、扫码、重连、退出登录、连接配置与通知/静默开关（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
+- **设置页 UI** — DSH 设置 → **WeChat**：单卡展示状态、扫码、退出登录、连接配置与通知/静默开关（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
 - **断点续传** — `sync-buf` 与微信会话映射持久化，重启 DSH 后自动恢复会话
 - **单用户** — 只服务第一个微信用户；bot token 缺失/失效时不向微信推送，日志会写明原因（需重新扫码或等会话恢复）
 
@@ -46,7 +46,7 @@ npx @deepseek-ai/dsh plugin --profile <profile> add dsh-wechat
 npx @deepseek-ai/dsh --profile <profile> --dump-config   # 应看到 "- id: dsh-wechat" 行
 
 # 重启 DSH（必须），然后：
-#   - 浏览器打开 设置 → WeChat：扫码登录、查看状态、重连、改配置
+#   - 浏览器打开 设置 → WeChat：扫码登录、查看状态、改配置
 #   - 或直接打开 http://127.0.0.1:3080/wechat/qr 扫码
 ```
 
@@ -142,14 +142,13 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 - **状态卡** — 登录阶段（未登录/等待扫码/已扫码，待确认/已登录/登录失败）、Bot ID、
   监控运行状态、已绑定用户数，与 `跨会话通知` / `静默` 开关同卡展示
 - **扫码** — 未登录时页面内直接显示二维码，扫码确认后自动进入已登录
-- **操作按钮** — `重新扫码`（清除 token 重新登录）、`重连`（重启长轮询
-  监控，token 失效时自动回到扫码）、`退出登录`，与保存配置同行
+- **操作按钮** — `重新扫码`（清除 token 重新登录）、`退出登录`，与保存配置同行
 - **连接配置** — baseUrl / cdnBaseUrl / botType / cwd /
   textChunkLimit / cardTimeoutMs / 跨会话通知（全局）/ 静默；保存即生效，
-  网关参数变更自动重连；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
+  网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
 
 与宿主通信走插件自己的 HTTP API（`/wechat/api/status|config|relogin|
-reconnect|logout`），客户端零 `@deepseek-ai` 依赖。
+logout`），客户端零 `@deepseek-ai` 依赖。
 
 ## 配置
 
@@ -187,7 +186,7 @@ npm test         # vitest（317 个用例：splitText/格式化/解析/帧处理
 - 帧流 `events.mux`/`respond` 是 ApiProxy 正式契约；若 DSH 版本调整帧
   结构，按契约适配即可。
 - `send_wechat` 工具对所有 agent 可见；任何会话的 agent 都能调用——绑定会话发送到绑定用户，未绑定会话回退到首个已知微信用户（单用户部署默认行为）。
-  单用户模式下，工具推送与 assistant 回复共享唯一一份微信 10 条/窗口限流预算：超限或发送失败自动进入 `/next` FIFO 缓存队列。计数和队列持久化到 `state.json`，普通 DSH 更新、重启或重连后继续沿用；下一条微信入站会重置窗口并自动补发。微信真实限流响应（HTTP 200 + `ret: -2` / `prepare failed`）也会被识别并缓存，不再误判成功。
+  单用户模式下，工具推送与 assistant 回复共享唯一一份微信 10 条/窗口限流预算：超限或发送失败自动进入 `/next` FIFO 缓存队列。计数和队列持久化到 `state.json`，普通 DSH 更新或重启后继续沿用；下一条微信入站会重置窗口并自动补发。微信真实限流响应（HTTP 200 + `ret: -2` / `prepare failed`）也会被识别并缓存，不再误判成功。
 - `/preset switch` 遵循 DSH 约束：只有未产生任何内容的会话才能当场
   `recompose`；已有内容的会话会提示 Preset 应用于下一个新会话。默认
   Preset 本身写入 DSH 设置文档（`agent-presets` namespace），GUI 设置

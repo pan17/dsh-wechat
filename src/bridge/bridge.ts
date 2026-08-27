@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { login, loadToken, type TokenData } from "../weixin/auth.js";
-import { startMonitor } from "../weixin/monitor.js";
+import { startMonitor, clearSyncBuf } from "../weixin/monitor.js";
 import { sendTextMessage, sendMediaMessage, splitText } from "../weixin/send.js";
 import {
   sendTyping as apiSendTyping,
@@ -761,11 +761,13 @@ export class WeChatDSHBridge {
     this.token = loadToken(this.config.storageDir);
     this.tokenInvalid = false;
     this.tokenGiveUp = false;
-    this.lockPeerFromState();
     if (this.token) {
+      this.lockPeerFromState();
       this.loginState = { phase: "logged-in", botId: this.token.accountId };
       await this.startMonitor();
     } else {
+      // No bot token: the next QR login may be a different WeChat account.
+      this.resetPeerBinding("start-without-token");
       void this.startLoginFlow();
     }
   }
@@ -797,21 +799,22 @@ export class WeChatDSHBridge {
   }
 
   /**
-   * Restart the monitor with the current token (or begin QR login when no
-   * token exists). Used by the settings page "重连" button and after
-   * config changes that affect the gateway connection.
+   * Restart the iLink long-poll with the current token (or begin QR login
+   * when no token exists). Used after gateway config changes, not as a
+   * user-facing "reconnect" action — that duplicated 重新扫码.
    */
   async reconnect(): Promise<{ ok: boolean; message: string }> {
     this.stopIlink("reconnect");
     this.token = loadToken(this.config.storageDir);
     this.tokenInvalid = false;
     this.tokenGiveUp = false;
-    this.lockPeerFromState();
     if (this.token) {
+      this.lockPeerFromState();
       this.loginState = { phase: "logged-in", botId: this.token.accountId };
       await this.startMonitor();
       return { ok: true, message: `已重连 (Bot: ${this.token.accountId})` };
     }
+    this.resetPeerBinding("reconnect-without-token");
     void this.startLoginFlow();
     return { ok: true, message: "未找到登录令牌，已开始扫码登录" };
   }
@@ -827,6 +830,7 @@ export class WeChatDSHBridge {
     this.tokenGiveUp = false;
     this.loginState = { phase: "idle" };
     this.discardQueuedOutbound("relogin");
+    this.resetPeerBinding("relogin");
     void this.startLoginFlow();
     return { ok: true, message: "已开始重新扫码登录" };
   }
@@ -840,7 +844,38 @@ export class WeChatDSHBridge {
     this.tokenGiveUp = false;
     this.loginState = { phase: "idle" };
     this.discardQueuedOutbound("logout");
+    this.resetPeerBinding("logout");
     return { ok: true, message: "已退出登录" };
+  }
+
+  /**
+   * A new QR login is a new bot session. Forget the previous WeChat peer
+   * (memory + `state.json`) and the old long-poll cursor, otherwise the
+   * first inbound from a different account is dropped as
+   * `ignore inbound … (single-user peer is <old>)`.
+   */
+  private resetPeerBinding(reason: string): void {
+    const previous = this.peerUserId ?? this.state.all()[0]?.userId;
+    this.peerUserId = null;
+    this.wireContextToken = null;
+    this.typingTickets.clear();
+    this.pendingQuestions.clear();
+    this.pendingApprovals.clear();
+    this.notifiedCardSessions.clear();
+    this.notifiedCrossSessionTurns.clear();
+    try {
+      this.state.clearUsers();
+    } catch (err) {
+      this.log(`failed to clear persisted users on ${reason}: ${String(err)}`);
+    }
+    try {
+      clearSyncBuf(this.config.storageDir);
+    } catch (err) {
+      this.log(`failed to clear sync buf on ${reason}: ${String(err)}`);
+    }
+    if (previous) {
+      this.log(`reset single-user peer ${previous} on ${reason}; next inbound WeChat user becomes the peer`);
+    }
   }
 
   /**

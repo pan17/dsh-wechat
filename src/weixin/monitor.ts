@@ -75,6 +75,16 @@ function saveSyncBuf(storageDir: string, buf: string): void {
   fs.writeFileSync(getSyncBufPath(storageDir), JSON.stringify({ get_updates_buf: buf }), "utf-8");
 }
 
+/** Drop the long-poll cursor so a new bot session does not resume the old one. */
+export function clearSyncBuf(storageDir: string): void {
+  const p = getSyncBufPath(storageDir);
+  try {
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  } catch {
+    // best effort
+  }
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error("aborted")); return; }

@@ -326,14 +326,6 @@ if (typeof context.inject === "function") {
       });
       webServer.register({
         kind: "exact",
-        path: "/wechat/api/reconnect",
-        handler: async (_req, res) => {
-          const result = await bridge.reconnect();
-          sendJson(res, 200, { ok: result.ok, message: result.message });
-        },
-      });
-      webServer.register({
-        kind: "exact",
         path: "/wechat/api/logout",
         handler: async (_req, res) => {
           const result = await bridge.logout();

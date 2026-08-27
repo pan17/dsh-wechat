@@ -275,6 +275,20 @@ describe("StateStore", () => {
     }
   });
 
+  it("clearUsers drops every persisted WeChat user", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
+    try {
+      const store = new StateStore(dir);
+      store.ensureUser("u1", "C:\\work");
+      store.update("u1", { sessionId: "wx-123" });
+      store.clearUsers();
+      expect(store.all()).toEqual([]);
+      expect(new StateStore(dir).all()).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("legacy state without outbound starts with an empty outbound snapshot", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
     try {

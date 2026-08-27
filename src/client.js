@@ -110,7 +110,7 @@ window.__ModuleLoader__.load({
 					// Polling below only ever calls setStatus; user edits stay
 					// locally until Save, and are only re-synced when the user
 					// refreshes the page or after a successful save/relogin/
-					// reconnect/logout (which all call refresh() explicitly).
+					// logout (which all call refresh() explicitly).
 					setForm((prev) => prev ?? {
 						baseUrl: r.body.config?.baseUrl ?? "",
 						cdnBaseUrl: r.body.config?.cdnBaseUrl ?? "",
@@ -280,7 +280,6 @@ window.__ModuleLoader__.load({
 						createElement("button", { className: "wx_btn primary", onClick: saveConfig, disabled: busy !== "" || !form }, busy === "config" ? "…" : "保存配置"),
 						createElement("div", { style: { marginLeft: "auto", display: "flex", gap: "8px" } },
 							createElement("button", { className: "wx_btn", onClick: () => run("/relogin"), disabled: busy !== "" }, busy === "/relogin" ? "…" : "重新扫码"),
-							createElement("button", { className: "wx_btn", onClick: () => run("/reconnect"), disabled: busy !== "" }, busy === "/reconnect" ? "…" : "重连"),
 							createElement("button", { className: "wx_btn danger", onClick: () => { if (confirm("确定退出微信登录？")) run("/logout"); }, disabled: busy !== "" }, busy === "/logout" ? "…" : "退出登录"),
 						),
 					),
