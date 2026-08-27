@@ -103,13 +103,13 @@ describe("bot token missing: drop outbound, do not park", () => {
     const anyBridge = bridge as unknown as {
       state: { ensureUser(u: string, c: string): UserState; update(u: string, p: unknown): void };
       handleSessionEvent(s: string, e: unknown): void;
-      outboundCache: Map<string, Array<{ kind: string; text?: string }>>;
+      outboundCache: Array<{ kind: string; text?: string }>;
     };
     bindUser(anyBridge.state, "wx-s1");
 
     anyBridge.handleSessionEvent("wx-s1", assistantEvent("离线期间生成的回复"));
     expect(sendTextMessage).not.toHaveBeenCalled();
-    expect(anyBridge.outboundCache.get("u1") ?? []).toHaveLength(0);
+    expect(anyBridge.outboundCache).toHaveLength(0);
     expect(logs.some((l) => l.includes("drop outbound (bot token missing)"))).toBe(true);
   });
 
@@ -119,7 +119,7 @@ describe("bot token missing: drop outbound, do not park", () => {
     const anyBridge = bridge as unknown as {
       state: { ensureUser(u: string, c: string): UserState; update(u: string, p: unknown): void };
       parkOutbound(userId: string, item: { kind: "text"; text: string }): void;
-      outboundCache: Map<string, Array<{ kind: string; text?: string }>>;
+      outboundCache: Array<{ kind: string; text?: string }>;
       silentBuffers: Map<string, string[]>;
       logout(): Promise<{ ok: boolean; message: string }>;
       handleMessage(m: unknown): Promise<void>;
@@ -129,7 +129,7 @@ describe("bot token missing: drop outbound, do not park", () => {
     anyBridge.silentBuffers.set("wx-s1", ["静默缓冲"]);
 
     await anyBridge.logout();
-    expect(anyBridge.outboundCache.size).toBe(0);
+    expect(anyBridge.outboundCache.length).toBe(0);
     expect(anyBridge.silentBuffers.size).toBe(0);
 
     sendTextMessage.mockClear();
@@ -162,7 +162,7 @@ describe("-14 park then flush on recover", () => {
     const anyBridge = bridge as unknown as {
       state: { ensureUser(u: string, c: string): UserState; update(u: string, p: unknown): void };
       handleSessionEvent(s: string, e: unknown): void;
-      outboundCache: Map<string, Array<{ kind: string; text?: string }>>;
+      outboundCache: Array<{ kind: string; text?: string }>;
       tokenInvalid: boolean;
       markTokenRecovered(): void;
     };
@@ -170,14 +170,15 @@ describe("-14 park then flush on recover", () => {
     anyBridge.tokenInvalid = true;
 
     anyBridge.handleSessionEvent("wx-s1", assistantEvent("-14 期间的回复"));
+    await new Promise((r) => setImmediate(r));
     expect(sendTextMessage).not.toHaveBeenCalled();
-    expect(anyBridge.outboundCache.get("u1")?.[0]?.text).toContain("-14 期间的回复");
+    expect(anyBridge.outboundCache[0]?.text).toContain("-14 期间的回复");
 
     anyBridge.markTokenRecovered();
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
     expect(sendTextMessage.mock.calls.some((c) => String(c[1]).includes("-14 期间的回复"))).toBe(true);
-    expect(anyBridge.outboundCache.get("u1") ?? []).toHaveLength(0);
+    expect(anyBridge.outboundCache).toHaveLength(0);
   });
 
   it("give-up discards parked items instead of flushing later", async () => {
@@ -186,7 +187,7 @@ describe("-14 park then flush on recover", () => {
     const anyBridge = bridge as unknown as {
       state: { ensureUser(u: string, c: string): UserState; update(u: string, p: unknown): void };
       handleSessionEvent(s: string, e: unknown): void;
-      outboundCache: Map<string, Array<{ kind: string; text?: string }>>;
+      outboundCache: Array<{ kind: string; text?: string }>;
       tokenInvalid: boolean;
       markTokenGiveUp(): void;
       markTokenRecovered(): void;
@@ -194,10 +195,11 @@ describe("-14 park then flush on recover", () => {
     bindUser(anyBridge.state, "wx-s1");
     anyBridge.tokenInvalid = true;
     anyBridge.handleSessionEvent("wx-s1", assistantEvent("等恢复的回复"));
-    expect(anyBridge.outboundCache.get("u1")).toHaveLength(1);
+    await new Promise((r) => setImmediate(r));
+    expect(anyBridge.outboundCache).toHaveLength(1);
 
     anyBridge.markTokenGiveUp();
-    expect(anyBridge.outboundCache.size).toBe(0);
+    expect(anyBridge.outboundCache.length).toBe(0);
 
     sendTextMessage.mockClear();
     anyBridge.markTokenRecovered();
@@ -211,7 +213,7 @@ describe("bot token present: send even without a wire context_token", () => {
     vi.clearAllMocks();
   });
 
-  it("assistant/message attempts sendTextMessage", () => {
+  it("assistant/message attempts sendTextMessage", async () => {
     const mock = makeMockAgent("wx-s1");
     const { bridge } = makeBridge(mock, true);
     const anyBridge = bridge as unknown as {
@@ -221,6 +223,7 @@ describe("bot token present: send even without a wire context_token", () => {
     bindUser(anyBridge.state, "wx-s1");
 
     anyBridge.handleSessionEvent("wx-s1", assistantEvent("重启后的回复"));
+    await new Promise((r) => setImmediate(r));
     expect(sendTextMessage).toHaveBeenCalledTimes(1);
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
     expect(text).toContain("重启后的回复");
@@ -237,12 +240,12 @@ describe("outbound cache cap", () => {
     const { bridge } = makeBridge(mock, true);
     const anyBridge = bridge as unknown as {
       parkOutbound(userId: string, item: { kind: "text"; text: string }): void;
-      outboundCache: Map<string, Array<{ kind: string; text?: string }>>;
+      outboundCache: Array<{ kind: string; text?: string }>;
     };
     for (let i = 0; i < 105; i++) {
       anyBridge.parkOutbound("u1", { kind: "text", text: `msg-${i}` });
     }
-    const cache = anyBridge.outboundCache.get("u1")!;
+    const cache = anyBridge.outboundCache!;
     expect(cache).toHaveLength(100);
     expect(cache[0]!.text).toBe("msg-5");
     expect(cache[cache.length - 1]!.text).toBe("msg-104");

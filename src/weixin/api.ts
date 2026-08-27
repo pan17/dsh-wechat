@@ -10,6 +10,7 @@ import type {
   BaseInfo,
   GetUpdatesResp,
   SendMessageReq,
+  SendMessageResp,
   GetUploadUrlReq,
   GetUploadUrlResp,
   SendTypingReq,
@@ -33,6 +34,50 @@ export class SessionTimeoutError extends Error {
   constructor(message = "session timeout") {
     super(message);
     this.name = "SessionTimeoutError";
+  }
+}
+
+/** A parseable iLink business rejection returned inside an HTTP 200 body. */
+export class IlinkApiError extends Error {
+  readonly code = "ILINK_API_ERROR";
+
+  constructor(
+    readonly endpoint: string,
+    readonly ret: number | undefined,
+    readonly errcode: number | undefined,
+    readonly errmsg: string | undefined,
+  ) {
+    const status = ret !== undefined ? `ret=${ret}` : `errcode=${errcode}`;
+    super(`${endpoint}: ${status}${errmsg ? ` ${errmsg}` : ""}`);
+    this.name = "IlinkApiError";
+  }
+}
+
+/**
+ * True for the real continuous-send-limit response observed from iLink:
+ * HTTP 200 + { ret: -2, errmsg: "prepare failed" }.
+ */
+export function isMessageLimitError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const value = err as { name?: unknown; ret?: unknown; errcode?: unknown; errmsg?: unknown };
+  return (
+    value.name === "IlinkApiError" &&
+    (value.ret === -2 || value.errcode === -2) &&
+    typeof value.errmsg === "string" &&
+    value.errmsg.trim().toLowerCase() === "prepare failed"
+  );
+}
+
+/** Validate only sendmessage business status; other endpoints keep their own contracts. */
+function assertSendMessageAccepted(resp: SendMessageResp): void {
+  if (isSessionTimeoutApiBody(resp)) {
+    throw new SessionTimeoutError(resp.errmsg || "session timeout");
+  }
+  const rejected =
+    (typeof resp.ret === "number" && resp.ret !== 0) ||
+    (typeof resp.errcode === "number" && resp.errcode !== 0);
+  if (rejected) {
+    throw new IlinkApiError("ilink/bot/sendmessage", resp.ret, resp.errcode, resp.errmsg);
   }
 }
 
@@ -252,7 +297,7 @@ export async function sendMessage(params: {
   body: SendMessageReq;
   retries?: number;
 }): Promise<void> {
-  await apiPost(
+  const resp = await apiPost<SendMessageResp>(
     params.baseUrl,
     "ilink/bot/sendmessage",
     params.body as unknown as Record<string, unknown>,
@@ -260,6 +305,7 @@ export async function sendMessage(params: {
     undefined,
     { retries: params.retries ?? 2 },
   );
+  assertSendMessageAccepted(resp);
 }
 
 export async function getUploadUrl(params: {

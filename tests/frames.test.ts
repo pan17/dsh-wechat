@@ -77,7 +77,7 @@ describe("frame-driven approval cards", () => {
   it("approval/requested frame registers a card and respond() injects the decision", async () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
-      pendingApprovals: Map<string, unknown[]>;
+      pendingApprovals: unknown[];
       handleApprovalReply(u: string, t: string): Promise<void>;
     };
     anyBridge.handleMuxFrame(approvalFrame("rpc-1", "a-1", "pwsh", { reason: "run command" }));
@@ -121,7 +121,7 @@ describe("frame-driven approval cards", () => {
   it("approval/resolved frame removes the card", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
-      pendingApprovals: Map<string, unknown[]>;
+      pendingApprovals: unknown[];
     };
     anyBridge.handleMuxFrame(approvalFrame("rpc-4", "a-4", "pwsh"));
     expect(anyBridge.pendingApprovals.get("u1")?.length).toBe(1);
@@ -139,12 +139,12 @@ describe("frame-driven approval cards", () => {
     (loggedOut as unknown as { token: unknown }).token = null;
     const anyBridge = loggedOut as unknown as {
       handleMuxFrame(f: unknown): void;
-      pendingApprovals: Map<string, unknown[]>;
-      outboundCache: Map<string, unknown[]>;
+      pendingApprovals: unknown[];
+      outboundCache: unknown[];
     };
     anyBridge.handleMuxFrame(approvalFrame("rpc-offline", "a-off", "pwsh"));
     expect(anyBridge.pendingApprovals.get("u1")?.length).toBe(1);
-    expect(anyBridge.outboundCache.get("u1") ?? []).toHaveLength(0);
+    expect(anyBridge.outboundCache).toHaveLength(0);
     expect(sendTextMessage).not.toHaveBeenCalled();
   });
 
@@ -238,11 +238,11 @@ describe("card-bypass for slash commands", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
-      outboundCache: Map<string, unknown[]>;
-      pendingQuestions: Map<string, unknown[]>;
+      outboundCache: unknown[];
+      pendingQuestions: unknown[];
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
-    anyBridge.outboundCache.set("u1", [{ kind: "text", text: "cached" }]);
+    anyBridge.outboundCache = [{ kind: "text", text: "cached" }];
     await anyBridge.handleMessage(userTextMessage("/next"));
     // /next flushed the cache to WeChat.
     expect(sendTextMessage).toHaveBeenCalled();
@@ -255,11 +255,11 @@ describe("card-bypass for slash commands", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
-      outboundCache: Map<string, unknown[]>;
-      pendingApprovals: Map<string, unknown[]>;
+      outboundCache: unknown[];
+      pendingApprovals: unknown[];
     };
     anyBridge.handleMuxFrame(approvalFrame("a-rpc", "a-id", "pwsh"));
-    anyBridge.outboundCache.set("u1", [{ kind: "text", text: "cached" }]);
+    anyBridge.outboundCache = [{ kind: "text", text: "cached" }];
     await anyBridge.handleMessage(userTextMessage("/next"));
     expect(sendTextMessage).toHaveBeenCalled();
     expect(respondMock).not.toHaveBeenCalled();
@@ -270,7 +270,7 @@ describe("card-bypass for slash commands", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
-      pendingQuestions: Map<string, unknown[]>;
+      pendingQuestions: unknown[];
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
     sendTextMessage.mockClear();
@@ -299,7 +299,7 @@ describe("card-bypass for slash commands", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
-      pendingQuestions: Map<string, unknown[]>;
+      pendingQuestions: unknown[];
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
     sendTextMessage.mockClear();
@@ -316,7 +316,7 @@ describe("card-bypass for slash commands", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
-      pendingApprovals: Map<string, unknown[]>;
+      pendingApprovals: unknown[];
     };
     anyBridge.handleMuxFrame(approvalFrame("a-rpc", "a-id", "pwsh"));
     sendTextMessage.mockClear();
@@ -330,7 +330,7 @@ describe("card-bypass for slash commands", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
-      pendingQuestions: Map<string, unknown[]>;
+      pendingQuestions: unknown[];
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
     await anyBridge.handleMessage(userTextMessage("/help"));
@@ -344,7 +344,7 @@ describe("card-bypass for slash commands", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
-      pendingQuestions: Map<string, unknown[]>;
+      pendingQuestions: unknown[];
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
     await anyBridge.handleMessage(userTextMessage("/rq"));
@@ -356,7 +356,7 @@ describe("card-bypass for slash commands", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
-      pendingApprovals: Map<string, unknown[]>;
+      pendingApprovals: unknown[];
     };
     anyBridge.handleMuxFrame(approvalFrame("a-rpc", "a-id", "pwsh"));
     await anyBridge.handleMessage(userTextMessage("/rp"));
@@ -368,7 +368,7 @@ describe("card-bypass for slash commands", () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
-      pendingQuestions: Map<string, unknown[]>;
+      pendingQuestions: unknown[];
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
     await anyBridge.handleMessage(userTextMessage("1"));

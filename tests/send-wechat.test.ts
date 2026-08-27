@@ -17,6 +17,7 @@ import fs from "node:fs";
 
 const sendTextMessage = vi.fn().mockResolvedValue(undefined);
 const sendMediaMessage = vi.fn().mockResolvedValue(undefined);
+const isMessageLimitError = vi.fn().mockReturnValue(false);
 
 vi.mock("../src/weixin/send.js", () => ({
   sendTextMessage: (...args: unknown[]) => sendTextMessage(...args),
@@ -29,6 +30,7 @@ vi.mock("../src/weixin/api.js", () => ({
   sendTyping: () => Promise.resolve(undefined),
   getConfig: () => Promise.resolve({ typing_ticket: "tk-default" }),
   isSessionTimeoutError: () => false,
+  isMessageLimitError: (err: unknown) => isMessageLimitError(err),
 }));
 
 import { WeChatDSHBridge } from "../src/bridge/bridge.js";
@@ -81,6 +83,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   sendTextMessage.mockResolvedValue(undefined);
   sendMediaMessage.mockResolvedValue(undefined);
+  isMessageLimitError.mockReturnValue(false);
 });
 
 describe("send_wechat: bound session", () => {
@@ -232,13 +235,13 @@ describe("send_wechat: error paths (regression)", () => {
 // assistant replies: they consume the per-user message budget
 // (`wechatMsgCount`), and items beyond the limit (or transiently failed)
 // are parked in `outboundCache` for /next or auto-flush delivery instead
-// of being lost. The 💾 cache notice rides a direct send outside the
-// budget, so "queued" cases still show exactly one sendTextMessage call.
+// of being lost. A full 10-slot window does not attempt an 11th cache
+// notice; doing so would only reproduce the gateway's prepare-failed error.
 
 describe("send_wechat: shared gateway budget & cache", () => {
   interface BudgetBridge {
-    wechatMsgCount: Map<string, number>;
-    outboundCache: Map<string, Array<{ kind: string; text?: string; filePath?: string; fileName?: string }>>;
+    wechatMsgCount: number;
+    outboundCache: Array<{ kind: string; text?: string; filePath?: string; fileName?: string }>;
     sendReply(userId: string, text: string): Promise<void>;
     flushPending(userId: string): Promise<void>;
   }
@@ -255,32 +258,50 @@ describe("send_wechat: shared gateway budget & cache", () => {
   it("consumes the shared per-user budget on success", async () => {
     const bridge = setup();
     const b = asBudget(bridge);
-    expect(b.wechatMsgCount.get("u1")).toBeUndefined();
+    expect(b.wechatMsgCount).toBe(0);
 
     await bridge.handleSendWeChat("wx-s1", { text: "hello" });
-    expect(b.wechatMsgCount.get("u1")).toBe(1);
+    expect(b.wechatMsgCount).toBe(1);
 
     // Reply-path sends share the same counter.
     await b.sendReply("u1", "reply");
-    expect(b.wechatMsgCount.get("u1")).toBe(2);
+    expect(b.wechatMsgCount).toBe(2);
+  });
+
+  it("restores the one budget and FIFO from state.json after restart", async () => {
+    const first = setup();
+    const firstBudget = asBudget(first);
+    firstBudget.wechatMsgCount = 5;
+    await first.handleSendWeChat("wx-s1", { text: "sixth" });
+    firstBudget.wechatMsgCount = 10;
+    await first.handleSendWeChat("wx-s1", { text: "pending-after-restart" });
+
+    const storageDir = (first as unknown as { config: { storageDir: string } }).config.storageDir;
+    const cfg = defaultConfig();
+    cfg.storageDir = storageDir;
+    const agentsService = { create: async () => undefined, resume: async () => undefined, get: () => undefined, list: () => [] };
+    const restarted = new WeChatDSHBridge({
+      get: (name: string) => (name === "agents" ? agentsService : undefined),
+      on: () => () => {},
+    }, cfg) as unknown as BudgetBridge;
+
+    expect(restarted.wechatMsgCount).toBe(10);
+    expect(restarted.outboundCache).toEqual([{ kind: "text", text: "pending-after-restart" }]);
   });
 
   it("queues instead of sending once the budget is exhausted", async () => {
     const bridge = setup();
     const b = asBudget(bridge);
-    b.wechatMsgCount.set("u1", 10);
+    b.wechatMsgCount = 10;
 
     const result = await bridge.handleSendWeChat("wx-s1", { text: "overflow" });
     expect(result.ok).toBe(true);
     expect(result.message).toMatch(/queued/i);
-    // No payload delivery — the only send is the 💾 cache notice.
-    expect(sendTextMessage).toHaveBeenCalledTimes(1);
-    const [to, notice] = sendTextMessage.mock.calls[0]! as [string, string];
-    expect(to).toBe("u1");
-    expect(notice).toContain("暂存待发");
+    // No payload and no 11th notice: the gateway window is already closed.
+    expect(sendTextMessage).not.toHaveBeenCalled();
     // The queued item sits in the outbound cache verbatim.
-    expect(b.outboundCache.get("u1")).toHaveLength(1);
-    expect(b.outboundCache.get("u1")![0]).toMatchObject({ kind: "text", text: "overflow" });
+    expect(b.outboundCache).toHaveLength(1);
+    expect(b.outboundCache![0]).toMatchObject({ kind: "text", text: "overflow" });
   });
 
   it("reply-path sends after tool pushes share the same 10-slot budget", async () => {
@@ -292,12 +313,29 @@ describe("send_wechat: shared gateway budget & cache", () => {
     // Ten direct deliveries, no caching notice yet.
     expect(sendTextMessage).toHaveBeenCalledTimes(10);
 
-    // The 11th push — via the reply path — must queue and fire the notice.
+    // The 11th push queues without making an 11th gateway request.
     await b.sendReply("u1", "eleventh");
-    expect(sendTextMessage).toHaveBeenCalledTimes(11);
-    const [, notice] = sendTextMessage.mock.calls[10]! as [string, string];
-    expect(notice).toContain("暂存待发");
-    expect(b.outboundCache.get("u1")!.map((c) => c.text)).toContain("eleventh");
+    expect(sendTextMessage).toHaveBeenCalledTimes(10);
+    expect(b.outboundCache!.map((c) => c.text)).toContain("eleventh");
+  });
+
+  it("real prepare-failed response calibrates the window to 10 and parks once", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    const limitError = new Error("ilink/bot/sendmessage: ret=-2 prepare failed");
+    sendTextMessage.mockRejectedValueOnce(limitError);
+    isMessageLimitError.mockImplementation((err) => err === limitError);
+
+    const result = await bridge.handleSendWeChat("wx-s1", { text: "real-eleventh" });
+    expect(result.ok).toBe(true);
+    expect(result.message).toMatch(/queued/i);
+    expect(b.wechatMsgCount).toBe(10);
+    expect(b.outboundCache).toEqual([{ kind: "text", text: "real-eleventh" }]);
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+    await bridge.handleSendWeChat("wx-s1", { text: "after-limit" });
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    expect(b.outboundCache.map((item) => item.text)).toEqual(["real-eleventh", "after-limit"]);
   });
 
   it("transient send failure parks the message and reports queued", async () => {
@@ -308,25 +346,25 @@ describe("send_wechat: shared gateway budget & cache", () => {
     const result = await bridge.handleSendWeChat("wx-s1", { text: "flaky" });
     expect(result.ok).toBe(true);
     expect(result.message).toMatch(/queued/i);
-    expect(b.outboundCache.get("u1")).toHaveLength(1);
-    expect(b.outboundCache.get("u1")![0]).toMatchObject({ kind: "text", text: "flaky" });
+    expect(b.outboundCache).toHaveLength(1);
+    expect(b.outboundCache![0]).toMatchObject({ kind: "text", text: "flaky" });
   });
 
   it("queued tool text is delivered by flushPending", async () => {
     const bridge = setup();
     const b = asBudget(bridge);
-    b.wechatMsgCount.set("u1", 10);
+    b.wechatMsgCount = 10;
     await bridge.handleSendWeChat("wx-s1", { text: "overflow" });
     sendTextMessage.mockClear();
 
-    b.wechatMsgCount.set("u1", 0);
+    b.wechatMsgCount = 0;
     await b.flushPending("u1");
 
     // Flushed payload first, then the flush summary via sendReply.
     expect(sendTextMessage).toHaveBeenCalledTimes(2);
     const [, flushed] = sendTextMessage.mock.calls[0]! as [string, string];
     expect(flushed).toBe("overflow");
-    expect(b.outboundCache.has("u1")).toBe(false);
+    expect(b.outboundCache.length > 0).toBe(false);
   });
 
   it("a cached image file re-flushes with its native IMAGE media type", async () => {
@@ -335,7 +373,7 @@ describe("send_wechat: shared gateway budget & cache", () => {
     const tmpPng = path.join(os.tmpdir(), `send-wechat-${Date.now()}.png`);
     fs.writeFileSync(tmpPng, "png-bytes");
     try {
-      b.wechatMsgCount.set("u1", 10);
+      b.wechatMsgCount = 10;
       const result = await bridge.handleSendWeChat("wx-s1", { file_path: tmpPng });
       // Queued, not sent — no CDN upload attempted while over budget.
       expect(sendMediaMessage).not.toHaveBeenCalled();
@@ -343,7 +381,7 @@ describe("send_wechat: shared gateway budget & cache", () => {
       expect(result.message).toMatch(/^queued image/);
 
       sendMediaMessage.mockClear();
-      b.wechatMsgCount.set("u1", 0);
+      b.wechatMsgCount = 0;
       await b.flushPending("u1");
       expect(sendMediaMessage).toHaveBeenCalledTimes(1);
       const [, mediaType] = sendMediaMessage.mock.calls[0]! as [string, number, Buffer, unknown];
@@ -365,6 +403,6 @@ describe("send_wechat: shared gateway budget & cache", () => {
     // Not even the 💾 notice: nothing was parked.
     expect(sendTextMessage).not.toHaveBeenCalled();
     expect(sendMediaMessage).not.toHaveBeenCalled();
-    expect(b.outboundCache.has("u1")).toBe(false);
+    expect(b.outboundCache.length > 0).toBe(false);
   });
 });

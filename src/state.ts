@@ -33,8 +33,57 @@ export interface UserState {
   watchedSessions?: string[];
 }
 
+/** One globally ordered outbound queue for the bridge's single WeChat peer. */
+export type OutboundMessage =
+  | { kind: "text"; text: string }
+  | { kind: "file"; filePath: string; fileName: string };
+
+export const MAX_OUTBOUND_QUEUE = 100;
+
+export interface OutboundState {
+  version: 1;
+  peerUserId: string;
+  messageCount: number;
+  queue: OutboundMessage[];
+}
+
 export interface BridgeStateFile {
   users: Record<string, UserState>;
+  /** Single-peer send-window state; absent in legacy files and when empty. */
+  outbound?: OutboundState;
+}
+
+function normalizeOutbound(value: unknown): OutboundState | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as { version?: unknown; peerUserId?: unknown; messageCount?: unknown; queue?: unknown };
+  if (raw.version !== 1 || typeof raw.peerUserId !== "string" || !raw.peerUserId) return undefined;
+
+  const count = typeof raw.messageCount === "number" && Number.isFinite(raw.messageCount)
+    ? Math.max(0, Math.min(10, Math.floor(raw.messageCount)))
+    : 0;
+  const queue: OutboundMessage[] = [];
+  if (Array.isArray(raw.queue)) {
+    for (const item of raw.queue) {
+      if (!item || typeof item !== "object") continue;
+      const candidate = item as Record<string, unknown>;
+      if (candidate.kind === "text" && typeof candidate.text === "string") {
+        queue.push({ kind: "text", text: candidate.text });
+      } else if (
+        candidate.kind === "file" &&
+        typeof candidate.filePath === "string" && candidate.filePath &&
+        typeof candidate.fileName === "string" && candidate.fileName
+      ) {
+        queue.push({ kind: "file", filePath: candidate.filePath, fileName: candidate.fileName });
+      }
+    }
+  }
+
+  return {
+    version: 1,
+    peerUserId: raw.peerUserId,
+    messageCount: count,
+    queue: queue.slice(-MAX_OUTBOUND_QUEUE),
+  };
 }
 
 export class StateStore {
@@ -61,6 +110,9 @@ export class StateStore {
               user.crossSessionNotify = "inherit";
             }
           }
+          const outbound = normalizeOutbound(parsed.outbound);
+          if (outbound) parsed.outbound = outbound;
+          else delete parsed.outbound;
           return parsed;
         }
       }
@@ -72,7 +124,18 @@ export class StateStore {
 
   private save(): void {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-    fs.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), "utf-8");
+    const tempPath = `${this.filePath}.tmp-${process.pid}`;
+    try {
+      fs.writeFileSync(tempPath, JSON.stringify(this.state, null, 2), "utf-8");
+      fs.renameSync(tempPath, this.filePath);
+    } catch (err) {
+      try {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      } catch {
+        // best effort cleanup
+      }
+      throw err;
+    }
   }
 
   ensureUser(userId: string, cwd: string): UserState {
@@ -127,6 +190,28 @@ export class StateStore {
       if (user.watchedSessions.length > 100) user.watchedSessions = user.watchedSessions.slice(-100);
       this.save();
     }
+  }
+
+  /** Return a defensive copy of the single-peer outbound snapshot. */
+  outbound(): OutboundState | undefined {
+    const value = this.state.outbound;
+    if (!value) return undefined;
+    return { ...value, queue: value.queue.map((item) => ({ ...item })) };
+  }
+
+  /** Replace and durably save the single-peer outbound snapshot. */
+  setOutbound(value: OutboundState): void {
+    const normalized = normalizeOutbound(value);
+    if (!normalized) throw new Error("invalid outbound state");
+    this.state.outbound = normalized;
+    this.save();
+  }
+
+  /** Remove any durable outbound budget and queue. */
+  clearOutbound(): void {
+    if (!this.state.outbound) return;
+    delete this.state.outbound;
+    this.save();
   }
 
   /** Effective cross-session preference for display. */

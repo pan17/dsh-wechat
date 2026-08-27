@@ -230,6 +230,61 @@ describe("StateStore", () => {
     }
   });
 
+  it("persists and reloads the single-peer outbound snapshot", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
+    try {
+      const store = new StateStore(dir);
+      store.ensureUser("u1", "C:\\work");
+      store.setOutbound({
+        version: 1,
+        peerUserId: "u1",
+        messageCount: 6,
+        queue: [
+          { kind: "text", text: "pending" },
+          { kind: "file", filePath: "C:\\tmp\\a.png", fileName: "a.png" },
+        ],
+      });
+
+      const reloaded = new StateStore(dir).outbound();
+      expect(reloaded?.messageCount).toBe(6);
+      expect(reloaded?.queue).toEqual([
+        { kind: "text", text: "pending" },
+        { kind: "file", filePath: "C:\\tmp\\a.png", fileName: "a.png" },
+      ]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes malformed outbound state and caps the one FIFO", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
+    try {
+      const queue = Array.from({ length: 105 }, (_, i) => ({ kind: "text", text: `m${i}` }));
+      queue.splice(10, 0, { kind: "bogus", text: "bad" });
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({
+        users: {},
+        outbound: { version: 1, peerUserId: "u1", messageCount: 99, queue },
+      }), "utf-8");
+      const outbound = new StateStore(dir).outbound();
+      expect(outbound?.messageCount).toBe(10);
+      expect(outbound?.queue).toHaveLength(100);
+      expect(outbound?.queue[0]).toEqual({ kind: "text", text: "m5" });
+      expect(outbound?.queue.at(-1)).toEqual({ kind: "text", text: "m104" });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy state without outbound starts with an empty outbound snapshot", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
+    try {
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ users: {} }), "utf-8");
+      expect(new StateStore(dir).outbound()).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("corrupt state file falls back to fresh state", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
     try {

@@ -18,7 +18,12 @@ import path from "node:path";
 import { login, loadToken, type TokenData } from "../weixin/auth.js";
 import { startMonitor } from "../weixin/monitor.js";
 import { sendTextMessage, sendMediaMessage, splitText } from "../weixin/send.js";
-import { sendTyping as apiSendTyping, getConfig as apiGetConfig, isSessionTimeoutError } from "../weixin/api.js";
+import {
+  sendTyping as apiSendTyping,
+  getConfig as apiGetConfig,
+  isMessageLimitError,
+  isSessionTimeoutError,
+} from "../weixin/api.js";
 import { MessageType, TypingStatus, UploadMediaType } from "../weixin/types.js";
 import type { WeixinMessage } from "../weixin/types.js";
 import { extractText, weixinMessageToPrompt } from "../adapter/inbound.js";
@@ -29,7 +34,12 @@ import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
 import type { ModelSelection } from "../dsh/ops.js";
 import type { Agent, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
-import { StateStore, type UserState } from "../state.js";
+import {
+  MAX_OUTBOUND_QUEUE,
+  StateStore,
+  type OutboundMessage,
+  type UserState,
+} from "../state.js";
 import type { WeChatDSHConfig } from "../config.js";
 import {
   detectUnknownSlashCommand,
@@ -89,14 +99,6 @@ const TYPING_KEEPALIVE_MS = 10_000;
  * Matches openclaw's 2-minute safety net.
  */
 const TYPING_SAFETY_TIMEOUT_MS = 2 * 60_000;
-/**
- * Hard cap on one user's outbound cache. The cache holds rate-limit
- * overflow and transient send failures while the bot is logged in.
- * Missing / invalid bot tokens never park here — those drops are logged
- * and discarded. Oldest items drop first.
- */
-const MAX_OUTBOUND_CACHE = 100;
-
 /** A model selection override for one agent (`/model switch` / `/reasoning`). */
 interface ModelOverride {
   provider: string;
@@ -214,7 +216,7 @@ export interface NativeCommandsSurface {
   }>;
 }
 
-type CachedMessage = { kind: "text"; text: string } | { kind: "file"; filePath: string; fileName: string };
+type CachedMessage = OutboundMessage;
 
 export class WeChatDSHBridge {
   private readonly ctx: BridgeContext;
@@ -255,8 +257,12 @@ export class WeChatDSHBridge {
   /** Pending approval cards per user (rpcId-keyed). */
   private readonly pendingApprovals = new Map<string, PendingApproval[]>();
   private readonly silentBuffers = new Map<string, string[]>();
-  private readonly outboundCache = new Map<string, CachedMessage[]>();
-  private readonly wechatMsgCount = new Map<string, number>();
+  /** One global queue and budget: dsh-wechat intentionally serves one peer. */
+  private outboundCache: CachedMessage[] = [];
+  private wechatMsgCount = 0;
+  private cacheNoticeSent = false;
+  /** Serializes all outbound budget/queue mutations across assistant and tool sends. */
+  private outboundSerial: Promise<void> = Promise.resolve();
   /** Per-agent model overrides set by `/model switch` / `/reasoning` (applied via agent/request). */
   private readonly modelOverrides = new Map<string, ModelOverride>();
   /**
@@ -339,9 +345,53 @@ export class WeChatDSHBridge {
     this.ctx = ctx;
     this.config = config;
     this.state = new StateStore(config.storageDir);
+    this.restoreOutboundState();
     this.agents = new AgentStore(ctx);
     this.ops = new DshOps(ctx);
     if (commandsCtx) this.commandsCtx = commandsCtx;
+  }
+
+  /** Hydrate the one peer's persisted budget and queue without auto-flushing. */
+  private restoreOutboundState(): void {
+    const saved = this.state.outbound();
+    if (!saved) return;
+    const firstPeer = this.state.all()[0]?.userId;
+    if (firstPeer && firstPeer !== saved.peerUserId) {
+      this.log(`discard outbound snapshot for old peer ${saved.peerUserId}; current peer is ${firstPeer}`);
+      try {
+        this.state.clearOutbound();
+      } catch (err) {
+        this.log(`failed to clear mismatched outbound snapshot: ${String(err)}`);
+      }
+      return;
+    }
+    this.wechatMsgCount = saved.messageCount;
+    this.outboundCache = saved.queue.map((item) => ({ ...item }));
+  }
+
+  /** Persist the one peer's budget/queue; empty state needs no snapshot. */
+  private persistOutboundState(peerUserId = this.peerUserId ?? this.state.all()[0]?.userId): void {
+    try {
+      if (!peerUserId || (this.wechatMsgCount === 0 && this.outboundCache.length === 0)) {
+        this.state.clearOutbound();
+        return;
+      }
+      this.state.setOutbound({
+        version: 1,
+        peerUserId,
+        messageCount: this.wechatMsgCount,
+        queue: this.outboundCache.map((item) => ({ ...item })),
+      });
+    } catch (err) {
+      this.log(`failed to persist outbound state: ${String(err)}`);
+    }
+  }
+
+  /** Serialize remote sends with budget and durable queue mutations. */
+  private serializeOutbound<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.outboundSerial.then(operation, operation);
+    this.outboundSerial = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   /**
@@ -799,12 +849,12 @@ export class WeChatDSHBridge {
    * the next inbound ping.
    */
   private discardQueuedOutbound(reason: string): void {
-    let parked = 0;
-    for (const items of this.outboundCache.values()) parked += items.length;
-    this.outboundCache.clear();
-    this.cacheNoticeSent.clear();
-    this.wechatMsgCount.clear();
+    const parked = this.outboundCache.length;
+    this.outboundCache = [];
+    this.cacheNoticeSent = false;
+    this.wechatMsgCount = 0;
     this.silentBuffers.clear();
+    this.persistOutboundState();
     if (parked > 0) {
       this.log(`discarded ${parked} queued outbound item(s) on ${reason}`);
     }
@@ -968,10 +1018,12 @@ export class WeChatDSHBridge {
       this.wireContextToken = msg.context_token;
     }
 
-    // Any incoming user message resets the WeChat gateway counter.
-    this.wechatMsgCount.set(userId, 0);
+    // Any incoming message from the one peer opens a fresh gateway window.
+    this.wechatMsgCount = 0;
+    this.cacheNoticeSent = false;
 
     const user = this.state.ensureUser(userId, this.config.cwd);
+    this.persistOutboundState(userId);
 
     // Pull text once so both the card handler and the slash command
     // bypass check see the same input.
@@ -1029,8 +1081,7 @@ export class WeChatDSHBridge {
     // `/next`, which owns the flush below so its result reply is not
     // duplicated by the auto path.
     const isNext = parseNextCommand(text);
-    const cached = this.outboundCache.get(userId);
-    if (!isNext && cached && cached.length > 0) {
+    if (!isNext && this.outboundCache.length > 0) {
       await this.flushPending(userId);
     }
 
@@ -3154,48 +3205,27 @@ export class WeChatDSHBridge {
 
   // ─── Outbound sending (WeChat gateway limits) ───
   //
-  // Every WeChat-bound outbound item — assistant replies AND `send_wechat`
-  // tool pushes — flows through `deliverOutbound`, which owns the per-user
-  // gateway budget (`wechatMsgCount`, reset on each inbound user message):
-  // items beyond MSG_LIMIT_MAX and transient send failures are parked in
-  // the per-user `outboundCache` instead of being lost, and the 💾 notice
-  // tells the user how to flush them (/next or any next message).
+  // Assistant replies and send_wechat tool pushes share ONE window budget
+  // and ONE FIFO queue because this bridge intentionally serves one peer.
 
-  /** Cached-message notice already shown for this user (avoids recursion). */
-  private readonly cacheNoticeSent = new Set<string>();
+  /** Deliver one item, serialized with all other outbound sends and flushes. */
+  private deliverOutbound(userId: string, item: CachedMessage): Promise<"sent" | "cached" | "failed"> {
+    return this.serializeOutbound(() => this.deliverOutboundLocked(userId, item));
+  }
 
-  /**
-   * Deliver one outbound item within the user's message budget.
-   *
-   * Budget exhaustion and transient send failures park the item in
-   * `outboundCache` and return "cached" — the caller reports a queued
-   * hand-off, never a silent loss. Only an unreadable `file_path` returns
-   * "failed" without caching: a permanently bad path is a caller error
-   * that must surface immediately rather than poison the queue (and it
-   * could never succeed on a later flush anyway).
-   */
-  private async deliverOutbound(userId: string, item: CachedMessage): Promise<"sent" | "cached" | "failed"> {
+  private async deliverOutboundLocked(userId: string, item: CachedMessage): Promise<"sent" | "cached" | "failed"> {
     const token = this.token;
-    if (!token) {
-      const preview = item.kind === "text" ? item.text.slice(0, 60) : item.fileName;
-      this.logDropOutbound(preview);
-      return "failed";
-    }
-    if (this.tokenGiveUp) {
-      const preview = item.kind === "text" ? item.text.slice(0, 60) : item.fileName;
-      this.logDropOutbound(preview);
+    if (!token || this.tokenGiveUp) {
+      this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
       return "failed";
     }
     if (this.tokenInvalid) {
-      const preview = item.kind === "text" ? item.text.slice(0, 60) : item.fileName;
-      this.logDropOutbound(preview);
+      this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
       this.parkOutbound(userId, item);
       return "cached";
     }
-    const contextToken = this.wireContextToken ?? undefined;
 
-    // File reads happen before the budget gate so an unreadable path is
-    // reported as "failed" regardless of budget state.
+    // Validate file paths before consuming budget or poisoning the durable queue.
     let buffer: Buffer | undefined;
     if (item.kind === "file") {
       try {
@@ -3206,22 +3236,22 @@ export class WeChatDSHBridge {
       }
     }
 
-    const count = this.wechatMsgCount.get(userId) ?? 0;
+    const count = this.wechatMsgCount;
     if (count >= MSG_LIMIT_MAX) {
       this.parkOutbound(userId, item);
-      await this.notifyCachePending(userId);
+      // No notice here: an 11th direct send would hit the same closed window.
       return "cached";
     }
-    this.wechatMsgCount.set(userId, count + 1);
 
+    // Persist the conservative reservation before crossing the remote-send boundary.
+    this.wechatMsgCount = count + 1;
+    this.persistOutboundState(userId);
+    const contextToken = this.wireContextToken ?? undefined;
     try {
       if (item.kind === "text") {
-        // The limit-warning suffix rides the payload only — the cached
-        // copy keeps the original text so a later flush sends it clean.
-        const payload =
-          count + 1 > MSG_LIMIT_WARN
-            ? item.text + `\n\n⚠️ 微信限制连续发送消息数量10条（已发 ${count + 1} 条），发送 /next 可继续`
-            : item.text;
+        const payload = count + 1 > MSG_LIMIT_WARN
+          ? item.text + `\n\n⚠️ 微信限制连续发送消息数量10条（已发 ${count + 1} 条），发送 /next 可继续`
+          : item.text;
         await sendTextMessage(userId, payload, {
           baseUrl: token.baseUrl,
           token: token.token,
@@ -3239,56 +3269,49 @@ export class WeChatDSHBridge {
       return "sent";
     } catch (err) {
       this.log(`outbound send error (${item.kind}): ${String(err)}`);
-      if (isSessionTimeoutError(err)) {
-        this.markTokenInvalid();
-        const preview = item.kind === "text" ? item.text.slice(0, 60) : item.fileName;
-        this.logDropOutbound(preview);
+      if (isMessageLimitError(err)) {
+        this.wechatMsgCount = MSG_LIMIT_MAX;
         this.parkOutbound(userId, item);
         return "cached";
       }
-      // Logout / re-login can abort an in-flight send. Do not park: the
-      // next WeChat ping would otherwise flush GUI text from while logged out.
-      if (!this.token) {
+      if (isSessionTimeoutError(err)) {
+        this.markTokenInvalid();
         this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
-        return "failed";
+        this.parkOutbound(userId, item);
+        return "cached";
       }
-      if (this.tokenGiveUp) {
+      // Logout/re-login may abort an in-flight send. Never carry that text
+      // across identities; every other delivery error is parked.
+      if (!this.token || this.tokenGiveUp) {
         this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
         return "failed";
       }
       this.parkOutbound(userId, item);
-      await this.notifyCachePending(userId);
+      await this.notifyCachePendingLocked(userId);
       return "cached";
     }
   }
 
-  /** Park one item at the tail of the user's outbound queue. */
+  /** Append to the one durable FIFO, dropping oldest items above the hard cap. */
   private parkOutbound(userId: string, item: CachedMessage): void {
-    const cache = this.outboundCache.get(userId) ?? [];
-    cache.push(item);
-    // Hard cap (see MAX_OUTBOUND_CACHE): drop the OLDEST items first so a
-    // long cold stretch cannot grow the queue without bound.
-    if (cache.length > MAX_OUTBOUND_CACHE) {
-      const overflow = cache.length - MAX_OUTBOUND_CACHE;
-      cache.splice(0, overflow);
-      this.log(`outbound cache cap (${MAX_OUTBOUND_CACHE}) exceeded for ${userId}; dropped ${overflow} oldest item(s)`);
+    this.outboundCache.push({ ...item });
+    if (this.outboundCache.length > MAX_OUTBOUND_QUEUE) {
+      const overflow = this.outboundCache.length - MAX_OUTBOUND_QUEUE;
+      this.outboundCache.splice(0, overflow);
+      this.log(`outbound cache cap (${MAX_OUTBOUND_QUEUE}) exceeded; dropped ${overflow} oldest item(s)`);
     }
-    this.outboundCache.set(userId, cache);
+    this.persistOutboundState(userId);
   }
 
-  /**
-   * Tell the user that queued messages exist and how to flush them. Sent
-   * at most once per caching episode (`cacheNoticeSent`) so a burst of
-   * overflows yields a single notice; a failed notice send re-arms the
-   * dedupe mark so the next caching attempt retries it.
-   */
-  private async notifyCachePending(userId: string): Promise<void> {
-    if (this.cacheNoticeSent.has(userId)) return;
-    const pendingCount = this.outboundCache.get(userId)?.length ?? 0;
+  /** Best-effort notice for transient failures while budget remains. */
+  private async notifyCachePendingLocked(userId: string): Promise<void> {
+    if (this.cacheNoticeSent || this.wechatMsgCount >= MSG_LIMIT_MAX) return;
     const token = this.token;
-    if (!token || this.tokenInvalid || pendingCount === 0) return;
-    this.cacheNoticeSent.add(userId);
-    const notice = `💾 有 ${pendingCount} 条消息暂存待发（微信限流或发送失败），发送 /next 可继续发送。`;
+    if (!token || this.tokenInvalid || this.outboundCache.length === 0) return;
+    this.cacheNoticeSent = true;
+    this.wechatMsgCount++;
+    this.persistOutboundState(userId);
+    const notice = `💾 有 ${this.outboundCache.length} 条消息暂存待发（微信限流或发送失败），发送 /next 可继续发送。`;
     try {
       await sendTextMessage(userId, notice, {
         baseUrl: token.baseUrl,
@@ -3296,134 +3319,123 @@ export class WeChatDSHBridge {
         ...(this.wireContextToken ? { contextToken: this.wireContextToken } : {}),
       });
     } catch (err) {
-      this.cacheNoticeSent.delete(userId);
+      this.cacheNoticeSent = false;
+      if (isMessageLimitError(err)) this.wechatMsgCount = MSG_LIMIT_MAX;
       if (isSessionTimeoutError(err)) this.markTokenInvalid();
+      this.persistOutboundState(userId);
     }
   }
 
   private async sendReply(userId: string, text: string): Promise<void> {
-    if (!this.token) {
+    if (!this.token || this.tokenGiveUp) {
       this.logDropOutbound(text.slice(0, 60));
-      return;
-    }
-    if (this.tokenGiveUp) {
-      this.logDropOutbound(text.slice(0, 60));
-      return;
-    }
-    if (this.tokenInvalid) {
-      this.logDropOutbound(text.slice(0, 60));
-      const formatted = formatForWeChat(text);
-      for (const segment of splitText(formatted, this.config.textChunkLimit)) {
-        this.parkOutbound(userId, { kind: "text", text: segment });
-      }
       return;
     }
     const formatted = formatForWeChat(text);
     const segments = splitText(formatted, this.config.textChunkLimit);
+    if (this.tokenInvalid) {
+      this.logDropOutbound(text.slice(0, 60));
+      await this.serializeOutbound(async () => {
+        for (const segment of segments) this.parkOutbound(userId, { kind: "text", text: segment });
+      });
+      return;
+    }
     for (const segment of segments) {
       await this.deliverOutbound(userId, { kind: "text", text: segment });
     }
   }
 
-  /** After `-14` recover: flush every user's parked outbound without a 💾/✅ notice. */
+  /** After -14 recovery, silently flush the one peer's parked outbound. */
   private async flushParkedAfterRecover(): Promise<void> {
-    const userIds = [...this.outboundCache.keys()];
-    if (userIds.length === 0) {
+    const userId = this.peerUserId ?? this.state.all()[0]?.userId;
+    if (!userId || this.outboundCache.length === 0) {
       this.log("-14 recovered; no parked outbound to flush");
       return;
     }
-    for (const userId of userIds) {
-      const n = this.outboundCache.get(userId)?.length ?? 0;
-      this.log(`-14 recovered; flushing ${n} parked item(s) for ${userId}`);
-      await this.flushPending(userId, { silent: true });
-    }
+    this.log(`-14 recovered; flushing ${this.outboundCache.length} parked item(s) for ${userId}`);
+    await this.flushPending(userId, { silent: true });
   }
 
-  /** Flush cached outbound messages (`/next` or auto on new user message). */
-  private async flushPending(userId: string, opts?: { silent?: boolean }): Promise<void> {
-    const cache = this.outboundCache.get(userId);
-    if (!cache || cache.length === 0) {
-      if (!opts?.silent) await this.sendReply(userId, "✅ 没有缓存的消息。");
+  /** Flush the one FIFO (/next, next inbound, or -14 recovery). */
+  private flushPending(userId: string, opts?: { silent?: boolean }): Promise<void> {
+    return this.serializeOutbound(() => this.flushPendingLocked(userId, opts));
+  }
+
+  private async flushPendingLocked(userId: string, opts?: { silent?: boolean }): Promise<void> {
+    if (this.outboundCache.length === 0) {
+      if (!opts?.silent) await this.deliverOutboundLocked(userId, { kind: "text", text: "✅ 没有缓存的消息。" });
       return;
     }
-    this.wechatMsgCount.set(userId, 0);
-    const remaining: CachedMessage[] = [];
+
+    const cache = this.outboundCache.map((item) => ({ ...item }));
+    // Keep the durable queue equal to the unsent tail throughout flush.
+    // This favors at-least-once delivery at the unavoidable remote-send /
+    // local-checkpoint crash boundary instead of losing queued messages.
+    this.outboundCache = cache.map((item) => ({ ...item }));
+    this.cacheNoticeSent = false;
+    this.persistOutboundState(userId);
     let dropped = 0;
-    for (const msg of cache) {
-      if (!this.token || this.tokenGiveUp) {
-        remaining.push(msg);
-        continue;
-      }
-      if (this.tokenInvalid) {
-        remaining.push(msg);
-        continue;
-      }
-      const count = this.wechatMsgCount.get(userId) ?? 0;
-      if (count >= MSG_LIMIT_MAX) {
-        remaining.push(msg);
-        continue;
-      }
-      this.wechatMsgCount.set(userId, count + 1);
+    let sentCount = 0;
+
+    for (let index = 0; index < cache.length; index++) {
+      const msg = cache[index]!;
+      if (!this.token || this.tokenGiveUp || this.tokenInvalid || this.wechatMsgCount >= MSG_LIMIT_MAX) break;
       const token = this.token;
-      const wire = this.wireContextToken ?? undefined;
+      this.wechatMsgCount++;
+      this.persistOutboundState(userId);
       try {
         if (msg.kind === "text") {
           await sendTextMessage(userId, msg.text, {
             baseUrl: token.baseUrl,
             token: token.token,
-            contextToken: wire,
+            contextToken: this.wireContextToken ?? undefined,
           });
         } else {
           let buffer: Buffer;
           try {
             buffer = await fs.promises.readFile(msg.filePath);
           } catch (err) {
-            // Unreadable cached file (temp cleaned up, moved, bad path):
-            // drop it instead of retrying forever on every flush.
             this.log(`flush dropping unreadable cached file ${msg.filePath}: ${String(err)}`);
             dropped++;
+            this.outboundCache.shift();
+            this.persistOutboundState(userId);
             continue;
           }
-          // Preserve the sender's native media type: a cached image/video
-          // re-flushes inline (mediaTypeForFile), not degraded to a plain
-          // file attachment.
           await sendMediaMessage(userId, mediaTypeForFile(msg.fileName), buffer, {
             baseUrl: token.baseUrl,
             token: token.token,
-            contextToken: wire,
+            contextToken: this.wireContextToken ?? undefined,
             cdnBaseUrl: this.config.cdnBaseUrl,
             fileName: msg.fileName,
           });
         }
+        sentCount++;
+        this.outboundCache.shift();
+        this.persistOutboundState(userId);
       } catch (err) {
         this.log(`flush send error: ${String(err)}`);
-        if (isSessionTimeoutError(err)) {
-          this.markTokenInvalid();
-          remaining.push(msg);
-          remaining.push(...cache.slice(cache.indexOf(msg) + 1));
-          break;
-        }
-        remaining.push(msg);
+        if (isMessageLimitError(err)) this.wechatMsgCount = MSG_LIMIT_MAX;
+        if (isSessionTimeoutError(err)) this.markTokenInvalid();
+        break;
       }
     }
-    const sentCount = cache.length - remaining.length - dropped;
+
+    const remaining = this.outboundCache;
+    this.persistOutboundState(userId);
     const dropSuffix = dropped > 0 ? `，${dropped} 条文件缓存因无法读取被丢弃` : "";
     if (remaining.length > 0) {
-      this.outboundCache.set(userId, remaining);
       this.log(`flush leftover ${remaining.length} item(s) for ${userId} (sent ${sentCount})`);
-      if (!opts?.silent) {
-        await this.sendReply(userId, `✅ 已发送 ${sentCount} 条，剩余 ${remaining.length} 条缓存，/next 继续。${dropSuffix}`);
+      if (!opts?.silent && this.wechatMsgCount < MSG_LIMIT_MAX) {
+        await this.deliverOutboundLocked(userId, { kind: "text", text: `✅ 已发送 ${sentCount} 条，剩余 ${remaining.length} 条缓存，/next 继续。${dropSuffix}` });
       }
     } else {
-      this.outboundCache.delete(userId);
       this.log(`flush completed ${sentCount} item(s) for ${userId}${dropSuffix}`);
-      if (!opts?.silent) {
-        await this.sendReply(userId, `✅ 全部 ${sentCount} 条缓存消息已发送${dropSuffix}。`);
+      if (!opts?.silent && this.wechatMsgCount < MSG_LIMIT_MAX) {
+        await this.deliverOutboundLocked(userId, { kind: "text", text: `✅ 全部 ${sentCount} 条缓存消息已发送${dropSuffix}。` });
       }
     }
   }
 
-  // ─── Helpers ───
 
   private log(msg: string): void {
     console.log(`[dsh-wechat] ${msg}`);

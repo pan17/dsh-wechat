@@ -20,6 +20,8 @@ import {
   getUpdates,
   sendMessage,
   isSessionTimeoutContentLengthError,
+  IlinkApiError,
+  isMessageLimitError,
   isSessionTimeoutError,
   SessionTimeoutError,
 } from "../src/weixin/api.js";
@@ -140,6 +142,55 @@ describe("sendMessage: parseable -14 is a thrown SessionTimeoutError", () => {
     ).rejects.toBeInstanceOf(SessionTimeoutError);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects the real 11th-message response as a classified limit error", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ret: -2, errmsg: "prepare failed" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    let caught: unknown;
+    try {
+      await sendMessage({
+        baseUrl: "https://gw",
+        token: "t",
+        body: { msg: { to_user_id: "u1" } },
+        retries: 2,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(IlinkApiError);
+    expect(isMessageLimitError(caught)).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts message_id and explicit zero business status", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message_id: 123 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ret: 0, errcode: 0 }), { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const params = { baseUrl: "https://gw", token: "t", body: { msg: { to_user_id: "u1" } }, retries: 0 };
+    await expect(sendMessage(params)).resolves.toBeUndefined();
+    await expect(sendMessage(params)).resolves.toBeUndefined();
+  });
+
+  it("rejects other nonzero sendmessage business statuses without classifying them as the limit", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ errcode: 45009, errmsg: "frequency limit" }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    let caught: unknown;
+    try {
+      await sendMessage({ baseUrl: "https://gw", token: "t", body: {}, retries: 0 });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(IlinkApiError);
+    expect(isMessageLimitError(caught)).toBe(false);
   });
 
   it("isSessionTimeoutError matches both JSON and undici shapes", () => {

@@ -187,7 +187,7 @@ npm test         # vitest（317 个用例：splitText/格式化/解析/帧处理
 - 帧流 `events.mux`/`respond` 是 ApiProxy 正式契约；若 DSH 版本调整帧
   结构，按契约适配即可。
 - `send_wechat` 工具对所有 agent 可见；任何会话的 agent 都能调用——绑定会话发送到绑定用户，未绑定会话回退到首个已知微信用户（单用户部署默认行为）。
-  工具推送与 assistant 回复共享同一份微信 10 条/窗口限流预算：超限或发送失败自动进入 `/next` 缓存队列（与回复同一套恢复流程），不会丢失。
+  单用户模式下，工具推送与 assistant 回复共享唯一一份微信 10 条/窗口限流预算：超限或发送失败自动进入 `/next` FIFO 缓存队列。计数和队列持久化到 `state.json`，普通 DSH 更新、重启或重连后继续沿用；下一条微信入站会重置窗口并自动补发。微信真实限流响应（HTTP 200 + `ret: -2` / `prepare failed`）也会被识别并缓存，不再误判成功。
 - `/preset switch` 遵循 DSH 约束：只有未产生任何内容的会话才能当场
   `recompose`；已有内容的会话会提示 Preset 应用于下一个新会话。默认
   Preset 本身写入 DSH 设置文档（`agent-presets` namespace），GUI 设置

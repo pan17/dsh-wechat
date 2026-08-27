@@ -109,6 +109,7 @@ describe("WeChat → agent forwarding chain", () => {
         message: { content: [{ type: "text", text: "你好，这是回复" }] },
       },
     });
+    await new Promise((r) => setImmediate(r));
 
     expect(sendTextMessage).toHaveBeenCalledTimes(1);
     const [to, text] = sendTextMessage.mock.calls[0]! as [string, string];
@@ -136,7 +137,7 @@ describe("WeChat → agent forwarding chain", () => {
     expect(sendTextMessage).not.toHaveBeenCalled();
   });
 
-  it("silent mode buffers and flushes only the last text on turn/end", () => {
+  it("silent mode buffers and flushes only the last text on turn/end", async () => {
     const anyBridge = bridge as unknown as {
       state: { ensureUser(u: string, c: string): unknown };
       handleSessionEvent(s: string, e: unknown): void;
@@ -160,6 +161,7 @@ describe("WeChat → agent forwarding chain", () => {
     expect(sendTextMessage).not.toHaveBeenCalled();
 
     anyBridge.handleSessionEvent("wx-s1", { type: "turn/end", seq: 9, time: Date.now(), data: { turn: 1, reason: "success" } });
+    await new Promise((r) => setImmediate(r));
     expect(sendTextMessage).toHaveBeenCalledTimes(1);
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
     expect(text).toContain("最终回复");

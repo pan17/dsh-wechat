@@ -139,6 +139,14 @@ export interface SendMessageReq {
   msg?: WeixinMessage;
 }
 
+/** iLink sendmessage response. Success currently carries message_id. */
+export interface SendMessageResp {
+  message_id?: number | string;
+  ret?: number;
+  errcode?: number;
+  errmsg?: string;
+}
+
 export interface GetUploadUrlReq {
   filekey?: string;
   media_type?: number;

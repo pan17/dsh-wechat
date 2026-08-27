@@ -26,6 +26,7 @@ vi.mock("../src/weixin/api.js", () => ({
   sendTyping: () => Promise.resolve(undefined),
   getConfig: () => Promise.resolve({ typing_ticket: "tk" }),
   isSessionTimeoutError: () => false,
+  isMessageLimitError: () => false,
 }));
 
 import { WeChatDSHBridge } from "../src/bridge/bridge.js";

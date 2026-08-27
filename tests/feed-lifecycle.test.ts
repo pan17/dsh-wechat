@@ -21,6 +21,7 @@ vi.mock("../src/weixin/api.js", () => ({
   sendTyping: () => Promise.resolve(undefined),
   getConfig: () => Promise.resolve({ typing_ticket: "tk" }),
   isSessionTimeoutError: () => false,
+  isMessageLimitError: () => false,
 }));
 
 vi.mock("../src/weixin/auth.js", async (importOriginal) => {
