@@ -53,7 +53,11 @@ window.__ModuleLoader__.load({
 .wx_help::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);padding:6px 10px;background:rgba(20,20,20,.92);color:#fff;font-size:11px;font-weight:400;white-space:normal;width:max-content;max-width:260px;border-radius:6px;opacity:0;pointer-events:none;transition:opacity .12s;z-index:20;line-height:1.5;text-align:left}
 .wx_help::before{content:"";position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);border:4px solid transparent;border-top-color:rgba(20,20,20,.92);opacity:0;pointer-events:none;transition:opacity .12s;z-index:20}
 .wx_help:hover::after,.wx_help:focus::after,.wx_help:hover::before,.wx_help:focus::before{opacity:1}
-.wx_field_label{display:inline-flex;align-items:center}`;
+.wx_field_label{display:inline-flex;align-items:center}
+.wx_limits{border:1px solid rgba(237,108,2,.4);border-radius:12px;padding:12px 16px;background:rgba(237,108,2,.06);display:flex;flex-direction:column;gap:8px}
+.wx_limits_title{font-weight:600;font-size:13px;color:#ed6c02;display:flex;align-items:center;gap:6px}
+.wx_limits ol{margin:0;padding-left:20px;font-size:12px;color:var(--dsw-alias-label-secondary,#888);line-height:1.6}
+.wx_limits li{margin-bottom:4px}`;
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=\"dsh-wechat/section\"]") === null) {
 			const tag = document.createElement("style");
 			tag.dataset.plugin = "dsh-wechat";
@@ -282,6 +286,16 @@ window.__ModuleLoader__.load({
 							createElement("button", { className: "wx_btn", onClick: () => run("/relogin"), disabled: busy !== "" }, busy === "/relogin" ? "…" : "重新扫码"),
 							createElement("button", { className: "wx_btn danger", onClick: () => { if (confirm("确定退出微信登录？")) run("/logout"); }, disabled: busy !== "" }, busy === "/logout" ? "…" : "退出登录"),
 						),
+					),
+				),
+				createElement("div", { className: "wx_limits" },
+					createElement("div", { className: "wx_limits_title" },
+						createElement("span", null, "⚠"),
+						createElement("span", null, "已知限制"),
+					),
+					createElement("ol", null,
+						createElement("li", null, "微信 iLink 通道限制：bot 单窗口最多连续向同一用户发送 10 条消息，达到上限后必须由用户在微信端主动发一条消息才能解锁并继续推送（超过的部分会进 /next 缓存队列）。"),
+						createElement("li", null, "用户最后一次在微信端发消息后的 24 小时内 bot 可以主动向其发送消息，超过 24 小时未互动则需要用户先在微信发一条消息才能继续接收 bot 回复（微信平台策略，非本插件限制）。"),
 					),
 				),
 			);
