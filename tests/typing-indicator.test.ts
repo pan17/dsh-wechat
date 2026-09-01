@@ -53,6 +53,7 @@ vi.mock("../src/weixin/api.js", () => ({
   getConfig: (...args: unknown[]) => getConfigMock(...args),
   isSessionTimeoutError: () => false,
   isMessageLimitError: () => false,
+  isInvalidRequestError: () => false,
 }));
 
 import { WeChatDSHBridge } from "../src/bridge/bridge.js";

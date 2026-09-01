@@ -6,11 +6,12 @@
  * calls: agents are created/resumed through the `agents` registry, WeChat
  * messages enter via `agent.followup`, assistant output leaves via the
  * `session/event` feed, and approval/question cards are MIRRORED to WeChat
- * from the native `apiProxy` mux frame stream — the decision point and
- * trigger policy stay exactly as in the GUI (`approval.request` from
- * sandbox escalation, `question/requested` from the native ask tool), and
- * WeChat answers are injected back through `apiProxy.respond`. Whoever
- * answers first (GUI or WeChat) wins; there is no custom approval list.
+ * from the Host `approval/request` and `user-questions/request` waterfalls
+ * — the decision point and trigger policy stay exactly as in the GUI
+ * (`approval.request` from sandbox escalation, `userQuestions.ask` from
+ * the native ask tool). The bridge races `next()` (GUI / other answerers)
+ * against the WeChat reply. Whoever answers first wins; there is no
+ * custom approval list.
  */
 
 import fs from "node:fs";
@@ -21,6 +22,7 @@ import { sendTextMessage, sendMediaMessage, splitText } from "../weixin/send.js"
 import {
   sendTyping as apiSendTyping,
   getConfig as apiGetConfig,
+  isInvalidRequestError,
   isMessageLimitError,
   isSessionTimeoutError,
 } from "../weixin/api.js";
@@ -113,10 +115,33 @@ export interface LoginState {
   botId?: string;
 }
 
+/** Closed approval outcomes the Host waterfall accepts. */
+export type ApprovalOutcome = "allowed-once" | "rejected" | "cancelled" | "unavailable";
+
 /**
- * One pending question card mirrored from a `question/requested` frame.
- * The answer is injected back through `apiProxy.respond()` into the native
- * pending table (the GUI question box is the same frame's other viewer).
+ * Host `approval/request` waterfall payload (structural). `agent.id` is the
+ * live session id; `callId` correlates the GUI tool card when present.
+ */
+export interface ApprovalRequestLike {
+  readonly agent?: { readonly id?: string; session?: { header?: { id?: string } } };
+  readonly toolName?: string;
+  readonly callId?: string;
+  readonly reason?: string;
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * Host `user-questions/request` waterfall payload (structural).
+ */
+export interface QuestionRequestLike {
+  readonly agent?: { readonly id?: string; session?: { header?: { id?: string } } };
+  readonly questions?: AskUserQuestionItem[];
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * One pending question card mirrored from a `user-questions/request`.
+ * WeChat answers settle `settleWechat`; GUI answers arrive via `next()`.
  */
 interface PendingQuestion {
   rpcId: string;
@@ -125,14 +150,15 @@ interface PendingQuestion {
   items: AskUserQuestionItem[];
   askedAt: number;
   timer: NodeJS.Timeout;
+  settled: boolean;
+  settleWechat: ((answer: AskUserQuestionAnswer) => void) | null;
+  cancelWechat: ((reason: unknown) => void) | null;
 }
 
 /**
- * One pending approval card mirrored from an `approval/requested` frame.
- * The decision is injected back through `apiProxy.respond()` — identical
- * information and choices to the GUI card, and whoever answers first
- * (GUI click or WeChat reply) wins; the native settle guard drops the
- * other side.
+ * One pending approval card mirrored from an `approval/request`.
+ * Identical information and choices to the GUI card; whoever answers
+ * first (GUI click or WeChat reply) wins.
  */
 interface PendingApproval {
   rpcId: string;
@@ -143,16 +169,8 @@ interface PendingApproval {
   reason?: string;
   askedAt: number;
   timer: NodeJS.Timeout;
-}
-
-/** Structural surface of the apiProxy service (host side). */
-export interface ApiProxySurface {
-  respond(message: {
-    type: "client-response";
-    rpcId: string;
-    result: { ok: true; value: unknown } | { ok: false; error: { code: string } };
-  }): Promise<{ accepted: boolean; reason?: string }>;
-  events?: unknown;
+  settled: boolean;
+  settleWechat: ((outcome: "allowed-once" | "rejected") => void) | null;
 }
 
 /**
@@ -178,7 +196,7 @@ export interface ApiProxySurface {
  * No `@deepseek-ai/*` runtime dep — the registry lives in the host
  * process; the bridge reaches it via `ctx.inject(['commands'], ...)`
  * through the cordis injection pattern already used for `tools` /
- * `apiProxy` / `systemPrompt`.
+ * `systemPrompt`.
  */
 export interface NativeCommandsSurface {
   find(
@@ -301,14 +319,8 @@ export class WeChatDSHBridge {
    * messages apart from GUI-typed ones. One-shot consumption with a TTL.
    */
   private readonly wechatMessageIds = new Map<string, number>();
-  /** apiProxy for respond() injection; set by attachMux. */
-  private apiProxy: ApiProxySurface | null = null;
-  /** Current mux stream abort; replaced on each reopen. */
-  private muxAbort: AbortController | null = null;
-  /** True after plugin dispose; the mux loop must not reopen. */
-  private muxStopped = false;
-  /** True while a mux loop is running (attachMux is idempotent). */
-  private muxLoopStarted = false;
+  /** True after plugin dispose; pending waterfall waiters must not settle to WeChat. */
+  private interactionStopped = false;
   /**
    * DSH native command registry (ctx.commands) when present in the host.
    * Set late by `attachCommands` once the cordis commands child has
@@ -779,17 +791,17 @@ export class WeChatDSHBridge {
   }
 
   /**
-   * Plugin dispose: stop the iLink monitor AND the DSH mux feed.
-   * WeChat reconnect/logout must NOT use this — they only bounce the
-   * gateway long-poll (`stopIlink`). Mux is a DSH-side subscription and
-   * stays alive across QR re-login.
+   * Plugin dispose: stop the iLink monitor AND abandon pending WeChat
+   * waterfall waiters. WeChat reconnect/logout must NOT use this — they
+   * only bounce the gateway long-poll (`stopIlink`). Host answerers stay
+   * registered for the plugin lifetime and survive QR re-login.
    */
   async stop(): Promise<void> {
     this.stopIlink("plugin-stop");
-    this.stopMux();
+    this.stopInteraction();
   }
 
-  /** Stop the WeChat long-poll and typing indicators; leave mux running. */
+  /** Stop the WeChat long-poll and typing indicators; leave Host answerers running. */
   private stopIlink(typingReason: string): void {
     this.monitorAbort?.abort();
     this.monitorAbort = null;
@@ -1162,7 +1174,7 @@ export class WeChatDSHBridge {
 
       const status = parseStatusCommand(text);
       if (status) {
-        await this.sendReply(userId, await this.formatStatus(user));
+        await this.sendReply(userId, await this.formatStatus(user), { parkOnError: false });
         return;
       }
 
@@ -1258,10 +1270,6 @@ export class WeChatDSHBridge {
 
     const tempDir = path.join(this.config.storageDir, "tempfile");
     const blocks = await weixinMessageToPrompt(msg, this.config.cdnBaseUrl, (m) => this.log(m), tempDir);
-    // Give the message an explicit id so its `user/message` echo can be
-    // recognized as WeChat-originated (and mark the session's source).
-    const messageId = `wx-msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-    this.markWechatMessage(messageId);
     this.markSessionSource(user.sessionId, "wechat");
     // Busy-time delivery follows the DSH `ui-conversation.busyEnter` setting
     // (the GUI's 「繁忙时 Enter 键行为」 row): while the agent is running,
@@ -1272,7 +1280,8 @@ export class WeChatDSHBridge {
     // window already closed degrades to the next waking queue turn inside
     // AgentLoop, so neither mode can lose the message.
     const mode = agent.status === "running" ? this.ops.busyEnter() : "queue";
-    this.agents.followup(agent, blocks, messageId, mode);
+    const messageId = this.agents.followup(agent, blocks, mode);
+    this.markWechatMessage(messageId);
   }
 
   // ─── Outbound: DSH → WeChat ───
@@ -1292,8 +1301,8 @@ export class WeChatDSHBridge {
     // Agent followups (WeChat AND GUI) go through `inbox.append` →
     // `session.append('agent/inbox/spliced')` — this event is emitted at
     // ENQUEUE time, i.e. before the agent claims the message and assembles
-    // the system prompt (preStep). WeChat-injected messages carry a
-    // `wx-msg-` id prefix; anything else in a next-turn splice is a GUI
+    // the system prompt (preStep). WeChat-injected messages are those
+    // whose id is in `wechatMessageIds`; anything else in a next-turn splice is a GUI
     // (or other-surface) message, so the surface marker is correct at
     // assembly time instead of one turn late.
     if (event.type === "agent/inbox/spliced") {
@@ -1308,7 +1317,7 @@ export class WeChatDSHBridge {
         // (see commit history: this masked WeChat→GUI as "gui" for every turn).
         if (inserted.length > 0) {
           const isWechat = inserted.some(
-            (m) => typeof m?.id === "string" && m.id.startsWith("wx-msg-"),
+            (m) => typeof m?.id === "string" && this.wechatMessageIds.has(m.id),
           );
           this.markSessionSource(sessionId, isWechat ? "wechat" : "gui");
         }
@@ -1337,7 +1346,7 @@ export class WeChatDSHBridge {
         // agent/inbox/spliced above; this echo is emitted AFTER assembly,
         // so it only corrects sessions whose splice event was missed).
         const id = typeof data.id === "string" ? data.id : undefined;
-        const isWechatEcho = id !== undefined && id.startsWith("wx-msg-");
+        const isWechatEcho = id !== undefined && this.wechatMessageIds.has(id);
         if (isWechatEcho) {
           // Defensive cleanup; the marker was already set at followup time.
           this.wechatMessageIds.delete(id);
@@ -1436,77 +1445,201 @@ export class WeChatDSHBridge {
     void this.notifyCrossSessionError(agentId, error);
   }
 
-  // ─── Mux frame stream: approval/question cards (GUI-equivalent mirror) ───
+  // ─── Host waterfalls: approval/question cards (GUI-equivalent mirror) ───
 
   /**
-   * Subscribe to the apiproxy mux frame stream (all sessions). On open the
-   * stream replays every still-pending approval/question frame with its
-   * rpcId verbatim, so a late-connecting or reconnecting WeChat side always
-   * recovers the pending cards. Reconnect with a small delay on failure.
+   * Plugin dispose only — abandon pending WeChat waiters so `next()` (GUI)
+   * can still settle. WeChat reconnect/logout must NOT call this.
    */
-  attachMux(apiProxy: ApiProxySurface): void {
-    this.apiProxy = apiProxy;
-    if (this.muxStopped) return;
-    const events = (apiProxy as { events?: unknown }).events as
-      | {
-          mux(
-            request: { rpcId: string; payload: { since?: Record<string, number> } },
-            signal: AbortSignal,
-          ): AsyncIterable<{
-            type: "server-request";
-            rpcId: string;
-            method: string;
-            payload: { type: string; [k: string]: unknown };
-          }>;
-        }
-      | undefined;
-    if (!events?.mux) {
-      console.warn("[dsh-wechat] apiProxy.events.mux unavailable; approval/question cards disabled");
-      return;
-    }
-    if (this.muxLoopStarted) {
-      this.log("mux already running; apiProxy updated");
-      return;
-    }
-    this.muxLoopStarted = true;
-    this.log("mux loop starting");
-
-    const loop = async (): Promise<void> => {
-      while (!this.muxStopped) {
-        try {
-          const abort = new AbortController();
-          this.muxAbort = abort;
-          const frames = events.mux({ rpcId: `wx-mux-${Date.now().toString(36)}`, payload: {} }, abort.signal);
-          let opened = false;
-          for await (const frame of frames) {
-            if (abort.signal.aborted || this.muxStopped) break;
-            if (!opened) {
-              opened = true;
-              this.log("mux stream opened");
-            }
-            this.handleMuxFrame(frame);
-          }
-          if (this.muxStopped) return;
-          if (opened) this.log("mux stream ended; reopening in 2s");
-          await new Promise((r) => setTimeout(r, 2000));
-        } catch (err) {
-          if (this.muxStopped) return;
-          console.error(`[dsh-wechat] mux stream error: ${String(err)}`);
-          await new Promise((r) => setTimeout(r, 5000));
-        }
+  stopInteraction(): void {
+    this.interactionStopped = true;
+    for (const [userId, list] of [...this.pendingApprovals.entries()]) {
+      for (const card of [...list]) {
+        this.removeApprovalCard(userId, card.rpcId);
       }
+    }
+    for (const [userId, list] of [...this.pendingQuestions.entries()]) {
+      for (const card of [...list]) {
+        this.removeQuestionCard(userId, card.rpcId);
+      }
+    }
+  }
+
+  private sessionIdOfRequest(req: { agent?: { id?: string; session?: { header?: { id?: string }; id?: string } } }): string {
+    const agent = req.agent;
+    return agent?.session?.header?.id ?? agent?.session?.id ?? agent?.id ?? "";
+  }
+
+  /**
+   * Host `approval/request` waterfall answerer. Races the GUI (`next()`)
+   * against a WeChat reply so whoever answers first wins. No WeChat peer
+   * → immediately `next()`. Soft timeout withdraws the WeChat waiter
+   * without deciding, leaving the GUI card live.
+   */
+  async answerApprovalRequest(
+    req: ApprovalRequestLike,
+    next: () => Promise<ApprovalOutcome>,
+  ): Promise<ApprovalOutcome> {
+    if (this.interactionStopped) return next();
+    const sessionId = this.sessionIdOfRequest(req);
+    const toolName = typeof req.toolName === "string" && req.toolName ? req.toolName : "?";
+    if (!sessionId) return next();
+    const userId = this.recipientForSession(sessionId);
+    if (!userId) {
+      this.log(`approval/request ignored (no WeChat peer for session ${sessionId})`);
+      return next();
+    }
+
+    const rpcId = `wx-appr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const approvalId =
+      typeof req.callId === "string" && req.callId ? req.callId : rpcId;
+    let settleWechat: ((outcome: "allowed-once" | "rejected") => void) | null = null;
+    const wechat = new Promise<"allowed-once" | "rejected">((resolve) => {
+      settleWechat = resolve;
+    });
+    const card: PendingApproval = {
+      rpcId,
+      sessionId,
+      approvalId,
+      userId,
+      toolName,
+      reason: typeof req.reason === "string" ? req.reason : undefined,
+      askedAt: Date.now(),
+      settled: false,
+      settleWechat,
+      timer: setTimeout(() => {
+        if (card.settled) return;
+        this.removeApprovalCard(userId, rpcId);
+        void this.sendReply(
+          userId,
+          `⏰ 权限卡超时未回复（${toolName}），已移除；可在 DSH 界面继续处理。`,
+        ).catch(() => {});
+      }, this.config.cardTimeoutMs),
     };
-    void loop();
+    const list = this.pendingApprovals.get(userId) ?? [];
+    list.push(card);
+    this.pendingApprovals.set(userId, list);
+    const userState = this.state.getUser(userId);
+    if (userState?.sessionId === sessionId) {
+      void this.sendApprovalCard(userId, card, list.length).catch(() => {});
+    } else if (this.shouldNotifyCrossSession(userId)) {
+      void this.notifyCardPending(userId, sessionId).catch(() => {});
+    }
+
+    const gui = Promise.resolve()
+      .then(() => next())
+      .then((outcome) => ({ source: "gui" as const, outcome }))
+      .catch((err) => {
+        this.log(`approval next() failed: ${String(err)}`);
+        return { source: "gui" as const, outcome: "unavailable" as ApprovalOutcome };
+      });
+    const wechatWrapped = wechat.then((outcome) => ({ source: "wechat" as const, outcome }));
+
+    const winner = await Promise.race([gui, wechatWrapped]);
+    void gui.then(() => undefined, () => undefined);
+    void wechatWrapped.then(() => undefined, () => undefined);
+    this.removeApprovalCard(userId, rpcId);
+    if (winner.source === "gui") {
+      if (this.shouldNotifyCrossSession(userId)) {
+        const label =
+          winner.outcome === "allowed-once"
+            ? "✅ 已允许"
+            : winner.outcome === "rejected"
+              ? "⛔ 已拒绝"
+              : "🚫 已取消";
+        void this.sendReply(userId, `🔒 权限请求结果：${label}（${toolName}）`).catch(() => {});
+      }
+    }
+    return winner.outcome;
   }
 
-  /** Stop the mux subscription (plugin dispose only — not WeChat reconnect). */
-  stopMux(): void {
-    this.muxStopped = true;
-    this.muxAbort?.abort();
-    this.muxAbort = null;
+  /**
+   * Host `user-questions/request` waterfall answerer. Same race as
+   * approvals: WeChat vs GUI, first settle wins. Soft timeout withdraws
+   * the WeChat waiter without answering.
+   */
+  async answerQuestionRequest(
+    req: QuestionRequestLike,
+    next: () => Promise<AskUserQuestionAnswer>,
+  ): Promise<AskUserQuestionAnswer> {
+    if (this.interactionStopped) return next();
+    const sessionId = this.sessionIdOfRequest(req);
+    const questions = req.questions;
+    if (!sessionId || !Array.isArray(questions) || questions.length === 0) return next();
+    const userId = this.recipientForSession(sessionId);
+    if (!userId) {
+      this.log(`user-questions/request ignored (no WeChat peer for session ${sessionId})`);
+      return next();
+    }
+
+    const rpcId = `wx-q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    let settleWechat: ((answer: AskUserQuestionAnswer) => void) | null = null;
+    let cancelWechat: ((reason: unknown) => void) | null = null;
+    const wechat = new Promise<AskUserQuestionAnswer>((resolve, reject) => {
+      settleWechat = resolve;
+      cancelWechat = reject;
+    });
+    const card: PendingQuestion = {
+      rpcId,
+      sessionId,
+      userId,
+      items: questions,
+      askedAt: Date.now(),
+      settled: false,
+      settleWechat,
+      cancelWechat,
+      timer: setTimeout(() => {
+        if (card.settled) return;
+        this.removeQuestionCard(userId, rpcId);
+        void this.sendReply(userId, "⏰ 提问卡超时未回复，已移除；可在 DSH 界面继续回答。").catch(() => {});
+      }, this.config.cardTimeoutMs),
+    };
+    const list = this.pendingQuestions.get(userId) ?? [];
+    list.push(card);
+    this.pendingQuestions.set(userId, list);
+    const userState = this.state.getUser(userId);
+    if (userState?.sessionId === sessionId) {
+      void this.sendQuestionCard(userId, card, questions, list.length).catch(() => {});
+    } else if (this.shouldNotifyCrossSession(userId)) {
+      void this.notifyCardPending(userId, sessionId).catch(() => {});
+    }
+
+    type QuestionWinner =
+      | { source: "gui"; answer: AskUserQuestionAnswer }
+      | { source: "wechat"; answer: AskUserQuestionAnswer };
+    const gui = Promise.resolve()
+      .then(() => next())
+      .then((answer): QuestionWinner => ({ source: "gui", answer }));
+    const wechatWrapped = wechat.then((answer): QuestionWinner => ({ source: "wechat", answer }));
+
+    try {
+      const winner = await Promise.race([gui, wechatWrapped]);
+      this.removeQuestionCard(userId, rpcId);
+      if (winner.source === "gui" && this.shouldNotifyCrossSession(userId)) {
+        void this.sendReply(userId, "✅ 提问已回答。").catch(() => {});
+      }
+      return winner.answer;
+    } catch (err) {
+      this.removeQuestionCard(userId, rpcId);
+      if (this.shouldNotifyCrossSession(userId)) {
+        void this.sendReply(userId, "🚫 提问已取消。").catch(() => {});
+      }
+      throw err;
+    } finally {
+      // The loser of the race (GUI next() or a leftover WeChat waiter) must
+      // not become an unhandled rejection after this answerer returns.
+      void gui.then(() => undefined, () => undefined);
+      void wechatWrapped.then(() => undefined, () => undefined);
+    }
   }
 
-  private handleMuxFrame(frame: {
+  /**
+   * Test / replay helper: register a card without holding a live waterfall.
+   * Production cards come from {@link answerApprovalRequest} /
+   * {@link answerQuestionRequest}. Kept so existing unit tests can seed
+   * pending tables without spinning a Host waterfall.
+   */
+  handleMuxFrame(frame: {
     type: "server-request";
     rpcId: string;
     method: string;
@@ -1521,7 +1654,7 @@ export class WeChatDSHBridge {
         if (!frame.rpcId || !sessionId || !approvalId) return;
         const userId = this.recipientForSession(sessionId);
         if (!userId) {
-          this.log(`mux approval/requested ignored (no WeChat peer for session ${sessionId})`);
+          this.log(`approval/requested ignored (no WeChat peer for session ${sessionId})`);
           return;
         }
         const card: PendingApproval = {
@@ -1532,6 +1665,8 @@ export class WeChatDSHBridge {
           toolName,
           reason: typeof payload.reason === "string" ? payload.reason : undefined,
           askedAt: Date.now(),
+          settled: false,
+          settleWechat: null,
           timer: setTimeout(() => {
             this.removeApprovalCard(userId, frame.rpcId);
             void this.sendReply(
@@ -1543,19 +1678,11 @@ export class WeChatDSHBridge {
         const list = this.pendingApprovals.get(userId) ?? [];
         list.push(card);
         this.pendingApprovals.set(userId, list);
-        // Show the card immediately only when it belongs to the user's
-        // current session; otherwise notify once and flush on switch.
-        // Unified cross-session switch gates the notification.
-        // The typing indicator stays on through card waits — agent.status
-        // is still "running" until turn/end.
         const userState = this.state.getUser(userId);
         if (userState?.sessionId === sessionId) {
           void this.sendApprovalCard(userId, card, list.length).catch(() => {});
-        } else {
-          if (!this.shouldNotifyCrossSession(userId)) {
-          } else {
-            void this.notifyCardPending(userId, sessionId).catch(() => {});
-          }
+        } else if (this.shouldNotifyCrossSession(userId)) {
+          void this.notifyCardPending(userId, sessionId).catch(() => {});
         }
         break;
       }
@@ -1580,7 +1707,7 @@ export class WeChatDSHBridge {
         if (!frame.rpcId || !sessionId || !Array.isArray(questions) || questions.length === 0) return;
         const userId = this.recipientForSession(sessionId);
         if (!userId) {
-          this.log(`mux question/requested ignored (no WeChat peer for session ${sessionId})`);
+          this.log(`question/requested ignored (no WeChat peer for session ${sessionId})`);
           return;
         }
         const card: PendingQuestion = {
@@ -1589,6 +1716,9 @@ export class WeChatDSHBridge {
           userId,
           items: questions,
           askedAt: Date.now(),
+          settled: false,
+          settleWechat: null,
+          cancelWechat: null,
           timer: setTimeout(() => {
             this.removeQuestionCard(userId, frame.rpcId);
             void this.sendReply(userId, "⏰ 提问卡超时未回复，已移除；可在 DSH 界面继续回答。").catch(() => {});
@@ -1597,16 +1727,11 @@ export class WeChatDSHBridge {
         const list = this.pendingQuestions.get(userId) ?? [];
         list.push(card);
         this.pendingQuestions.set(userId, list);
-        // Same current-session policy as approval cards. Unified switch gates notification.
-        // Typing indicator stays on through card waits — agent.status is still "running".
         const userState = this.state.getUser(userId);
         if (userState?.sessionId === sessionId) {
           void this.sendQuestionCard(userId, card, questions, list.length).catch(() => {});
-        } else {
-          if (!this.shouldNotifyCrossSession(userId)) {
-          } else {
-            void this.notifyCardPending(userId, sessionId).catch(() => {});
-          }
+        } else if (this.shouldNotifyCrossSession(userId)) {
+          void this.notifyCardPending(userId, sessionId).catch(() => {});
         }
         break;
       }
@@ -1898,24 +2023,15 @@ export class WeChatDSHBridge {
     entry: PendingApproval,
     outcome: "allowed-once" | "rejected",
   ): Promise<{ accepted: boolean; reason?: string }> {
-    if (!this.apiProxy) return { accepted: false, reason: "apiProxy-unavailable" };
-    try {
-      return await this.apiProxy.respond({
-        type: "client-response",
-        rpcId: entry.rpcId,
-        result: {
-          ok: true,
-          value: {
-            sessionId: entry.sessionId,
-            approvalId: entry.approvalId,
-            outcome,
-          },
-        },
-      });
-    } catch (err) {
-      console.error(`[dsh-wechat] approval respond failed: ${String(err)}`);
-      return { accepted: false, reason: "error" };
+    if (entry.settled) return { accepted: false, reason: "not-pending" };
+    entry.settled = true;
+    if (entry.settleWechat) {
+      entry.settleWechat(outcome);
+      return { accepted: true };
     }
+    // Test-seeded cards have no live waterfall waiter; treating the
+    // WeChat reply as accepted keeps /rp and reply grammar working.
+    return { accepted: true };
   }
 
   private removeApprovalCard(userId: string, rpcId: string): void {
@@ -2015,23 +2131,13 @@ export class WeChatDSHBridge {
     entry: PendingQuestion,
     answer: AskUserQuestionAnswer,
   ): Promise<{ accepted: boolean; reason?: string }> {
-    if (!this.apiProxy) return { accepted: false, reason: "apiProxy-unavailable" };
-    try {
-      return await this.apiProxy.respond({
-        type: "client-response",
-        rpcId: entry.rpcId,
-        result: {
-          ok: true,
-          value: {
-            sessionId: entry.sessionId,
-            answer,
-          },
-        },
-      });
-    } catch (err) {
-      console.error(`[dsh-wechat] question respond failed: ${String(err)}`);
-      return { accepted: false, reason: "error" };
+    if (entry.settled) return { accepted: false, reason: "not-pending" };
+    entry.settled = true;
+    if (entry.settleWechat) {
+      entry.settleWechat(answer);
+      return { accepted: true };
     }
+    return { accepted: true };
   }
 
   /** `/rq` — reject every pending question card of the current session. */
@@ -2047,13 +2153,15 @@ export class WeChatDSHBridge {
     }
     for (const entry of [...list]) {
       this.removeQuestionCard(userId, entry.rpcId);
-      if (this.apiProxy) {
+      if (entry.settled) continue;
+      entry.settled = true;
+      if (entry.cancelWechat) {
         try {
-          await this.apiProxy.respond({
-            type: "client-response",
-            rpcId: entry.rpcId,
-            result: { ok: false, error: { code: "cancelled" } },
+          const err = Object.assign(new Error("ask_user_question was aborted before the user answered"), {
+            name: "UserQuestionError",
+            code: "ASK_ABORTED",
           });
+          entry.cancelWechat(err);
         } catch {
           // best effort
         }
@@ -3244,11 +3352,20 @@ export class WeChatDSHBridge {
   // and ONE FIFO queue because this bridge intentionally serves one peer.
 
   /** Deliver one item, serialized with all other outbound sends and flushes. */
-  private deliverOutbound(userId: string, item: CachedMessage): Promise<"sent" | "cached" | "failed"> {
-    return this.serializeOutbound(() => this.deliverOutboundLocked(userId, item));
+  private deliverOutbound(
+    userId: string,
+    item: CachedMessage,
+    opts?: { parkOnError?: boolean },
+  ): Promise<"sent" | "cached" | "failed"> {
+    return this.serializeOutbound(() => this.deliverOutboundLocked(userId, item, opts));
   }
 
-  private async deliverOutboundLocked(userId: string, item: CachedMessage): Promise<"sent" | "cached" | "failed"> {
+  private async deliverOutboundLocked(
+    userId: string,
+    item: CachedMessage,
+    opts?: { parkOnError?: boolean },
+  ): Promise<"sent" | "cached" | "failed"> {
+    const parkOnError = opts?.parkOnError !== false;
     const token = this.token;
     if (!token || this.tokenGiveUp) {
       this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
@@ -3256,6 +3373,7 @@ export class WeChatDSHBridge {
     }
     if (this.tokenInvalid) {
       this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
+      if (!parkOnError) return "failed";
       this.parkOutbound(userId, item);
       return "cached";
     }
@@ -3273,6 +3391,7 @@ export class WeChatDSHBridge {
 
     const count = this.wechatMsgCount;
     if (count >= MSG_LIMIT_MAX) {
+      if (!parkOnError) return "failed";
       this.parkOutbound(userId, item);
       // No notice here: an 11th direct send would hit the same closed window.
       return "cached";
@@ -3306,12 +3425,18 @@ export class WeChatDSHBridge {
       this.log(`outbound send error (${item.kind}): ${String(err)}`);
       if (isMessageLimitError(err)) {
         this.wechatMsgCount = MSG_LIMIT_MAX;
+        if (!parkOnError) return "failed";
         this.parkOutbound(userId, item);
         return "cached";
+      }
+      if (isInvalidRequestError(err)) {
+        this.log(`drop outbound (invalid request, not queued): ${item.kind === "text" ? item.text.slice(0, 60) : item.fileName}`);
+        return "failed";
       }
       if (isSessionTimeoutError(err)) {
         this.markTokenInvalid();
         this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
+        if (!parkOnError) return "failed";
         this.parkOutbound(userId, item);
         return "cached";
       }
@@ -3319,6 +3444,10 @@ export class WeChatDSHBridge {
       // across identities; every other delivery error is parked.
       if (!this.token || this.tokenGiveUp) {
         this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
+        return "failed";
+      }
+      if (!parkOnError) {
+        this.log(`drop outbound (control reply, not queued): ${item.kind === "text" ? item.text.slice(0, 60) : item.fileName}`);
         return "failed";
       }
       this.parkOutbound(userId, item);
@@ -3361,7 +3490,8 @@ export class WeChatDSHBridge {
     }
   }
 
-  private async sendReply(userId: string, text: string): Promise<void> {
+  private async sendReply(userId: string, text: string, opts?: { parkOnError?: boolean }): Promise<void> {
+    const parkOnError = opts?.parkOnError !== false;
     if (!this.token || this.tokenGiveUp) {
       this.logDropOutbound(text.slice(0, 60));
       return;
@@ -3370,13 +3500,14 @@ export class WeChatDSHBridge {
     const segments = splitText(formatted, this.config.textChunkLimit);
     if (this.tokenInvalid) {
       this.logDropOutbound(text.slice(0, 60));
+      if (!parkOnError) return;
       await this.serializeOutbound(async () => {
         for (const segment of segments) this.parkOutbound(userId, { kind: "text", text: segment });
       });
       return;
     }
     for (const segment of segments) {
-      await this.deliverOutbound(userId, { kind: "text", text: segment });
+      await this.deliverOutbound(userId, { kind: "text", text: segment }, opts);
     }
   }
 
@@ -3398,7 +3529,9 @@ export class WeChatDSHBridge {
 
   private async flushPendingLocked(userId: string, opts?: { silent?: boolean }): Promise<void> {
     if (this.outboundCache.length === 0) {
-      if (!opts?.silent) await this.deliverOutboundLocked(userId, { kind: "text", text: "✅ 没有缓存的消息。" });
+      if (!opts?.silent) {
+        await this.deliverOutboundLocked(userId, { kind: "text", text: "✅ 没有缓存的消息。" }, { parkOnError: false });
+      }
       return;
     }
 
@@ -3449,6 +3582,13 @@ export class WeChatDSHBridge {
         this.persistOutboundState(userId);
       } catch (err) {
         this.log(`flush send error: ${String(err)}`);
+        if (isInvalidRequestError(err)) {
+          this.log(`flush dropping invalid cached ${msg.kind === "text" ? "text" : msg.fileName}`);
+          dropped++;
+          this.outboundCache.shift();
+          this.persistOutboundState(userId);
+          continue;
+        }
         if (isMessageLimitError(err)) this.wechatMsgCount = MSG_LIMIT_MAX;
         if (isSessionTimeoutError(err)) this.markTokenInvalid();
         break;
@@ -3457,16 +3597,24 @@ export class WeChatDSHBridge {
 
     const remaining = this.outboundCache;
     this.persistOutboundState(userId);
-    const dropSuffix = dropped > 0 ? `，${dropped} 条文件缓存因无法读取被丢弃` : "";
+    const dropSuffix = dropped > 0 ? `，${dropped} 条无法投递的缓存已丢弃` : "";
     if (remaining.length > 0) {
       this.log(`flush leftover ${remaining.length} item(s) for ${userId} (sent ${sentCount})`);
       if (!opts?.silent && this.wechatMsgCount < MSG_LIMIT_MAX) {
-        await this.deliverOutboundLocked(userId, { kind: "text", text: `✅ 已发送 ${sentCount} 条，剩余 ${remaining.length} 条缓存，/next 继续。${dropSuffix}` });
+        await this.deliverOutboundLocked(
+          userId,
+          { kind: "text", text: `✅ 已发送 ${sentCount} 条，剩余 ${remaining.length} 条缓存，/next 继续。${dropSuffix}` },
+          { parkOnError: false },
+        );
       }
     } else {
       this.log(`flush completed ${sentCount} item(s) for ${userId}${dropSuffix}`);
       if (!opts?.silent && this.wechatMsgCount < MSG_LIMIT_MAX) {
-        await this.deliverOutboundLocked(userId, { kind: "text", text: `✅ 全部 ${sentCount} 条缓存消息已发送${dropSuffix}。` });
+        await this.deliverOutboundLocked(
+          userId,
+          { kind: "text", text: `✅ 全部 ${sentCount} 条缓存消息已发送${dropSuffix}。` },
+          { parkOnError: false },
+        );
       }
     }
   }

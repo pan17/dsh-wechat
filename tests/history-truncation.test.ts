@@ -27,6 +27,7 @@ vi.mock("../src/weixin/api.js", () => ({
   getConfig: () => Promise.resolve({ typing_ticket: "tk" }),
   isSessionTimeoutError: () => false,
   isMessageLimitError: () => false,
+  isInvalidRequestError: () => false,
 }));
 
 import { WeChatDSHBridge } from "../src/bridge/bridge.js";
@@ -161,11 +162,6 @@ describe("/history per-entry truncation", () => {
     const long = "x".repeat(1500);
     const bridge = makeBridge([assistantEventWithText(long)]);
     // Register a pending question card so /history also re-sends the full card.
-    const api: { respond: unknown; events: { mux: () => AsyncIterable<unknown> } } = {
-      respond: vi.fn().mockResolvedValue({ accepted: true }),
-      events: { mux: () => (async function* () {})() },
-    };
-    (bridge as unknown as { attachMux(api: unknown): void }).attachMux(api);
     (bridge as unknown as { handleMuxFrame: (f: unknown) => void }).handleMuxFrame({
       type: "server-request",
       rpcId: "q-rpc",
@@ -180,5 +176,35 @@ describe("/history per-entry truncation", () => {
     expect(texts.some((t) => t.includes("Continue?"))).toBe(true);
     // The untruncated latest assistant reply still flows through (no "…").
     expect(texts.some((t) => /助手: x{1500}/.test(t))).toBe(true);
+  });
+
+  it("cold history prefers sessionQuery.readSession when the agent is not live", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-hist-cold-"));
+    const query = {
+      listSessions: async () => [],
+      readTitle: async () => undefined,
+      listEvents: async () => [{ type: "user/message", time: 1 }],
+      readSession: async () => ({
+        events: [
+          { type: "user/message", time: 1, data: { message: { content: [{ type: "text", text: "cold user" }] } } },
+          { type: "assistant/message", time: 2, data: { message: { content: [{ type: "text", text: "cold assistant" }] } } },
+        ],
+      }),
+    };
+    const ctx = {
+      get: (name: string) => (name === "sessionQuery" ? query : undefined),
+      on: () => () => {},
+    };
+    const cfg = defaultConfig();
+    cfg.storageDir = dir;
+    const bridge = new WeChatDSHBridge(ctx, cfg);
+    (bridge as unknown as { token: unknown }).token = { baseUrl: "https://x", token: "t" };
+    const state = (bridge as unknown as { state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void } }).state;
+    state.ensureUser("u1", "C:\\work");
+    state.update("u1", { sessionId: "wx-1" });
+    const texts = await runHistory(bridge);
+    const joined = texts.join("\n");
+    expect(joined).toContain("cold user");
+    expect(joined).toContain("cold assistant");
   });
 });

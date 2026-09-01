@@ -18,6 +18,7 @@ import fs from "node:fs";
 const sendTextMessage = vi.fn().mockResolvedValue(undefined);
 const sendMediaMessage = vi.fn().mockResolvedValue(undefined);
 const isMessageLimitError = vi.fn().mockReturnValue(false);
+const isInvalidRequestError = vi.fn().mockReturnValue(false);
 
 vi.mock("../src/weixin/send.js", () => ({
   sendTextMessage: (...args: unknown[]) => sendTextMessage(...args),
@@ -31,6 +32,7 @@ vi.mock("../src/weixin/api.js", () => ({
   getConfig: () => Promise.resolve({ typing_ticket: "tk-default" }),
   isSessionTimeoutError: () => false,
   isMessageLimitError: (err: unknown) => isMessageLimitError(err),
+  isInvalidRequestError: (err: unknown) => isInvalidRequestError(err),
 }));
 
 import { WeChatDSHBridge } from "../src/bridge/bridge.js";
@@ -84,6 +86,7 @@ beforeEach(() => {
   sendTextMessage.mockResolvedValue(undefined);
   sendMediaMessage.mockResolvedValue(undefined);
   isMessageLimitError.mockReturnValue(false);
+  isInvalidRequestError.mockReturnValue(false);
 });
 
 describe("send_wechat: bound session", () => {
@@ -348,6 +351,62 @@ describe("send_wechat: shared gateway budget & cache", () => {
     expect(result.message).toMatch(/queued/i);
     expect(b.outboundCache).toHaveLength(1);
     expect(b.outboundCache![0]).toMatchObject({ kind: "text", text: "flaky" });
+  });
+
+  it("flush drops invalid-request payloads and continues with the rest", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    const invalid = Object.assign(new Error("ilink/bot/sendmessage: ret=-1 invalid request"), { name: "IlinkApiError" });
+    b.outboundCache = [
+      { kind: "text", text: "poisoned-status" },
+      { kind: "text", text: "good-payload" },
+    ];
+    sendTextMessage.mockImplementation(async (_to: string, text: string) => {
+      if (text === "poisoned-status") throw invalid;
+    });
+    isInvalidRequestError.mockImplementation((err) => err === invalid);
+
+    await b.flushPending("u1");
+
+    const sent = sendTextMessage.mock.calls.map((c) => String(c[1]));
+    expect(sent).toContain("good-payload");
+    expect(b.outboundCache.some((item) => item.text === "poisoned-status")).toBe(false);
+  });
+
+  it("flush leftover summary is not parked when its own send fails", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    b.wechatMsgCount = 10;
+    await bridge.handleSendWeChat("wx-s1", { text: "stuck-payload" });
+    expect(b.outboundCache).toEqual([{ kind: "text", text: "stuck-payload" }]);
+
+    b.wechatMsgCount = 0;
+    sendTextMessage.mockRejectedValue(new Error("gateway 429"));
+    await b.flushPending("u1");
+
+    expect(b.outboundCache).toEqual([{ kind: "text", text: "stuck-payload" }]);
+    expect(b.outboundCache.some((item) => String(item.text).includes("已发送"))).toBe(false);
+    expect(b.outboundCache.some((item) => String(item.text).includes("暂存待发"))).toBe(false);
+  });
+
+  it("/status auto-flush does not grow the cache with status or leftover summaries", async () => {
+    const bridge = setup();
+    const b = asBudget(bridge);
+    b.wechatMsgCount = 10;
+    await bridge.handleSendWeChat("wx-s1", { text: "stuck-payload" });
+    sendTextMessage.mockClear();
+    sendTextMessage.mockRejectedValue(new Error("gateway 429"));
+
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage({
+      message_type: 1,
+      from_user_id: "u1",
+      context_token: "tok",
+      item_list: [{ type: 1, text_item: { text: "/status" } }],
+    });
+
+    expect(b.outboundCache).toEqual([{ kind: "text", text: "stuck-payload" }]);
+    expect(b.outboundCache.some((item) => String(item.text).includes("已发送"))).toBe(false);
+    expect(b.outboundCache.some((item) => String(item.text).includes("当前状态"))).toBe(false);
   });
 
   it("queued tool text is delivered by flushPending", async () => {

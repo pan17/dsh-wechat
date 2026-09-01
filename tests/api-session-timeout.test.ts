@@ -21,6 +21,7 @@ import {
   sendMessage,
   isSessionTimeoutContentLengthError,
   IlinkApiError,
+  isInvalidRequestError,
   isMessageLimitError,
   isSessionTimeoutError,
   SessionTimeoutError,
@@ -190,6 +191,22 @@ describe("sendMessage: parseable -14 is a thrown SessionTimeoutError", () => {
       caught = err;
     }
     expect(caught).toBeInstanceOf(IlinkApiError);
+    expect(isMessageLimitError(caught)).toBe(false);
+    expect(isInvalidRequestError(caught)).toBe(false);
+  });
+
+  it("classifies ret=-1 invalid request as a non-retryable payload error", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ret: -1, errmsg: "invalid request" }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    let caught: unknown;
+    try {
+      await sendMessage({ baseUrl: "https://gw", token: "t", body: {}, retries: 0 });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(IlinkApiError);
+    expect(isInvalidRequestError(caught)).toBe(true);
     expect(isMessageLimitError(caught)).toBe(false);
   });
 

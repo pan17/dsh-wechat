@@ -19,7 +19,7 @@ vi.mock("../src/weixin/send.js", () => ({
     text.length <= maxLen ? [text] : [text.slice(0, maxLen), text.slice(maxLen)],
 }));
 
-import { WeChatDSHBridge, type ApiProxySurface } from "../src/bridge/bridge.js";
+import { WeChatDSHBridge } from "../src/bridge/bridge.js";
 import { defaultConfig } from "../src/config.js";
 import { MessageType } from "../src/weixin/types.js";
 
@@ -59,19 +59,40 @@ function questionFrame(rpcId: string) {
   };
 }
 
+function captureApprovalOutcomes(bridge: WeChatDSHBridge): Array<"allowed-once" | "rejected"> {
+  const anyBridge = bridge as unknown as {
+    pendingApprovals: Map<string, Array<{ settleWechat: ((o: "allowed-once" | "rejected") => void) | null }>>;
+  };
+  const list = anyBridge.pendingApprovals.get("u1") ?? [];
+  const card = list[list.length - 1];
+  const outcomes: Array<"allowed-once" | "rejected"> = [];
+  if (card) card.settleWechat = (o) => outcomes.push(o);
+  return outcomes;
+}
+
+function captureQuestionAnswers(bridge: WeChatDSHBridge): unknown[] {
+  const anyBridge = bridge as unknown as {
+    pendingQuestions: Map<string, Array<{
+      settleWechat: ((a: unknown) => void) | null;
+      cancelWechat: ((r: unknown) => void) | null;
+    }>>;
+  };
+  const list = anyBridge.pendingQuestions.get("u1") ?? [];
+  const card = list[list.length - 1];
+  const answers: unknown[] = [];
+  if (card) {
+    card.settleWechat = (a) => answers.push(a);
+    card.cancelWechat = (r) => answers.push({ cancelled: true, reason: r });
+  }
+  return answers;
+}
+
 describe("frame-driven approval cards", () => {
   let bridge: WeChatDSHBridge;
-  let respondMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     bridge = makeBridge();
-    respondMock = vi.fn().mockResolvedValue({ accepted: true });
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
   });
 
   it("approval/requested frame registers a card and respond() injects the decision", async () => {
@@ -86,13 +107,9 @@ describe("frame-driven approval cards", () => {
     expect(list?.length).toBe(1);
     expect((list![0] as { toolName: string }).toolName).toBe("pwsh");
 
+    const outcomes = captureApprovalOutcomes(bridge);
     await anyBridge.handleApprovalReply("u1", "1");
-    expect(respondMock).toHaveBeenCalledTimes(1);
-    expect(respondMock).toHaveBeenCalledWith({
-      type: "client-response",
-      rpcId: "rpc-1",
-      result: { ok: true, value: { sessionId: "wx-1", approvalId: "a-1", outcome: "allowed-once" } },
-    });
+    expect(outcomes).toEqual(["allowed-once"]);
     expect(anyBridge.pendingApprovals.get("u1") ?? []).toHaveLength(0);
   });
 
@@ -102,18 +119,20 @@ describe("frame-driven approval cards", () => {
       handleApprovalReply(u: string, t: string): Promise<void>;
     };
     anyBridge.handleMuxFrame(approvalFrame("rpc-2", "a-2", "bash"));
+    const outcomes = captureApprovalOutcomes(bridge);
     await anyBridge.handleApprovalReply("u1", "2");
-    const call = respondMock.mock.calls[0]![0] as { result: { value: { outcome: string } } };
-    expect(call.result.value.outcome).toBe("rejected");
+    expect(outcomes).toEqual(["rejected"]);
   });
 
   it("not-pending receipt is surfaced without crashing", async () => {
-    respondMock.mockResolvedValue({ accepted: false, reason: "not-pending" });
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleApprovalReply(u: string, t: string): Promise<void>;
+      pendingApprovals: Map<string, Array<{ settled: boolean }>>;
     };
     anyBridge.handleMuxFrame(approvalFrame("rpc-3", "a-3", "pwsh"));
+    const card = anyBridge.pendingApprovals.get("u1")![0]!;
+    card.settled = true;
     await anyBridge.handleApprovalReply("u1", "1");
     expect(anyBridge.pendingApprovals.get("u1") ?? []).toHaveLength(0);
   });
@@ -154,29 +173,20 @@ describe("frame-driven approval cards", () => {
       handleApprovalReply(u: string, t: string): Promise<void>;
     };
     anyBridge.handleMuxFrame(approvalFrame("rpc-a", "a-a", "pwsh"));
+    const first = captureApprovalOutcomes(bridge);
     anyBridge.handleMuxFrame(approvalFrame("rpc-b", "a-b", "run_code"));
+    const second = captureApprovalOutcomes(bridge);
     await anyBridge.handleApprovalReply("u1", "P1=1 P2=2");
-    expect(respondMock).toHaveBeenCalledTimes(2);
-    const outcomes = respondMock.mock.calls.map(
-      (c) => (c[0] as { result: { value: { outcome: string } } }).result.value.outcome,
-    );
-    expect(outcomes).toEqual(["allowed-once", "rejected"]);
+    expect([...first, ...second]).toEqual(["allowed-once", "rejected"]);
   });
 });
 
 describe("frame-driven question cards", () => {
   let bridge: WeChatDSHBridge;
-  let respondMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     bridge = makeBridge();
-    respondMock = vi.fn().mockResolvedValue({ accepted: true });
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
   });
 
   it("question/requested registers a card and respond() injects the answer", async () => {
@@ -185,15 +195,11 @@ describe("frame-driven question cards", () => {
       handleQuestionReply(u: string, t: string): Promise<void>;
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc-1"));
+    const answers = captureQuestionAnswers(bridge);
     await anyBridge.handleQuestionReply("u1", "2");
-    expect(respondMock).toHaveBeenCalledTimes(1);
-    const call = respondMock.mock.calls[0]![0] as {
-      rpcId: string;
-      result: { ok: true; value: { sessionId: string; answer: { answers: Array<{ id: string; selected: string[] }> } } };
-    };
-    expect(call.rpcId).toBe("q-rpc-1");
-    expect(call.result.value.sessionId).toBe("wx-1");
-    expect(call.result.value.answer.answers[0]!.selected).toEqual(["No"]);
+    expect(answers).toHaveLength(1);
+    const answer = answers[0] as { answers: Array<{ id: string; selected: string[] }> };
+    expect(answer.answers[0]!.selected).toEqual(["No"]);
   });
 
   it("/rq rejects all pending question cards with cancelled", async () => {
@@ -202,10 +208,10 @@ describe("frame-driven question cards", () => {
       rejectPendingQuestion(u: string): Promise<void>;
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc-2"));
+    const answers = captureQuestionAnswers(bridge);
     await anyBridge.rejectPendingQuestion("u1");
-    expect(respondMock).toHaveBeenCalledTimes(1);
-    const call = respondMock.mock.calls[0]![0] as { result: { ok: false; error: { code: string } } };
-    expect(call.result).toEqual({ ok: false, error: { code: "cancelled" } });
+    expect(answers).toHaveLength(1);
+    expect(answers[0]).toMatchObject({ cancelled: true });
   });
 });
 
@@ -221,17 +227,10 @@ function userTextMessage(text: string) {
 
 describe("card-bypass for slash commands", () => {
   let bridge: WeChatDSHBridge;
-  let respondMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     bridge = makeBridge();
-    respondMock = vi.fn().mockResolvedValue({ accepted: true });
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
   });
 
   it("question card + /next flushes cache and leaves the card pending", async () => {
@@ -247,7 +246,6 @@ describe("card-bypass for slash commands", () => {
     // /next flushed the cache to WeChat.
     expect(sendTextMessage).toHaveBeenCalled();
     // The card was NOT answered.
-    expect(respondMock).not.toHaveBeenCalled();
     expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
   });
 
@@ -262,7 +260,6 @@ describe("card-bypass for slash commands", () => {
     anyBridge.outboundCache = [{ kind: "text", text: "cached" }];
     await anyBridge.handleMessage(userTextMessage("/next"));
     expect(sendTextMessage).toHaveBeenCalled();
-    expect(respondMock).not.toHaveBeenCalled();
     expect(anyBridge.pendingApprovals.get("u1")?.length).toBe(1);
   });
 
@@ -278,7 +275,6 @@ describe("card-bypass for slash commands", () => {
     expect(sendTextMessage).toHaveBeenCalled();
     const statusText = sendTextMessage.mock.calls.map((c) => String(c[1])).join("\n");
     expect(statusText).toContain("🔴 • 待处理: 1 张提问卡");
-    expect(respondMock).not.toHaveBeenCalled();
     expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
   });
 
@@ -308,7 +304,6 @@ describe("card-bypass for slash commands", () => {
     expect(texts.some((t) => t.includes("暂无历史消息") || t.includes("最近"))).toBe(true);
     expect(texts.some((t) => t.includes("待处理卡片"))).toBe(true);
     expect(texts.some((t) => t.includes("Continue?"))).toBe(true);
-    expect(respondMock).not.toHaveBeenCalled();
     expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
   });
 
@@ -336,7 +331,6 @@ describe("card-bypass for slash commands", () => {
     await anyBridge.handleMessage(userTextMessage("/help"));
     // /help prints the help text via sendTextMessage.
     expect(sendTextMessage).toHaveBeenCalled();
-    expect(respondMock).not.toHaveBeenCalled();
     expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
   });
 
@@ -347,8 +341,9 @@ describe("card-bypass for slash commands", () => {
       pendingQuestions: unknown[];
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    const answers = captureQuestionAnswers(bridge);
     await anyBridge.handleMessage(userTextMessage("/rq"));
-    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(answers).toHaveLength(1);
     expect(anyBridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
   });
 
@@ -359,8 +354,9 @@ describe("card-bypass for slash commands", () => {
       pendingApprovals: unknown[];
     };
     anyBridge.handleMuxFrame(approvalFrame("a-rpc", "a-id", "pwsh"));
+    const outcomes = captureApprovalOutcomes(bridge);
     await anyBridge.handleMessage(userTextMessage("/rp"));
-    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(outcomes).toEqual(["rejected"]);
     expect(anyBridge.pendingApprovals.get("u1") ?? []).toHaveLength(0);
   });
 
@@ -371,8 +367,9 @@ describe("card-bypass for slash commands", () => {
       pendingQuestions: unknown[];
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    const answers = captureQuestionAnswers(bridge);
     await anyBridge.handleMessage(userTextMessage("1"));
-    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(answers).toHaveLength(1);
     expect(anyBridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
   });
 
@@ -385,8 +382,9 @@ describe("card-bypass for slash commands", () => {
       handleMessage(m: unknown): Promise<void>;
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    const answers = captureQuestionAnswers(bridge);
     await anyBridge.handleMessage(userTextMessage("/foobar"));
-    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(answers).toHaveLength(1);
   });
 
   it("empty text still triggers the card-handler hint (bypassCard is false)", async () => {
@@ -403,6 +401,81 @@ describe("card-bypass for slash commands", () => {
     });
     // Empty text + pending question → hint message, no card answer.
     expect(sendTextMessage).toHaveBeenCalled();
-    expect(respondMock).not.toHaveBeenCalled();
+    const pending = (bridge as unknown as { pendingQuestions: Map<string, unknown[]> }).pendingQuestions;
+    expect(pending.get("u1")?.length).toBe(1);
+  });
+});
+
+describe("waterfall race: WeChat vs GUI", () => {
+  let bridge: WeChatDSHBridge;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    bridge = makeBridge();
+  });
+
+  it("no WeChat peer immediately next()s", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-empty-"));
+    const ctx = { get: () => undefined, on: () => () => {} };
+    const cfg = defaultConfig();
+    cfg.storageDir = dir;
+    const empty = new WeChatDSHBridge(ctx, cfg);
+    const next = vi.fn().mockResolvedValue("unavailable");
+    const outcome = await empty.answerApprovalRequest(
+      { agent: { id: "orphan" }, toolName: "pwsh" },
+      next,
+    );
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(outcome).toBe("unavailable");
+  });
+
+  it("WeChat reply wins the approval race", async () => {
+    let resolveGui: ((o: "allowed-once" | "rejected") => void) | undefined;
+    const gui = new Promise<"allowed-once" | "rejected">((resolve) => {
+      resolveGui = resolve;
+    });
+    const pending = bridge.answerApprovalRequest(
+      { agent: { id: "wx-1" }, toolName: "pwsh", reason: "run" },
+      () => gui,
+    );
+    await Promise.resolve();
+    const anyBridge = bridge as unknown as {
+      handleApprovalReply(u: string, t: string): Promise<void>;
+    };
+    await anyBridge.handleApprovalReply("u1", "1");
+    await expect(pending).resolves.toBe("allowed-once");
+    resolveGui?.("rejected");
+  });
+
+  it("GUI next() wins the approval race", async () => {
+    const pending = bridge.answerApprovalRequest(
+      { agent: { id: "wx-1" }, toolName: "pwsh" },
+      async () => "rejected",
+    );
+    await expect(pending).resolves.toBe("rejected");
+    const cards = (bridge as unknown as { pendingApprovals: Map<string, unknown[]> }).pendingApprovals;
+    expect(cards.get("u1") ?? []).toHaveLength(0);
+  });
+
+  it("WeChat answer wins the question race", async () => {
+    let resolveGui: ((a: { answers: Array<{ id: string; selected: string[] }> }) => void) | undefined;
+    const gui = new Promise<{ answers: Array<{ id: string; selected: string[] }> }>((resolve) => {
+      resolveGui = resolve;
+    });
+    const pending = bridge.answerQuestionRequest(
+      {
+        agent: { id: "wx-1" },
+        questions: [{ id: "q1", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }],
+      },
+      () => gui,
+    );
+    await Promise.resolve();
+    const anyBridge = bridge as unknown as {
+      handleQuestionReply(u: string, t: string): Promise<void>;
+    };
+    await anyBridge.handleQuestionReply("u1", "2");
+    const answer = await pending;
+    expect(answer.answers[0]!.selected).toEqual(["No"]);
+    resolveGui?.({ answers: [{ id: "q1", selected: ["Yes"] }] });
   });
 });

@@ -31,7 +31,7 @@ vi.mock("../src/weixin/send.js", () => ({
     text.length <= maxLen ? [text] : [text.slice(0, maxLen), text.slice(maxLen)],
 }));
 
-import { WeChatDSHBridge, type ApiProxySurface } from "../src/bridge/bridge.js";
+import { WeChatDSHBridge } from "../src/bridge/bridge.js";
 import { defaultConfig } from "../src/config.js";
 
 function makeBridge() {
@@ -275,12 +275,6 @@ describe("notification dedupe: WeChat reply path (mark cleared via removeApprova
     // flushPendingCardsForSession), then replies from WeChat → removeApprovalCard
     // runs but the mark was already cleared — invariant preserved.
     const bridge = makeBridge();
-    const respondMock = vi.fn().mockResolvedValue({ accepted: true });
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
 
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
@@ -304,6 +298,5 @@ describe("notification dedupe: WeChat reply path (mark cleared via removeApprova
     // The helper is a no-op here since mark was already cleared.
     await anyBridge.handleApprovalReply("u1", "1");
     expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(false);
-    expect(respondMock).toHaveBeenCalledTimes(1);
   });
 });

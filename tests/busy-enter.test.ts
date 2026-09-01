@@ -144,7 +144,7 @@ describe("busy-time delivery follows ui-conversation.busyEnter", () => {
     );
     expect(mock.steers.length).toBe(1);
     expect(mock.followups.length).toBe(0);
-    expect(mock.steers[0]!.id).toMatch(/^wx-msg-/);
+    expect(mock.steers[0]!.id).toBeTruthy();
   });
 
   it("running + queue keeps the ordinary follow-up turn", async () => {

@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- flush 剩余摘要（`✅ 已发送 N 条…`）和 `/status` 正文发送失败时不再写入 outbound 缓存。原先真实缓存发不出去时，这些控制回执会把自己再塞进队列，表现为「已发送 0 条」后缓存条数随 `/status` / `/next` 递增。管理命令仍会先自动 flush。
+- `/status` 会话级投影截断不再切开 emoji 代理对；发送前会清洗孤立 surrogate。这类正文会让 iLink 返回 `ret=-1 invalid request`，flush 卡在队头「已发送 0 条」。flush 遇到无法投递的缓存会丢掉该条并继续发后面的。
+
+## [0.8.0] - 2026-09-01
+
+### Changed
+
+- 适配 DSH **0.1.2-alpha.3**：审批/提问卡从已删除的 `apiProxy.events.mux` + `respond()` 改为 Host `approval/request` / `user-questions/request` waterfall 竞速（微信与 GUI 谁先答谁生效）。不再兼容 0.1.1-rc.2。
+- Client 半部 `dsh.client.inject` 去掉已下架的 `@deepseek-ai/dsh-client-runtime`，改为 `dsh-client-ui-settings` + `dsh-client-ui-slots`。
+- 用户消息 id 改由 `createUserMessage` 自行铸造（0.1.2 禁止调用方传入 `id`）；微信溯源改为记录铸造后的 id。
+- 冷会话 `/history` 优先走 `sessionQuery.readSession()`（0.1.2 的 `listEvents` 不再带 `data`）。
+
+### Fixed
+
+- 设置页在 0.1.2 上因缺失 `dsh-client-runtime` 无法挂载的问题。
+
 ## [0.7.2] - 2026-08-27
 
 ### Changed

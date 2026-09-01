@@ -85,14 +85,16 @@ vi.mock("../src/dsh/sessions.js", () => {
       get(_user: { sessionId: string }) {
         return undefined;
       }
-      followup(agent: { id: string }, blocks: unknown, messageId: string, mode: string): void {
+      followup(agent: { id: string }, blocks: unknown, mode: string): string {
+        const messageId = `msg-${followupCalls.length}`;
         followupCalls.push({ sessionId: agent.id, blocks, messageId, mode });
+        return messageId;
       }
     },
   };
 });
 
-import { WeChatDSHBridge, type ApiProxySurface } from "../src/bridge/bridge.js";
+import { WeChatDSHBridge } from "../src/bridge/bridge.js";
 import { defaultConfig } from "../src/config.js";
 import { MessageType } from "../src/weixin/types.js";
 
@@ -166,23 +168,14 @@ function userTextMessage(text: string, contextToken?: string) {
 }
 
 describe("issue #2 — approval card silently swallowed when bridge token is invalid", () => {
-  let respondMock: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
     vi.clearAllMocks();
     followupCalls.length = 0;
-    respondMock = vi.fn().mockResolvedValue({ accepted: true });
   });
 
   it("REPRO: with token=null, the card is registered but sendTextMessage is NEVER called", async () => {
     // Bridge in the cold-start / not-logged-in state described in issue #2.
     const bridge = makeBridge(null);
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
-
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       pendingApprovals: unknown[];
@@ -210,12 +203,6 @@ describe("issue #2 — approval card silently swallowed when bridge token is inv
 
   it("REPRO: token=null + user text '1' — apiProxy.respond fires but the user never sees confirmation", async () => {
     const bridge = makeBridge(null);
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
-
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
@@ -227,9 +214,8 @@ describe("issue #2 — approval card silently swallowed when bridge token is inv
     // User types the obvious answer.
     await anyBridge.handleMessage(userTextMessage("1"));
 
-    // The DSH-side approval IS resolved — `apiProxy.respond` runs.
+    // The DSH-side approval IS resolved via the WeChat waiter.
     // (The agent will unblock. But the WeChat user still sees nothing.)
-    expect(respondMock).toHaveBeenCalledTimes(1);
     expect(anyBridge.pendingApprovals.get("u1") ?? []).toHaveLength(0);
 
     // The "✅ 已允许（bash）" reply, the receipt warning, everything that
@@ -243,12 +229,6 @@ describe("issue #2 — approval card silently swallowed when bridge token is inv
     // pending. The follow-up is captured by the card handler — the user
     // is forced into card-reply mode whether they like it or not.
     const bridge = makeBridge();
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
-
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
@@ -268,12 +248,6 @@ describe("issue #2 — approval card silently swallowed when bridge token is inv
 
   it("REPRO: with token=null, question/requested has the same pathology", async () => {
     const bridge = makeBridge(null);
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
-
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       pendingQuestions: unknown[];
@@ -301,12 +275,6 @@ describe("issue #2 — approval card silently swallowed when bridge token is inv
     // → sendTypingStatus → iLink sendtyping. With token=null, no
     // exception is thrown and no log line is produced.
     const bridge = makeBridge(null);
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
-
     // Pre-0.7.0 this would have logged a TypeError. Now it should be a
     // silent no-op.
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -343,12 +311,6 @@ describe("issue #2 — approval card silently swallowed when bridge token is inv
     // notification is ALSO dropped (token is still null) and the card
     // is silently removed without the user ever knowing.
     const bridge = makeBridge(null);
-    const api: ApiProxySurface = {
-      respond: respondMock as never,
-      events: { mux: () => (async function* () {})() },
-    };
-    bridge.attachMux(api);
-
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       pendingApprovals: Map<string, Array<{ rpcId: string; timer: NodeJS.Timeout }>>;

@@ -591,8 +591,15 @@ export function renderProjectionValue(v: unknown): string | undefined {
 
 /** Cap a string at the given limit, append `…` if over. */
 function truncateForWeChat(s: string, limit = 120): string {
-  if (s.length > limit) return s.slice(0, limit - 3) + "…";
-  return s;
+  if (s.length <= limit) return s;
+  let end = limit - 3;
+  // Do not split a UTF-16 surrogate pair — iLink rejects lone surrogates
+  // with `ret=-1 invalid request` and the poisoned payload then blocks flush.
+  if (end > 0) {
+    const prev = s.charCodeAt(end - 1);
+    if (prev >= 0xd800 && prev <= 0xdbff) end -= 1;
+  }
+  return s.slice(0, Math.max(0, end)) + "…";
 }
 
 // ─── Smart projection renderers ──────────────────────────────────────────

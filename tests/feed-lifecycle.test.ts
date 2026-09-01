@@ -1,9 +1,8 @@
 /**
  * DSH feed lifecycle (issue #2 supplementary):
  *   - session/event session-id extraction
- *   - attachMux is a single loop (HMR / double inject must not dual-open)
- *   - WeChat logout / gateway restart must NOT abort mux
- *   - plugin stop() does abort mux
+ *   - WeChat logout / gateway restart must NOT stop Host answerers
+ *   - plugin stop() abandons pending WeChat waiters
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -22,6 +21,7 @@ vi.mock("../src/weixin/api.js", () => ({
   getConfig: () => Promise.resolve({ typing_ticket: "tk" }),
   isSessionTimeoutError: () => false,
   isMessageLimitError: () => false,
+  isInvalidRequestError: () => false,
 }));
 
 vi.mock("../src/weixin/auth.js", async (importOriginal) => {
@@ -32,7 +32,7 @@ vi.mock("../src/weixin/auth.js", async (importOriginal) => {
   };
 });
 
-import { WeChatDSHBridge, type ApiProxySurface } from "../src/bridge/bridge.js";
+import { WeChatDSHBridge } from "../src/bridge/bridge.js";
 import { defaultConfig } from "../src/config.js";
 import { sessionIdFrom } from "../src/index.js";
 
@@ -42,25 +42,6 @@ function makeBridge() {
   const cfg = defaultConfig();
   cfg.storageDir = dir;
   return new WeChatDSHBridge(ctx, cfg);
-}
-
-function hangingMux() {
-  let calls = 0;
-  const mux = vi.fn((_req: unknown, signal: AbortSignal) => {
-    calls++;
-    return {
-      async *[Symbol.asyncIterator]() {
-        await new Promise<void>((resolve) => {
-          if (signal.aborted) {
-            resolve();
-            return;
-          }
-          signal.addEventListener("abort", () => resolve(), { once: true });
-        });
-      },
-    };
-  });
-  return { mux, getCalls: () => calls };
 }
 
 describe("sessionIdFrom", () => {
@@ -81,58 +62,33 @@ describe("sessionIdFrom", () => {
   });
 });
 
-describe("mux loop lifecycle", () => {
+describe("interaction lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("attachMux is idempotent — a second call does not open another stream", async () => {
+  it("gateway restart (internal reconnect) does not stop Host answerers", async () => {
     const bridge = makeBridge();
-    const { mux, getCalls } = hangingMux();
-    const api: ApiProxySurface = { respond: vi.fn() as never, events: { mux } };
-    bridge.attachMux(api);
-    bridge.attachMux(api);
-    await Promise.resolve();
-    expect(getCalls()).toBe(1);
-    await bridge.stop();
-  });
-
-  it("gateway restart (internal reconnect) does not abort the mux stream", async () => {
-    const bridge = makeBridge();
-    const { mux, getCalls } = hangingMux();
-    const api: ApiProxySurface = { respond: vi.fn() as never, events: { mux } };
-    bridge.attachMux(api);
-    await Promise.resolve();
-    expect(getCalls()).toBe(1);
-
+    expect((bridge as unknown as { interactionStopped: boolean }).interactionStopped).toBe(false);
     await bridge.reconnect();
-    await Promise.resolve();
-    expect(getCalls()).toBe(1);
-    expect((bridge as unknown as { muxStopped: boolean }).muxStopped).toBe(false);
-
+    expect((bridge as unknown as { interactionStopped: boolean }).interactionStopped).toBe(false);
     await bridge.stop();
   });
 
-  it("plugin stop() aborts mux so the hanging iterator settles", async () => {
+  it("plugin stop() abandons pending WeChat waiters", async () => {
     const bridge = makeBridge();
-    let settled = false;
-    const mux = vi.fn((_req: unknown, signal: AbortSignal) => ({
-      async *[Symbol.asyncIterator]() {
-        await new Promise<void>((resolve) => {
-          signal.addEventListener("abort", () => {
-            settled = true;
-            resolve();
-          }, { once: true });
-        });
-      },
-    }));
-    const api: ApiProxySurface = { respond: vi.fn() as never, events: { mux } };
-    bridge.attachMux(api);
-    await Promise.resolve();
+    const store = (bridge as unknown as { state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void } }).state;
+    store.ensureUser("u1", "C:\\work");
+    store.update("u1", { sessionId: "wx-1" });
+    (bridge as unknown as { handleMuxFrame(f: unknown): void }).handleMuxFrame({
+      type: "server-request",
+      rpcId: "rpc-1",
+      method: "approval/requested",
+      payload: { type: "approval/requested", sessionId: "wx-1", approvalId: "a-1", toolName: "pwsh" },
+    });
+    expect((bridge as unknown as { pendingApprovals: Map<string, unknown[]> }).pendingApprovals.get("u1")?.length).toBe(1);
     await bridge.stop();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(settled).toBe(true);
-    expect((bridge as unknown as { muxStopped: boolean }).muxStopped).toBe(true);
+    expect((bridge as unknown as { interactionStopped: boolean }).interactionStopped).toBe(true);
+    expect((bridge as unknown as { pendingApprovals: Map<string, unknown[]> }).pendingApprovals.get("u1") ?? []).toHaveLength(0);
   });
 });

@@ -99,6 +99,13 @@ export interface SessionQuery {
   readTitle(sessionId: string): Promise<{ title?: string } | undefined>;
   /** Lightweight raw-log event records (ascending seq), for recency recovery. */
   listEvents(sessionId: string): Promise<Array<{ type: string; time: number; data?: unknown; seq?: number }>>;
+  /**
+   * Full validated log (0.1.2+). `listEvents` no longer carries `data`, so
+   * `/history` prefers this when the host exposes it.
+   */
+  readSession?(sessionId: string): Promise<{
+    events: Array<{ type: string; time?: number; data?: unknown }>;
+  }>;
 }
 
 export interface HistoryEntry {
@@ -423,18 +430,25 @@ export class DshOps {
       // fall through to persisted path
     }
 
-    // 2) Persisted fallback
+    // 2) Persisted fallback. Prefer `readSession` (full events with `data`);
+    // `listEvents` in 0.1.2 is metadata-only and cannot reconstruct text.
     const query = this.get<SessionQuery>("sessionQuery");
     if (!query) return [];
     try {
-      const records = await query.listEvents(sessionId);
+      let records: Array<{ type: string; time?: number; data?: unknown }> = [];
+      if (typeof query.readSession === "function") {
+        const snapshot = await query.readSession(sessionId);
+        records = snapshot.events ?? [];
+      } else {
+        records = await query.listEvents(sessionId);
+      }
       const entries: HistoryEntry[] = [];
       for (const r of records) {
         if (r.type !== "user/message" && r.type !== "assistant/message") continue;
-        const text = this.extractHistoryText((r as { data?: unknown }).data);
+        const text = this.extractHistoryText(r.data);
         if (!text) continue;
         const role = r.type === "user/message" ? "user" as const : "assistant" as const;
-        entries.push({ role, text, time: r.time });
+        entries.push({ role, text, time: typeof r.time === "number" ? r.time : Date.now() });
       }
       return entries.slice(-cap);
     } catch {

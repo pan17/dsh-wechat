@@ -68,6 +68,18 @@ export function isMessageLimitError(err: unknown): boolean {
   );
 }
 
+/**
+ * True for a rejected send payload (`ret=-1` / "invalid request").
+ * Unlike rate-limit or -14, retrying the same body will not succeed.
+ */
+export function isInvalidRequestError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const value = err as { name?: unknown; ret?: unknown; errcode?: unknown; errmsg?: unknown };
+  if (value.name !== "IlinkApiError") return false;
+  if (value.ret === -1 || value.errcode === -1) return true;
+  return typeof value.errmsg === "string" && /invalid request/i.test(value.errmsg);
+}
+
 /** Validate only sendmessage business status; other endpoints keep their own contracts. */
 function assertSendMessageAccepted(resp: SendMessageResp): void {
   if (isSessionTimeoutApiBody(resp)) {

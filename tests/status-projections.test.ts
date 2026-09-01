@@ -409,6 +409,15 @@ describe("renderProjectionValue (pure)", () => {
     expect(out!.endsWith("…")).toBe(true);
   });
 
+  it("does not split a surrogate pair at the truncation boundary", () => {
+    const long = `${"x".repeat(116)}👋${"y".repeat(20)}`;
+    const out = renderProjectionValue(long)!;
+    expect(out.endsWith("…")).toBe(true);
+    expect(out.includes("\uD83D")).toBe(false);
+    expect(out.includes("\uDE4B")).toBe(false);
+    expect(/[\uD800-\uDFFF]/.test(out)).toBe(false);
+  });
+
   it("returns undefined for circular references", () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const a: any = { foo: 1 };

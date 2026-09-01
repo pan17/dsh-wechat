@@ -37,7 +37,11 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
   const config = configStore.resolve(baseConfig);
   const context = ctx as {
     get<T = unknown>(name: string): T | undefined;
-    on(event: string, listener: (...args: unknown[]) => unknown): () => void;
+    on(
+      event: string,
+      listener: (...args: unknown[]) => unknown,
+      options?: boolean | { prepend?: boolean; global?: boolean },
+    ): () => void;
     inject?: (deps: string[], callback: (ctx: unknown) => unknown) => unknown;
   };
 
@@ -73,8 +77,8 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
   });
 
   // ─── send_wechat tool: agent-initiated push to the bound user ───
-  // (Approval is fully native — no custom ask gate; the mux frame stream
-  // below mirrors DSH's own approval/question frames to WeChat.)
+  // (Approval/question cards are fully native — the Host waterfalls below
+  // race WeChat against the GUI so whoever answers first wins.)
   if (typeof context.inject === "function") {
     context.inject(["tools"], (toolsCtx) => {
       const toolsService = (toolsCtx as {
@@ -124,35 +128,36 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
     console.warn("[dsh-wechat] ctx.inject unavailable; send_wechat tool disabled");
   }
 
-  // ─── Mux frame stream: approval/question cards mirrored to WeChat ───
-  // The decision point stays in the native apiproxy pending table; this
-  // subscription renders the same frames as the GUI and injects the WeChat
-  // user's decision through apiProxy.respond() (whoever answers first wins).
-  if (typeof context.inject === "function") {
-    let apiProxyInjected = false;
-    context.inject(["apiProxy"], (apiCtx) => {
-      apiProxyInjected = true;
-      const apiProxy = (apiCtx as {
-        get<T = unknown>(name: string): T | undefined;
-      }).get<{
-        respond(message: unknown): Promise<{ accepted: boolean; reason?: string }>;
-        events?: unknown;
-      }>("apiProxy");
-      if (!apiProxy) {
-        console.warn("[dsh-wechat] apiProxy inject fired but get('apiProxy') is undefined; approval/question cards disabled");
-        return;
+  // ─── Approval / question cards: Host waterfalls (GUI-equivalent mirror) ───
+  // Untagged listeners are admitted globally by scopeTarget, so a host-level
+  // answerer sees every session. prepend:true so we wrap next() (the GUI
+  // terminal answerer) instead of running after it. No WeChat peer →
+  // immediately next() so the GUI remains the sole answerer. Errors fall
+  // through to next() rather than collapsing the GUI card.
+  context.on("approval/request", async (req, next) => {
+    const nextFn = next as () => Promise<"allowed-once" | "rejected" | "cancelled" | "unavailable">;
+    try {
+      return await bridge.answerApprovalRequest(req as never, nextFn);
+    } catch (err) {
+      console.error(`[dsh-wechat] approval/request answerer failed: ${String(err)}`);
+      return nextFn();
+    }
+  }, { prepend: true });
+  context.on("user-questions/request", async (req, next) => {
+    const nextFn = next as () => Promise<unknown>;
+    try {
+      return await bridge.answerQuestionRequest(req as never, nextFn as never);
+    } catch (err) {
+      // WeChat /rq cancels by rejecting the waiter; rethrow so the Host
+      // settles the ask as aborted. Other failures fall through to GUI.
+      if (err && typeof err === "object" && (err as { code?: string }).code === "ASK_ABORTED") {
+        throw err;
       }
-      console.log("[dsh-wechat] apiProxy inject resolved; attaching mux");
-      bridge.attachMux(apiProxy as never);
-    });
-    setTimeout(() => {
-      if (!apiProxyInjected) {
-        console.warn("[dsh-wechat] apiProxy inject callback never ran (10s); approval/question cards may be disabled");
-      }
-    }, 10_000);
-  } else {
-    console.warn("[dsh-wechat] ctx.inject unavailable; approval/question cards disabled");
-  }
+      console.error(`[dsh-wechat] user-questions/request answerer failed: ${String(err)}`);
+      return nextFn();
+    }
+  }, { prepend: true });
+  console.log("[dsh-wechat] approval/question waterfall answerers attached");
 
   // ─── DSH native command registry (ctx.commands) ───
 // When the host composes `@deepseek-ai/dsh-commands`, late-bind the

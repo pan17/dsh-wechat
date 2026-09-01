@@ -38,7 +38,7 @@ interface WorkspaceEntity {
 
 /**
  * Mint a durable session id for a WeChat-bound session — the SAME format the
- * GUI uses (`session-<uuid>`, dsh-host-apiproxy's session.create). Uniform
+ * GUI uses (`session-<uuid>`, the same mint the session controller uses). Uniform
  * ids keep WeChat-created sessions indistinguishable from GUI-created ones
  * everywhere (lists, workspace accounting, log exports).
  */
@@ -147,20 +147,20 @@ export class AgentStore {
    * (a closed window degrades to the next waking queue turn, never lost).
    * The caller resolves the mode from agent.status + the shared setting.
    */
-  followup(agent: Agent, content: ContentBlock[], messageId?: string, mode: BusyEnterBehavior = "queue"): void {
+  followup(agent: Agent, content: ContentBlock[], mode: BusyEnterBehavior = "queue"): string {
     const message = createUserMessage({
       content,
       // kind 'user' — identical to messages sent from the GUI chat box, so
       // the WeChat user's messages render as ordinary user messages (a
       // 'plugin' source renders as "context injection" in the GUI).
       source: { kind: "user" },
-      ...(messageId ? { id: messageId } : {}),
     });
     if (mode === "steer") {
       agent.steer(message);
     } else {
       agent.followup(message);
     }
+    return message.id;
   }
 }
 

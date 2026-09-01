@@ -77,24 +77,26 @@ function wechatTextMessage(text: string) {
   };
 }
 
-describe("createUserMessage with explicit id", () => {
-  it("honors a caller-provided id", () => {
-    const message = createUserMessage({
-      content: [{ type: "text", text: "hi" }],
-      source: { kind: "user" },
-      id: "wx-msg-explicit",
-    });
-    expect(message.id).toBe("wx-msg-explicit");
-    expect(message.role).toBe("user");
-  });
-
-  it("still mints a fresh id when none is given", () => {
+describe("createUserMessage mints its own id", () => {
+  it("mints a fresh UUID and user role", () => {
     const message = createUserMessage({
       content: [{ type: "text", text: "hi" }],
       source: { kind: "user" },
     });
     expect(message.id).toBeTruthy();
-    expect(message.id).not.toBe("wx-msg-explicit");
+    expect(message.role).toBe("user");
+  });
+
+  it("mints a distinct id on every call", () => {
+    const a = createUserMessage({
+      content: [{ type: "text", text: "hi" }],
+      source: { kind: "user" },
+    });
+    const b = createUserMessage({
+      content: [{ type: "text", text: "hi" }],
+      source: { kind: "user" },
+    });
+    expect(a.id).not.toBe(b.id);
   });
 });
 
@@ -119,10 +121,11 @@ describe("message-source tracking (dynamic surface prompt)", () => {
     expect(sessionId).toBeTruthy();
     expect(anyBridge.surfaceSourceFor(sessionId)).toBe("wechat");
 
-    // The followup carried an explicit id (echo matching later).
+    // The followup carried a minted id recorded for echo matching later.
     const sent = mock.received[0] as { id?: string };
     expect(sent.id).toBeTruthy();
-    expect(sent.id!.startsWith("wx-msg-")).toBe(true);
+    const ids = (bridge as unknown as { wechatMessageIds: Map<string, number> }).wechatMessageIds;
+    expect(ids.has(sent.id!)).toBe(true);
   });
 
   it("an agent/inbox/spliced next-turn enqueue marks the session BEFORE assembly", () => {
@@ -151,14 +154,16 @@ describe("message-source tracking (dynamic surface prompt)", () => {
     expect(anyBridge.surfaceSourceFor("wx-s1")).toBe("gui");
   });
 
-  it("a next-turn splice with a wx-msg- id keeps the session 'wechat'", () => {
+  it("a next-turn splice with a recorded WeChat message id keeps the session 'wechat'", () => {
     const anyBridge = bridge as unknown as {
       state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
       handleSessionEvent(s: string, e: unknown): void;
       surfaceSourceFor(s: string): string | undefined;
+      markWechatMessage(id: string): void;
     };
     anyBridge.state.ensureUser("u1", "C:\\work");
     anyBridge.state.update("u1", { sessionId: "wx-s1" });
+    anyBridge.markWechatMessage("wx-recorded-abc123");
     anyBridge.handleSessionEvent("wx-s1", {
       type: "agent/inbox/spliced",
       seq: 7,
@@ -167,7 +172,7 @@ describe("message-source tracking (dynamic surface prompt)", () => {
         target: "next-turn",
         start: 0,
         removedCount: 0,
-        inserted: [{ id: "wx-msg-abc123", role: "user" }],
+        inserted: [{ id: "wx-recorded-abc123", role: "user" }],
       },
     });
     expect(anyBridge.surfaceSourceFor("wx-s1")).toBe("wechat");
@@ -181,6 +186,7 @@ describe("message-source tracking (dynamic surface prompt)", () => {
     };
     anyBridge.state.ensureUser("u1", "C:\\work");
     anyBridge.state.update("u1", { sessionId: "wx-s1" });
+    (bridge as unknown as { markWechatMessage(id: string): void }).markWechatMessage("wx-recorded-xyz");
     // WeChat-marked first.
     anyBridge.handleSessionEvent("wx-s1", {
       type: "agent/inbox/spliced",
@@ -190,7 +196,7 @@ describe("message-source tracking (dynamic surface prompt)", () => {
         target: "next-turn",
         start: 0,
         removedCount: 0,
-        inserted: [{ id: "wx-msg-xyz", role: "user" }],
+        inserted: [{ id: "wx-recorded-xyz", role: "user" }],
       },
     });
     expect(anyBridge.surfaceSourceFor("wx-s1")).toBe("wechat");
@@ -233,7 +239,7 @@ describe("message-source tracking (dynamic surface prompt)", () => {
     expect(anyBridge.surfaceSourceFor("wx-s1")).toBe("gui");
   });
 
-  it("the WeChat echo (wx-msg- prefix) keeps 'wechat' — even replayed", async () => {
+  it("the WeChat echo (recorded message id) keeps 'wechat' — even replayed", async () => {
     const anyBridge = bridge as unknown as {
       handleMessage(m: unknown): Promise<void>;
       state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void; getUser(u: string): { sessionId: string } };
@@ -245,7 +251,7 @@ describe("message-source tracking (dynamic surface prompt)", () => {
     expect(anyBridge.surfaceSourceFor(sessionId)).toBe("wechat");
 
     const sent = mock.received[0] as { id?: string };
-    expect(sent.id!.startsWith("wx-msg-")).toBe(true);
+    expect(sent.id).toBeTruthy();
     // The session/event echo arrives asynchronously with the same id.
     anyBridge.handleSessionEvent(sessionId, {
       type: "user/message",
@@ -258,16 +264,17 @@ describe("message-source tracking (dynamic surface prompt)", () => {
         source: { kind: "user" },
       },
     });
-    // Still wechat (prefix-based recognition, not set membership).
+    // Still wechat (id was recorded at followup time).
     expect(anyBridge.surfaceSourceFor(sessionId)).toBe("wechat");
-    // A replayed echo with the same prefix also keeps wechat — the prefix
-    // is the signal, so a delayed/replayed echo can never flip it to gui.
+    // A replayed echo with the same id also keeps wechat. Re-record
+    // because the first echo consumes the one-shot membership.
+    (bridge as unknown as { markWechatMessage(id: string): void }).markWechatMessage(sent.id!);
     anyBridge.handleSessionEvent(sessionId, {
       type: "user/message",
       seq: 5,
       time: Date.now(),
       data: {
-        id: sent.id, // replayed echo — same wx-msg- prefix
+        id: sent.id, // replayed echo — same recorded id
         role: "user",
         content: [{ type: "text", text: "微信消息" }],
         source: { kind: "user" },
@@ -327,9 +334,11 @@ describe("message-source tracking (dynamic surface prompt)", () => {
       state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
       handleSessionEvent(s: string, e: unknown): void;
       surfaceSourceFor(s: string): string | undefined;
+      markWechatMessage(id: string): void;
     };
     anyBridge.state.ensureUser("u1", "C:\\work");
     anyBridge.state.update("u1", { sessionId: "wx-s1" });
+    anyBridge.markWechatMessage("wx-recorded-claim-test");
 
     // Enqueue — what `forwardToAgent` + the inbox.append splice look like.
     anyBridge.handleSessionEvent("wx-s1", {
@@ -340,7 +349,7 @@ describe("message-source tracking (dynamic surface prompt)", () => {
         target: "next-turn",
         start: 0,
         removedCount: 0,
-        inserted: [{ id: "wx-msg-claim-test", role: "user" }],
+        inserted: [{ id: "wx-recorded-claim-test", role: "user" }],
       },
     });
     expect(anyBridge.surfaceSourceFor("wx-s1")).toBe("wechat");

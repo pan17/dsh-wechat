@@ -45,7 +45,7 @@ export async function sendTextMessage(
         message_type: MessageType.BOT,
         message_state: MessageState.FINISH,
         ...(opts.contextToken ? { context_token: opts.contextToken } : {}),
-        item_list: [{ type: 1, text_item: { text } }],
+        item_list: [{ type: 1, text_item: { text: sanitizeWeChatText(text) } }],
       },
     },
   });
@@ -218,6 +218,31 @@ export async function sendMediaMessage(
 }
 
 /**
+ * Replace unpaired UTF-16 surrogates. iLink `sendmessage` rejects them with
+ * `ret=-1 invalid request`; a truncated emoji in `/status` is the usual source.
+ */
+export function sanitizeWeChatText(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += text[i]! + text[i + 1]!;
+        i++;
+      } else {
+        out += "\uFFFD";
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      out += "\uFFFD";
+    } else {
+      out += text[i]!;
+    }
+  }
+  return out;
+}
+
+/**
  * Split text into segments of max length, respecting line breaks where possible.
  */
 export function splitText(text: string, maxLen: number): string[] {
@@ -234,6 +259,11 @@ export function splitText(text: string, maxLen: number): string[] {
 
     let breakAt = remaining.lastIndexOf("\n", maxLen);
     if (breakAt <= 0) breakAt = maxLen;
+    if (breakAt > 0) {
+      const prev = remaining.charCodeAt(breakAt - 1);
+      if (prev >= 0xd800 && prev <= 0xdbff) breakAt -= 1;
+    }
+    if (breakAt <= 0) breakAt = 1;
 
     segments.push(remaining.substring(0, breakAt));
     remaining = remaining.substring(breakAt).replace(/^\n/, "");

@@ -2,9 +2,8 @@
  * Approval card formatting and reply parsing for the WeChat mirror card.
  *
  * The card mirrors the DSH GUI approval card exactly (tool name, reason,
- * allow-once / reject) because it renders the same `approval/requested`
- * frame; the decision is injected back through `apiProxy.respond()` into
- * the native pending table. Reply grammar:
+ * allow-once / reject) because it answers the same Host `approval/request`
+ * waterfall; WeChat and GUI race, whoever answers first wins. Reply grammar:
  *   `1` / `2`          → positional (once / reject) for a single card
  *   `once` / `reject`  → keyword forms (case-insensitive)
  *   `P1=1 P2=2`        → per-card decisions when several are pending
