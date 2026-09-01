@@ -478,4 +478,85 @@ describe("waterfall race: WeChat vs GUI", () => {
     expect(answer.answers[0]!.selected).toEqual(["No"]);
     resolveGui?.({ answers: [{ id: "q1", selected: ["Yes"] }] });
   });
+
+  it("WeChat question answer aborts the GUI card signal, not the tool signal", async () => {
+    const toolAbort = new AbortController();
+    const req = {
+      agent: { id: "wx-1" },
+      questions: [{ id: "q1", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }],
+      signal: toolAbort.signal,
+    };
+    let guiSignal: AbortSignal | undefined;
+    const gui = new Promise<{ answers: Array<{ id: string; selected: string[] }> }>(() => {
+      /* stays pending until the forked GUI signal aborts the Web card */
+    });
+    const pending = bridge.answerQuestionRequest(req, () => {
+      guiSignal = req.signal;
+      return gui;
+    });
+    await Promise.resolve();
+    expect(guiSignal).toBeDefined();
+    expect(guiSignal).not.toBe(toolAbort.signal);
+    expect(guiSignal!.aborted).toBe(false);
+
+    const anyBridge = bridge as unknown as {
+      handleQuestionReply(u: string, t: string): Promise<void>;
+    };
+    await anyBridge.handleQuestionReply("u1", "2");
+    const answer = await pending;
+    expect(answer.answers[0]!.selected).toEqual(["No"]);
+    expect(toolAbort.signal.aborted).toBe(false);
+    expect(guiSignal!.aborted).toBe(true);
+  });
+
+  it("WeChat approval answer aborts the GUI card signal, not the tool signal", async () => {
+    const toolAbort = new AbortController();
+    const req = { agent: { id: "wx-1" }, toolName: "pwsh", reason: "run", signal: toolAbort.signal };
+    let guiSignal: AbortSignal | undefined;
+    const gui = new Promise<"allowed-once" | "rejected">(() => {
+      /* stays pending until the forked GUI signal aborts the Web card */
+    });
+    const pending = bridge.answerApprovalRequest(req, () => {
+      guiSignal = req.signal;
+      return gui;
+    });
+    await Promise.resolve();
+    expect(guiSignal).toBeDefined();
+    expect(guiSignal).not.toBe(toolAbort.signal);
+
+    const anyBridge = bridge as unknown as {
+      handleApprovalReply(u: string, t: string): Promise<void>;
+    };
+    await anyBridge.handleApprovalReply("u1", "1");
+    await expect(pending).resolves.toBe("allowed-once");
+    expect(toolAbort.signal.aborted).toBe(false);
+    expect(guiSignal!.aborted).toBe(true);
+  });
+
+  it("forwards the original tool abort onto the GUI card signal", async () => {
+    const toolAbort = new AbortController();
+    const req = {
+      agent: { id: "wx-1" },
+      questions: [{ id: "q1", question: "Continue?", options: [{ label: "Yes" }] }],
+      signal: toolAbort.signal,
+    };
+    let guiSignal: AbortSignal | undefined;
+    const pending = bridge.answerQuestionRequest(req, () => {
+      guiSignal = req.signal;
+      return new Promise<{ answers: Array<{ id: string; selected: string[] }> }>(() => {
+        /* GUI stays pending until the original turn abort is forwarded */
+      });
+    });
+    await Promise.resolve();
+    expect(guiSignal).toBeDefined();
+    expect(guiSignal!.aborted).toBe(false);
+    toolAbort.abort(Object.assign(new Error("ask_user_question was aborted before the user answered"), {
+      name: "UserQuestionError",
+      code: "ASK_ABORTED",
+    }));
+    expect(guiSignal!.aborted).toBe(true);
+    // The waterfall race itself is still waiting on WeChat / next(); aborting
+    // the original tool signal only has to withdraw the Web card.
+    void pending;
+  });
 });

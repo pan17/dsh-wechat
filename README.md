@@ -36,13 +36,11 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 DSH 自带插件管理命令 `dsh plugin`（在 profile 目录转发 pnpm，并自动把
 声明了 `dsh.bundle` 的依赖加入 bundle 层）：
 
-> 需要 **DSH 0.1.2-alpha.x**（npm dist-tag `alpha`）。0.1.1-rc.2 及更早版本已移除 ApiProxy，本插件不再兼容。
->
 > ⚠️ **别用** `npx dsh plugin`——npm 上 `dsh` 这个名字早在 2016 年就被一个不相关的 JS shell 包占了（`dsh@1.0.1`，作者 `infusion`），它没暴露 CLI bin，会报 `could not determine executable to run`。DSH 的 CLI 在 scoped 包 `@deepseek-ai/dsh` 下，必须用完整名。
 
 ```bash
 # 安装（自动添加依赖 + 注册 bundle 层）
-npx @deepseek-ai/dsh@alpha plugin --profile <profile> add dsh-wechat
+npx @deepseek-ai/dsh plugin --profile <profile> add dsh-wechat
 
 # 验证组合配置
 npx @deepseek-ai/dsh --profile <profile> --dump-config   # 应看到 "- id: dsh-wechat" 行
@@ -185,7 +183,7 @@ npm test         # vitest（341 个用例：splitText/格式化/解析/帧处理
 ## 已知边界
 
 - 审批/提问卡挂在 Host 的 `approval/request` 与 `user-questions/request`
-  waterfall 上，与 GUI 竞速；无微信 peer 时立即 `next()`，软超时只撤微信卡、不替用户决策。DSH 重启后未决卡片随 turn 消失（上游已知限制）。
+  waterfall 上，与 GUI 竞速；无微信 peer 时立即 `next()`，软超时只撤微信卡、不替用户决策。微信先答时会 abort 传给 GUI 的 `request.signal`（不碰 turn 的 `exec.signal`），Web composer 卡随 Gateway `cancel` 帧收起。DSH 重启后未决卡片随 turn 消失（上游已知限制）。
 - `send_wechat` 工具对所有 agent 可见；任何会话的 agent 都能调用——绑定会话发送到绑定用户，未绑定会话回退到首个已知微信用户（单用户部署默认行为）。
   单用户模式下，工具推送与 assistant 回复共享唯一一份微信 10 条/窗口限流预算：超限或发送失败自动进入 `/next` FIFO 缓存队列。计数和队列持久化到 `state.json`，普通 DSH 更新或重启后继续沿用；下一条微信入站会重置窗口并自动补发。微信真实限流响应（HTTP 200 + `ret: -2` / `prepare failed`）也会被识别并缓存，不再误判成功。
 - `/preset switch` 遵循 DSH 约束：只有未产生任何内容的会话才能当场

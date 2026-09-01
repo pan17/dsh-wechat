@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- DSH 0.1.2：微信回答提问/权限卡后，Web UI 卡片一直不消失。瀑布竞速微信先返回时没有 abort 传给 GUI 的 `request.signal`，0.1.2 的 composer 卡只在该 signal abort 时才收起。现在给 `next()` 分叉一份 GUI signal，微信答完或取消后再 abort 这份（不碰 turn 的 `exec.signal`），Web 卡会随 Gateway `cancel` 帧收起。
 - flush 剩余摘要（`✅ 已发送 N 条…`）和 `/status` 正文发送失败时不再写入 outbound 缓存。原先真实缓存发不出去时，这些控制回执会把自己再塞进队列，表现为「已发送 0 条」后缓存条数随 `/status` / `/next` 递增。管理命令仍会先自动 flush。
 - `/status` 会话级投影截断不再切开 emoji 代理对；发送前会清洗孤立 surrogate。这类正文会让 iLink 返回 `ret=-1 invalid request`，flush 卡在队头「已发送 0 条」。flush 遇到无法投递的缓存会丢掉该条并继续发后面的。
 

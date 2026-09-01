@@ -1471,6 +1471,34 @@ export class WeChatDSHBridge {
   }
 
   /**
+   * DSH 0.1.2 Web cards dismiss only when the waterfall `request.signal`
+   * aborts (Gateway then pushes a `cancel` frame). The tool's own
+   * `exec.signal` must stay live so the turn can continue after a WeChat
+   * answer — so we replace `req.signal` with a fork for `next()` (GUI)
+   * and abort only that fork when this answerer returns. The original
+   * turn abort is forwarded onto the fork so a GUI Stop still withdraws
+   * the Web card.
+   */
+  private forkGuiCardSignal(req: { signal?: AbortSignal }): AbortController {
+    const guiAbort = new AbortController();
+    const original = req.signal;
+    if (original) {
+      const forward = () => {
+        if (!guiAbort.signal.aborted) guiAbort.abort(original.reason);
+      };
+      if (original.aborted) forward();
+      else original.addEventListener("abort", forward, { once: true });
+    }
+    (req as { signal?: AbortSignal }).signal = guiAbort.signal;
+    return guiAbort;
+  }
+
+  private abortGuiCard(guiAbort: AbortController): void {
+    if (guiAbort.signal.aborted) return;
+    guiAbort.abort(new Error("dsh-wechat: settled from WeChat"));
+  }
+
+  /**
    * Host `approval/request` waterfall answerer. Races the GUI (`next()`)
    * against a WeChat reply so whoever answers first wins. No WeChat peer
    * → immediately `next()`. Soft timeout withdraws the WeChat waiter
@@ -1481,6 +1509,7 @@ export class WeChatDSHBridge {
     next: () => Promise<ApprovalOutcome>,
   ): Promise<ApprovalOutcome> {
     if (this.interactionStopped) return next();
+    if (req.signal?.aborted) return next();
     const sessionId = this.sessionIdOfRequest(req);
     const toolName = typeof req.toolName === "string" && req.toolName ? req.toolName : "?";
     if (!sessionId) return next();
@@ -1489,6 +1518,7 @@ export class WeChatDSHBridge {
       this.log(`approval/request ignored (no WeChat peer for session ${sessionId})`);
       return next();
     }
+    const guiAbort = this.forkGuiCardSignal(req);
 
     const rpcId = `wx-appr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const approvalId =
@@ -1539,6 +1569,7 @@ export class WeChatDSHBridge {
     void gui.then(() => undefined, () => undefined);
     void wechatWrapped.then(() => undefined, () => undefined);
     this.removeApprovalCard(userId, rpcId);
+    this.abortGuiCard(guiAbort);
     if (winner.source === "gui") {
       if (this.shouldNotifyCrossSession(userId)) {
         const label =
@@ -1563,6 +1594,7 @@ export class WeChatDSHBridge {
     next: () => Promise<AskUserQuestionAnswer>,
   ): Promise<AskUserQuestionAnswer> {
     if (this.interactionStopped) return next();
+    if (req.signal?.aborted) return next();
     const sessionId = this.sessionIdOfRequest(req);
     const questions = req.questions;
     if (!sessionId || !Array.isArray(questions) || questions.length === 0) return next();
@@ -1571,6 +1603,7 @@ export class WeChatDSHBridge {
       this.log(`user-questions/request ignored (no WeChat peer for session ${sessionId})`);
       return next();
     }
+    const guiAbort = this.forkGuiCardSignal(req);
 
     const rpcId = `wx-q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     let settleWechat: ((answer: AskUserQuestionAnswer) => void) | null = null;
@@ -1626,6 +1659,8 @@ export class WeChatDSHBridge {
       }
       throw err;
     } finally {
+      // Dismiss the Web composer card (0.1.2 listens to request.signal).
+      this.abortGuiCard(guiAbort);
       // The loser of the race (GUI next() or a leftover WeChat waiter) must
       // not become an unhandled rejection after this answerer returns.
       void gui.then(() => undefined, () => undefined);
