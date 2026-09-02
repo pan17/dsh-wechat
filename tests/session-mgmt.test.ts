@@ -73,11 +73,15 @@ describe("mintSessionId uses the GUI session id format", () => {
 });
 
 describe("listSessions filters archived sessions", () => {
-  function makeOps(archived: string[], sessions: unknown[]) {
+  function makeOps(
+    archived: string[],
+    sessions: unknown[],
+    listEvents: () => Promise<Array<{ type: string; time: number }>> = async () => [],
+  ) {
     const ctx = {
       get: (name: string) => {
         if (name === "sessionQuery") {
-          return { listSessions: async () => sessions, readTitle: async () => undefined, listEvents: async () => [] };
+          return { listSessions: async () => sessions, readTitle: async () => undefined, listEvents };
         }
         if (name === "workspaceRegistry") {
           return { archivedSessionIds: archived };
@@ -100,6 +104,30 @@ describe("listSessions filters archived sessions", () => {
     );
     const result = await ops.listSessions();
     expect(result.map((r) => r.header.id)).toEqual(["s-1"]);
+  });
+
+  it("inspectSessionActivity reports the last user/message time", async () => {
+    const ops = makeOps([], [], async () => [
+      { type: "assistant/message", time: 1 },
+      { type: "user/message", time: 42 },
+      { type: "assistant/message", time: 50 },
+    ]);
+    await expect(ops.inspectSessionActivity("s-1")).resolves.toEqual({ ok: true, lastUserMessageTime: 42 });
+  });
+
+  it("inspectSessionActivity treats an empty readable log as blank, not corrupt", async () => {
+    const ops = makeOps([], []);
+    await expect(ops.inspectSessionActivity("s-1")).resolves.toEqual({ ok: true });
+  });
+
+  it("inspectSessionActivity returns ok:false when listEvents throws", async () => {
+    const ops = makeOps([], [], async () => {
+      throw new Error("stored session failed validation");
+    });
+    await expect(ops.inspectSessionActivity("s-1")).resolves.toEqual({
+      ok: false,
+      error: "stored session failed validation",
+    });
   });
 
   it("keeps everything when nothing is archived", async () => {
@@ -125,7 +153,11 @@ describe("/session new reuses a blank session", () => {
     bridge = makeBridge(mock);
   });
 
-  async function setupWithSessions(sessions: Array<{ id: string; createdAt: number; cwd?: string }>, userActivity?: (id: string) => number | undefined) {
+  async function setupWithSessions(
+    sessions: Array<{ id: string; createdAt: number; cwd?: string }>,
+    userActivity?: (id: string) => number | undefined,
+    unreadable?: (id: string) => boolean,
+  ) {
     const anyBridge = bridge as unknown as {
       state: {
         ensureUser(u: string, c: string): { userId: string; cwd: string; sessionId: string; silent: boolean };
@@ -135,15 +167,24 @@ describe("/session new reuses a blank session", () => {
       ops: {
         listSessions(): Promise<Array<{ header: { id: string; createdAt: number; cwd?: string } }>>;
         lastUserMessageTime(id: string): Promise<number | undefined>;
+        inspectSessionActivity(id: string): Promise<
+          { ok: true; lastUserMessageTime?: number } | { ok: false; error: string }
+        >;
       };
       handleSessionCommand(u: string, cmd: { kind: "new" }): Promise<void>;
     };
     const activity = userActivity ?? (() => undefined);
+    const isUnreadable = unreadable ?? (() => false);
     anyBridge.ops.listSessions = async () =>
       sessions.map((s) => ({
         header: { id: s.id, createdAt: s.createdAt, ...(s.cwd ? { cwd: s.cwd } : {}) },
       }));
     anyBridge.ops.lastUserMessageTime = async (id: string) => activity(id);
+    anyBridge.ops.inspectSessionActivity = async (id: string) => {
+      if (isUnreadable(id)) return { ok: false, error: "corrupt" };
+      const t = activity(id);
+      return t === undefined ? { ok: true } : { ok: true, lastUserMessageTime: t };
+    };
     const user = anyBridge.state.ensureUser("u1", "C:\\work");
     (user as { sessionId: string }).sessionId = "";
     return anyBridge;
@@ -200,6 +241,49 @@ describe("/session new reuses a blank session", () => {
     expect(sendTextMessage).toHaveBeenCalledWith(
       "u1",
       expect.stringContaining("已创建新会话"),
+      expect.anything(),
+    );
+  });
+
+  it("creates a fresh session when the current binding is unreadable", async () => {
+    const anyBridge = await setupWithSessions(
+      [{ id: "session-corrupt", createdAt: 100, cwd: "C:\\work" }],
+      () => undefined,
+      (id) => id === "session-corrupt",
+    );
+    const user = anyBridge.state.getUser("u1");
+    user.sessionId = "session-corrupt";
+    await anyBridge.handleSessionCommand("u1", { kind: "new" });
+    expect(user.sessionId).not.toBe("session-corrupt");
+    expect(user.sessionId).toMatch(/^session-/);
+    expect(sendTextMessage).toHaveBeenCalledWith(
+      "u1",
+      expect.stringContaining("原会话 session-corrupt 已损坏"),
+      expect.anything(),
+    );
+    expect(sendTextMessage).toHaveBeenCalledWith(
+      "u1",
+      expect.stringContaining("已新建会话"),
+      expect.anything(),
+    );
+  });
+
+  it("does not reuse an unreadable candidate as a blank session", async () => {
+    const anyBridge = await setupWithSessions(
+      [
+        { id: "corrupt-blank", createdAt: 300, cwd: "C:\\work" },
+        { id: "real-blank", createdAt: 200, cwd: "C:\\work" },
+        { id: "used", createdAt: 100, cwd: "C:\\work" },
+      ],
+      (id) => (id === "used" ? 999 : undefined),
+      (id) => id === "corrupt-blank",
+    );
+    await anyBridge.handleSessionCommand("u1", { kind: "new" });
+    const user = anyBridge.state.getUser("u1");
+    expect(user.sessionId).toBe("real-blank");
+    expect(sendTextMessage).toHaveBeenCalledWith(
+      "u1",
+      expect.stringContaining("已复用空白会话"),
       expect.anything(),
     );
   });

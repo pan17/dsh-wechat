@@ -473,7 +473,7 @@ export function isBypassSlashCommand(text: string): boolean {
  * the full subcommand grammar; native rows only describe their
  * discovery-surface description).
  */
-const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
+export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "help",
   "status",
   "workspace",

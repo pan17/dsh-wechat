@@ -28,6 +28,29 @@ export interface BridgeContext {
   on(event: string, listener: (...args: unknown[]) => unknown): () => void;
 }
 
+/** Result of {@link AgentStore.ensure}. */
+export interface EnsureAgentResult {
+  readonly agent: Agent | undefined;
+  /**
+   * Previous bound session id that failed to resume, when a replacement
+   * session was minted (`replaceOnResumeFailure: true`). Absent when the
+   * bound session loaded, or when replacement was not requested.
+   */
+  readonly replacedSessionId?: string;
+}
+
+/** Options for {@link AgentStore.ensure}. */
+export interface EnsureAgentOptions {
+  /**
+   * When the bound session fails to resume (corrupt log, missing file,
+   * persistence validation), clear the binding and create a fresh session
+   * instead of leaving the user stuck. Used by the inbound message path.
+   * Management commands that name a specific session (`/s switch`) leave
+   * this off so a failed load does not silently mint a different id.
+   */
+  readonly replaceOnResumeFailure?: boolean;
+}
+
 /** Minimal workspace entity surface (dsh-workspace). */
 interface WorkspaceEntity {
   readonly path: string;
@@ -62,26 +85,31 @@ export class AgentStore {
   /**
    * Ensure a live agent for the user state. Creates a fresh session when
    * none is bound yet; resumes the persisted session otherwise.
-   * Returns the live agent, or undefined when the agents service is
-   * unavailable.
+   * Returns `{ agent }` (agent undefined when the agents service is
+   * unavailable or create/resume failed). With `replaceOnResumeFailure`,
+   * a corrupt or unreadable bound session is unbound and replaced.
    */
-  async ensure(user: UserState): Promise<Agent | undefined> {
+  async ensure(user: UserState, options?: EnsureAgentOptions): Promise<EnsureAgentResult> {
     const agents = this.agents();
-    if (!agents) return undefined;
+    if (!agents) return { agent: undefined };
+
+    let replacedSessionId: string | undefined;
 
     if (user.sessionId) {
       const live = agents.get(user.sessionId);
-      if (live) return live;
+      if (live) return { agent: live };
       try {
         const handle = await agents.resume({
           resumeSessionId: user.sessionId,
           setup: agentSetup,
         });
         await this.attachToWorkspace(user.cwd, user.sessionId);
-        return handle.agent;
+        return { agent: handle.agent };
       } catch (err) {
         console.error(`[dsh-wechat] resume session ${user.sessionId} failed: ${String(err)}`);
-        return undefined;
+        if (!options?.replaceOnResumeFailure) return { agent: undefined };
+        replacedSessionId = user.sessionId;
+        user.sessionId = "";
       }
     }
 
@@ -105,10 +133,10 @@ export class AgentStore {
       // Persist the binding so a later restart resumes this session.
       user.sessionId = sessionId;
       await this.attachToWorkspace(user.cwd, sessionId);
-      return handle.agent;
+      return { agent: handle.agent, replacedSessionId };
     } catch (err) {
       console.error(`[dsh-wechat] create session failed: ${String(err)}`);
-      return undefined;
+      return { agent: undefined, replacedSessionId };
     }
   }
 

@@ -67,6 +67,7 @@ import {
   parseStopCommand,
   parseWorkspaceCommand,
   HISTORY_MAX,
+  LOCAL_COMMAND_NAMES,
   type EnterCommand,
   type HistoryCommand,
   type ModelCommand,
@@ -473,11 +474,18 @@ export class WeChatDSHBridge {
     const name = parseCommandName(text);
     if (!name) return false;
     if (name === "rp" || name === "rq" || name === "stop") return false;
-    const agent = await this.agents.ensure(user);
+    // Local whitelist commands (`/s`, `/session`, `/workspace`, …) own
+    // their own handlers and must not resume the bound DSH session just
+    // to look up a native definition. A corrupt binding would otherwise
+    // make `/s new` itself trigger `agents.resume` before the local
+    // command can unbind.
+    if (LOCAL_COMMAND_NAMES.has(name)) return false;
+    // Do not replace a corrupt binding here — a failed resume falls
+    // through to `forwardToAgent`, which mints and tells the user.
+    const { agent } = await this.agents.ensure(user);
     if (!agent) {
       // Cannot resolve a session to scope `find` against — preserve the
-      // existing fall-through behavior (next layer is `forwardToAgent`,
-      // which itself fails with the same "无法创建/恢复 DSH 会话" hint).
+      // existing fall-through behavior (next layer is `forwardToAgent`).
       return false;
     }
     let def: ReturnType<NativeCommandsSurface["find"]> | undefined;
@@ -531,7 +539,10 @@ export class WeChatDSHBridge {
     user: UserState,
   ): Promise<ReadonlyArray<{ name: string; description?: string; input?: { hint?: string } }>> {
     if (!this.commandsCtx) return [];
-    const agent = await this.agents.ensure(user);
+    // /help must not mint a replacement session just to list native
+    // commands; a corrupt binding stays put until the user talks or
+    // sends `/s new`.
+    const { agent } = await this.agents.ensure(user);
     if (!agent) return [];
     try {
       return this.commandsCtx.list(agent);
@@ -1259,14 +1270,28 @@ export class WeChatDSHBridge {
     await this.forwardToAgent(user, msg);
   }
 
-  private async forwardToAgent(user: UserState, msg: WeixinMessage): Promise<void> {
-    const agent = await this.agents.ensure(user);
-    if (!agent) {
-      await this.sendReply(user.userId, "⚠️ 无法创建/恢复 DSH 会话，请检查 DSH 日志。");
-      return;
-    }
+  private persistSessionBinding(user: UserState): void {
     this.state.update(user.userId, { sessionId: user.sessionId });
     this.trackWatchedSession(user.userId, user.sessionId);
+  }
+
+  private async forwardToAgent(user: UserState, msg: WeixinMessage): Promise<void> {
+    const previousSessionId = user.sessionId;
+    const { agent, replacedSessionId } = await this.agents.ensure(user, { replaceOnResumeFailure: true });
+    this.persistSessionBinding(user);
+    if (!agent) {
+      const hint = previousSessionId
+        ? `（绑定会话 ${previousSessionId} 无法恢复）`
+        : "";
+      await this.sendReply(user.userId, `⚠️ 无法创建/恢复 DSH 会话${hint}，请检查 DSH 日志。`);
+      return;
+    }
+    if (replacedSessionId) {
+      await this.sendReply(
+        user.userId,
+        `⚠️ 原会话 ${replacedSessionId} 已损坏，无法恢复；已新建会话 ${user.sessionId}。`,
+      );
+    }
 
     const tempDir = path.join(this.config.storageDir, "tempfile");
     const blocks = await weixinMessageToPrompt(msg, this.config.cdnBaseUrl, (m) => this.log(m), tempDir);
@@ -2490,9 +2515,17 @@ export class WeChatDSHBridge {
         }
         this.state.update(user.userId, { sessionId: user.sessionId, cwd: user.cwd, cwdExplicit: user.cwdExplicit });
         this.trackWatchedSession(user.userId, user.sessionId);
-        const agent = await this.agents.ensure(user);
+        // Do not replace-on-failure here: the user asked for this exact
+        // session. A corrupt target stays bound so `/s new` can mint a
+        // replacement instead of silently swapping ids on switch.
+        const { agent } = await this.agents.ensure(user);
         const label = await this.formatSessionLabel(record.header.id);
-        await this.sendReply(userId, `✅ 已切换到会话 ${label} — ${record.header.cwd ?? "?"}${agent ? `，Agent ${agent.status}` : ""}。`);
+        await this.sendReply(
+          userId,
+          agent
+            ? `✅ 已切换到会话 ${label} — ${record.header.cwd ?? "?"}，Agent ${agent.status}。`
+            : `⚠️ 已切换到会话 ${label} — ${record.header.cwd ?? "?"}，但该会话无法恢复（日志可能已损坏）。发送 /s new 新建，或换一条会话。`,
+        );
         // Flush any pending cards for the session just switched into
         // (notified earlier, or silently when nothing was pending).
         await this.flushPendingCardsForSession(user.userId, user.sessionId);
@@ -2502,12 +2535,21 @@ export class WeChatDSHBridge {
         // GUI-equivalent "reuse-or-create its blank session": if the current
         // session is already blank (created but never spoken to), stay on it;
         // otherwise reuse the newest blank session in the current cwd; only
-        // when none exists create a fresh one.
+        // when none exists create a fresh one. A corrupt / unreadable log is
+        // NOT blank — staying on it would lock the user out of every later
+        // message (resume fails, binding never changes).
         if (user.sessionId) {
-          const currentActivity = await this.ops.lastUserMessageTime(user.sessionId);
-          if (currentActivity === undefined) {
+          const current = await this.ops.inspectSessionActivity(user.sessionId);
+          if (current.ok && current.lastUserMessageTime === undefined) {
             const agent = this.agents.get(user);
             await this.sendReply(userId, `✅ 已在空白会话（${user.sessionId.slice(0, 12)}）${agent ? `，Agent ${agent.status}` : ""}。`);
+            return;
+          }
+          if (!current.ok) {
+            const brokenId = user.sessionId;
+            await this.createFreshSession(user, userId, {
+              success: `⚠️ 原会话 ${brokenId} 已损坏，无法恢复；已新建会话`,
+            });
             return;
           }
         }
@@ -2516,16 +2558,23 @@ export class WeChatDSHBridge {
           user.sessionId = blank;
           this.state.update(user.userId, { sessionId: user.sessionId });
           this.trackWatchedSession(user.userId, blank);
-          const agent = await this.agents.ensure(user);
-          await this.sendReply(userId, `✅ 已复用空白会话 ${blank.slice(0, 12)}（${user.cwd}）${agent ? `，Agent ${agent.status}` : ""}。`);
+          const { agent } = await this.agents.ensure(user, { replaceOnResumeFailure: true });
+          this.persistSessionBinding(user);
+          if (agent && user.sessionId === blank) {
+            await this.sendReply(userId, `✅ 已复用空白会话 ${blank.slice(0, 12)}（${user.cwd}），Agent ${agent.status}。`);
+            return;
+          }
+          // Reuse target itself failed to load; ensure() already minted a
+          // replacement when replaceOnResumeFailure is on.
+          await this.sendReply(
+            userId,
+            agent
+              ? `⚠️ 空白会话 ${blank} 无法恢复；已新建会话 ${user.sessionId}（${user.cwd}）。`
+              : `⚠️ 空白会话 ${blank} 无法恢复，且新建会话失败。请检查 DSH 日志。`,
+          );
           return;
         }
-        user.sessionId = "";
-        this.state.update(user.userId, { sessionId: "" });
-        const agent = await this.agents.ensure(user);
-        this.state.update(user.userId, { sessionId: user.sessionId });
-        this.trackWatchedSession(user.userId, user.sessionId);
-        await this.sendReply(userId, `✅ 已创建新会话（${user.cwd}）${agent ? "，Agent 就绪" : "，但 Agent 创建失败"}。`);
+        await this.createFreshSession(user, userId);
         return;
       }
       case "status": {
@@ -2537,20 +2586,43 @@ export class WeChatDSHBridge {
   }
 
   /**
+   * Unbind the current session and mint a fresh one via `agents.ensure`.
+   * Used by `/s new` when no reusable blank exists, and when the bound
+   * session's log is corrupt.
+   */
+  private async createFreshSession(
+    user: UserState,
+    userId: string,
+    wording?: { success: string },
+  ): Promise<void> {
+    user.sessionId = "";
+    this.state.update(user.userId, { sessionId: "" });
+    const { agent } = await this.agents.ensure(user);
+    this.persistSessionBinding(user);
+    if (!agent) {
+      await this.sendReply(userId, "⚠️ 无法创建 DSH 会话，请检查 DSH 日志。");
+      return;
+    }
+    const head = wording?.success ?? "✅ 已创建新会话";
+    await this.sendReply(userId, `${head} ${user.sessionId}（${user.cwd}），Agent 就绪。`);
+  }
+
+  /**
    * Find the newest blank (never-spoken-to) session in `cwd`, mirroring the
    * GUI's "reuse-or-create its blank session" behavior. A blank session is
    * one with no `user/message` event in its log — created by a previous
    * "new session" that the user never used. Archived sessions are already
-   * filtered by `listSessions()`. `excludeId` skips the caller's current
-   * session (the caller handles "already blank" separately).
+   * filtered by `listSessions()`. Unreadable / corrupt logs are skipped
+   * (they are not blank). `excludeId` skips the caller's current session
+   * (the caller handles "already blank" separately).
    */
   private async findBlankSession(cwd: string, excludeId?: string): Promise<string | undefined> {
     const sessions = (await this.ops.listSessions())
       .filter((r) => r.header.cwd === cwd && r.header.id !== excludeId)
       .sort((a, b) => b.header.createdAt - a.header.createdAt);
     for (const record of sessions) {
-      const activity = await this.ops.lastUserMessageTime(record.header.id);
-      if (activity === undefined) return record.header.id;
+      const activity = await this.ops.inspectSessionActivity(record.header.id);
+      if (activity.ok && activity.lastUserMessageTime === undefined) return record.header.id;
     }
     return undefined;
   }
