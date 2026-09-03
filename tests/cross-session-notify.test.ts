@@ -1,13 +1,14 @@
 /**
- * Cross-session notifications — only turn/end + error + cards, default off, unified switch.
+ * Cross-session notifications — decision cards follow `crossSessionNotify`
+ * (full-card push, directly answerable); background turn/end + error notices
+ * follow the independent `notifyTaskEvents` gate (default off).
  *
  * Covers:
- * - default off: non-current session turn/end & error & card produce no notification
- * - global on: each produces one notification with workspace/session label
- * - per-user on/off overrides global
+ * - default off: non-current turn/end & error & card produce no notification
+ * - gates on: cards push in full; turn/end + error notify once with label
  * - dedupe: same turn/end twice in same window notifies once (30s window)
- * - after switching into session, dedup clears so next turn can notify again
- * - /notify on|off|status commands
+ * - per-user on/off overrides (single-user: global only)
+ * - /notify on|off|status commands (decision gate; /tasks gate is separate)
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -29,7 +30,7 @@ import { WeChatDSHBridge } from "../src/bridge/bridge.js";
 import { defaultConfig } from "../src/config.js";
 import { MessageType } from "../src/weixin/types.js";
 
-function makeBridgeWithConfig(crossSessionNotify: boolean) {
+function makeBridgeWithConfig(crossSessionNotify: boolean, notifyTaskEvents = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-cross-"));
   const ctx: any = {
     get: (name: string) => {
@@ -58,6 +59,7 @@ function makeBridgeWithConfig(crossSessionNotify: boolean) {
   const cfg = defaultConfig();
   cfg.storageDir = dir;
   cfg.crossSessionNotify = crossSessionNotify;
+  cfg.notifyTaskEvents = notifyTaskEvents;
   const bridge = new WeChatDSHBridge(ctx, cfg);
   // Seed users
   const state: any = (bridge as any).state;
@@ -117,9 +119,53 @@ describe("cross-session notify: default off", () => {
   });
 });
 
-describe("cross-session notify: global on", () => {
+describe("cross-session notify: decision gate on, task gate off", () => {
+  it("non-current turn/end produces no completion notice while notifyTaskEvents is off", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleSessionEvent("sess-B", {
+      type: "assistant/message",
+      time: Date.now(),
+      data: { message: { content: [{ type: "text", text: "result preview text" }] } },
+    });
+    bridge.handleSessionEvent("sess-B", { type: "turn/end", time: Date.now(), data: {} });
+    await flushTicks();
+    await new Promise((r) => setTimeout(r, 10));
+    const texts = sendTextMessage.mock.calls.map((c: any) => c[1] as string);
+    const cross = texts.filter((t: string) => t.includes("任务已完成"));
+    expect(cross).toHaveLength(0);
+  });
+
+  it("non-current error produces no notice while notifyTaskEvents is off", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleAgentError("sess-B", new Error("boom error"));
+    await flushTicks();
+    const texts = sendTextMessage.mock.calls.map((c: any) => c[1] as string);
+    expect(texts.some((t: string) => t.includes("任务报错"))).toBe(false);
+  });
+
+  it("non-current card pushes the FULL card when the decision gate is on", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleMuxFrame({
+      type: "server-request",
+      rpcId: "r2",
+      method: "question/requested",
+      payload: {
+        type: "question/requested",
+        sessionId: "sess-B",
+        questions: [{ id: "q1", question: "Continue?", options: [{ label: "Yes" }] }],
+      },
+    });
+    await flushTicks();
+    await new Promise((r) => setTimeout(r, 10));
+    const texts = sendTextMessage.mock.calls.map((c: any) => c[1] as string);
+    expect(texts.some((t: string) => t.includes("Continue?"))).toBe(true);
+    expect(texts.some((t: string) => t.includes("📂"))).toBe(true);
+  });
+});
+
+describe("cross-session notify: both gates on", () => {
   it("non-current turn/end produces one notification with workspace/session label", async () => {
-    const bridge = makeBridgeWithConfig(true);
+    const bridge = makeBridgeWithConfig(true, true);
     bridge.handleSessionEvent("sess-B", {
       type: "assistant/message",
       time: Date.now(),
@@ -137,33 +183,15 @@ describe("cross-session notify: global on", () => {
   });
 
   it("non-current error produces one notification", async () => {
-    const bridge = makeBridgeWithConfig(true);
+    const bridge = makeBridgeWithConfig(true, true);
     bridge.handleAgentError("sess-B", new Error("boom error"));
     await flushTicks();
     const texts = sendTextMessage.mock.calls.map((c: any) => c[1] as string);
     expect(texts.some((t: string) => t.includes("任务报错") && t.includes("后台任务"))).toBe(true);
   });
 
-  it("non-current card produces notification when on", async () => {
-    const bridge = makeBridgeWithConfig(true);
-    bridge.handleMuxFrame({
-      type: "server-request",
-      rpcId: "r2",
-      method: "question/requested",
-      payload: {
-        type: "question/requested",
-        sessionId: "sess-B",
-        questions: [{ id: "q1", question: "Continue?", options: [{ label: "Yes" }] }],
-      },
-    });
-    await flushTicks();
-    await new Promise((r) => setTimeout(r, 10));
-    const texts = sendTextMessage.mock.calls.map((c: any) => c[1] as string);
-    expect(texts.some((t: string) => t.includes("待处理"))).toBe(true);
-  });
-
   it("dedup: same turn/end twice notifies only once within 30s window", async () => {
-    const bridge = makeBridgeWithConfig(true);
+    const bridge = makeBridgeWithConfig(true, true);
     bridge.handleSessionEvent("sess-B", { type: "turn/end", time: Date.now(), data: {} });
     await flushTicks();
     await new Promise((r) => setTimeout(r, 10));
@@ -174,7 +202,7 @@ describe("cross-session notify: global on", () => {
   });
 
   it("current session turn/end does not trigger cross-session notification", async () => {
-    const bridge = makeBridgeWithConfig(true);
+    const bridge = makeBridgeWithConfig(true, true);
     // sess-A is current for u1
     bridge.handleSessionEvent("sess-A", { type: "turn/end", time: Date.now(), data: {} });
     await flushTicks();
@@ -185,7 +213,7 @@ describe("cross-session notify: global on", () => {
 
 describe("cross-session notify: per-user override (single-user: global only)", () => {
   it("global off + per-user on → still does NOT notify (per-user ignored)", async () => {
-    const bridge = makeBridgeWithConfig(false);
+    const bridge = makeBridgeWithConfig(false, true);
     (bridge as any).state.update("u1", { crossSessionNotify: "on" });
     bridge.handleSessionEvent("sess-B", { type: "turn/end", time: Date.now(), data: {} });
     await flushTicks();
@@ -194,7 +222,7 @@ describe("cross-session notify: per-user override (single-user: global only)", (
   });
 
   it("global on + per-user off → still notifies (per-user ignored)", async () => {
-    const bridge = makeBridgeWithConfig(true);
+    const bridge = makeBridgeWithConfig(true, true);
     (bridge as any).state.update("u1", { crossSessionNotify: "off" });
     bridge.handleSessionEvent("sess-B", { type: "turn/end", time: Date.now(), data: {} });
     await flushTicks();
@@ -232,6 +260,7 @@ describe("/notify command", () => {
       context_token: "tok",
       item_list: [{ type: 1, text_item: { text: "/notify status" } }],
     });
-    expect(sendTextMessage.mock.calls.some((c: any) => (c[1] as string).includes("跨会话通知"))).toBe(true);
+    expect(sendTextMessage.mock.calls.some((c: any) => (c[1] as string).includes("跨会话决策推送"))).toBe(true);
+    expect(sendTextMessage.mock.calls.some((c: any) => (c[1] as string).includes("后台任务完成/报错提醒"))).toBe(true);
   });
 });

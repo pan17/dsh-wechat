@@ -18,6 +18,7 @@ export type EditableConfig = Pick<
   | "textChunkLimit"
   | "cardTimeoutMs"
   | "crossSessionNotify"
+  | "notifyTaskEvents"
 >;
 
 const EDITABLE_KEYS: Array<keyof EditableConfig> = [
@@ -28,6 +29,7 @@ const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "textChunkLimit",
   "cardTimeoutMs",
   "crossSessionNotify",
+  "notifyTaskEvents",
 ];
 
 export class ConfigStore {

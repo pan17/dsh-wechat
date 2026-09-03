@@ -1,20 +1,21 @@
 /**
- * Notification dedupe for non-current session cards:
+ * Full-card push machinery for cross-session cards (patch suite semantics):
  *
- *   - First card for a non-current session → one notification.
- *   - Additional cards for the same session in the same batch → deduped.
- *   - After the last card is resolved (any path), the notified mark clears
- *     so the next batch produces a fresh notification.
+ *   - A card for a non-current session (decision gate on) is pushed IN FULL
+ *     at arrival and marked pushed (`pushedCardRpcIds`).
+ *   - Every card of a batch pushes once at arrival (no dedupe needed — each
+ *     message is a complete, directly answerable card).
+ *   - Resolving / timing out a card clears its pushed mark, so the same
+ *     rpcId can never be mistaken for "already shown" again.
+ *   - `/session switch` into the card's session does NOT re-send cards that
+ *     were already pushed at arrival; cards that never got pushed (gate off
+ *     at arrival) are flushed on switch.
  *
- * Regression target: previously `notifiedCardSessions` was only cleared by
- * `flushPendingCardsForSession` (user `/session switch`), so resolving cards
- * via GUI / WeChat reply / timeout / /rp / /rq never freed the mark — every
- * later card for the same non-current session was silently swallowed.
- *
- * NOTE: `notifyCardPending` is an async function called fire-and-forget
- * from `handleMuxFrame`; it sets the mark synchronously, then awaits
- * `sessionContextLabel` before sending the actual `sendReply`. Every test
- * awaits `flushNotifications()` after a frame to observe the notification.
+ * Regression target: previously non-current cards were only "notified" once
+ * (`notifiedCardSessions`) and flushed on switch — resolving cards via
+ * GUI / WeChat / timeout never freed the mark, so later cards for the same
+ * non-current session were silently swallowed. The patch suite replaces the
+ * notice with the full card, so the mark now tracks what was actually shown.
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -34,12 +35,12 @@ vi.mock("../src/weixin/send.js", () => ({
 import { WeChatDSHBridge, type ApiProxySurface } from "../src/bridge/bridge.js";
 import { defaultConfig } from "../src/config.js";
 
-function makeBridge() {
+function makeBridge(crossSessionNotify = true) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-notif-"));
   const ctx = { get: () => undefined, on: () => () => {} };
   const cfg = defaultConfig();
   cfg.storageDir = dir;
-  cfg.crossSessionNotify = true;
+  cfg.crossSessionNotify = crossSessionNotify;
   const bridge = new WeChatDSHBridge(ctx, cfg);
   const store = (bridge as unknown as {
     state: {
@@ -94,18 +95,21 @@ function questionResolvedFrame(rpcId: string, sessionId = "B") {
   };
 }
 
-/** Filter only the `🔔 ...待处理...` notification messages from sendTextMessage calls. */
-function notificationMessages(): string[] {
+/** Sent text payloads of full approval cards (they name the tool). */
+function approvalCardMessages(): string[] {
   return sendTextMessage.mock.calls
     .map((call) => call[1] as string)
-    .filter((text) => text.includes("🔔"));
+    .filter((text) => text.includes("pwsh"));
 }
 
-/**
- * Drain microtasks so fire-and-forget `notifyCardPending` calls finish
- * (they set the mark synchronously, then `await sessionContextLabel` before
- * sending the `sendReply` notification).
- */
+/** Sent text payloads of full question cards. */
+function questionCardMessages(): string[] {
+  return sendTextMessage.mock.calls
+    .map((call) => call[1] as string)
+    .filter((text) => text.includes("Continue?"));
+}
+
+/** Drain microtasks so fire-and-forget card sends finish. */
 async function flushNotifications(): Promise<void> {
   await new Promise<void>((r) => setImmediate(r));
   await new Promise<void>((r) => setImmediate(r));
@@ -116,164 +120,150 @@ beforeEach(() => {
   sendTextMessage.mockResolvedValue(undefined);
 });
 
-describe("notification dedupe: question cards", () => {
-  it("first card → notify; second card in same batch → deduped", async () => {
+describe("full-card push: approval cards", () => {
+  it("pushes the full card at arrival and marks it pushed", async () => {
     const bridge = makeBridge();
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
-      notifiedCardSessions: Map<string, Set<string>>;
+      pushedCardRpcIds: Map<string, Set<string>>;
     };
-    anyBridge.handleMuxFrame(questionFrame("q-1", "B"));
-    anyBridge.handleMuxFrame(questionFrame("q-2", "B"));
+    anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "B"));
     await flushNotifications();
 
-    expect(notificationMessages()).toHaveLength(1);
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(true);
+    expect(approvalCardMessages()).toHaveLength(1);
+    expect(approvalCardMessages()[0]).toContain("📂");
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-1")).toBe(true);
   });
 
-  it("mark clears once the last card is resolved; next batch notifies again", async () => {
+  it("every card of a batch pushes once at arrival (no dedupe needed)", async () => {
     const bridge = makeBridge();
-    const anyBridge = bridge as unknown as {
-      handleMuxFrame(f: unknown): void;
-      notifiedCardSessions: Map<string, Set<string>>;
-    };
-    anyBridge.handleMuxFrame(questionFrame("q-1", "B"));
-    anyBridge.handleMuxFrame(questionFrame("q-2", "B"));
-    await flushNotifications();
-    expect(notificationMessages()).toHaveLength(1);
-
-    // Resolve first card — one card still pending, mark must stay.
-    anyBridge.handleMuxFrame(questionResolvedFrame("q-1", "B"));
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(true);
-
-    // Resolve second card — batch is over, mark must clear.
-    anyBridge.handleMuxFrame(questionResolvedFrame("q-2", "B"));
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(false);
-
-    // Next batch → fresh notification.
-    anyBridge.handleMuxFrame(questionFrame("q-3", "B"));
-    await flushNotifications();
-    expect(notificationMessages()).toHaveLength(2);
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(true);
-  });
-});
-
-describe("notification dedupe: approval cards", () => {
-  it("first card → notify; same-batch second card → deduped", async () => {
-    const bridge = makeBridge();
-    const anyBridge = bridge as unknown as {
-      handleMuxFrame(f: unknown): void;
-      notifiedCardSessions: Map<string, Set<string>>;
-    };
+    const anyBridge = bridge as unknown as { handleMuxFrame(f: unknown): void };
     anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "B"));
     anyBridge.handleMuxFrame(approvalFrame("a-2", "ap-2", "B"));
     await flushNotifications();
 
-    expect(notificationMessages()).toHaveLength(1);
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(true);
+    expect(approvalCardMessages()).toHaveLength(2);
   });
 
-  it("mark clears once the last approval card is resolved; next batch notifies again", async () => {
+  it("resolving a card clears its pushed mark; the other card keeps it", async () => {
     const bridge = makeBridge();
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
-      notifiedCardSessions: Map<string, Set<string>>;
+      pushedCardRpcIds: Map<string, Set<string>>;
     };
     anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "B"));
     anyBridge.handleMuxFrame(approvalFrame("a-2", "ap-2", "B"));
     await flushNotifications();
-    expect(notificationMessages()).toHaveLength(1);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-1")).toBe(true);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-2")).toBe(true);
 
     anyBridge.handleMuxFrame(approvalResolvedFrame("ap-1", "allowed-once", "B"));
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(true);
-
-    anyBridge.handleMuxFrame(approvalResolvedFrame("ap-2", "rejected", "B"));
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(false);
-
-    anyBridge.handleMuxFrame(approvalFrame("a-3", "ap-3", "B"));
-    await flushNotifications();
-    expect(notificationMessages()).toHaveLength(2);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-1")).toBe(false);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-2")).toBe(true);
   });
 });
 
-describe("notification dedupe: timeout path", () => {
-  it("card timeout (no reply) clears the mark → next batch notifies", async () => {
+describe("full-card push: question cards", () => {
+  it("pushes the full question card at arrival", async () => {
     const bridge = makeBridge();
-    // Shrink the timeout so the test is fast.
+    const anyBridge = bridge as unknown as { handleMuxFrame(f: unknown): void };
+    anyBridge.handleMuxFrame(questionFrame("q-1", "B"));
+    await flushNotifications();
+
+    expect(questionCardMessages()).toHaveLength(1);
+    expect(questionCardMessages()[0]).toContain("Continue?");
+  });
+
+  it("resolving a question card clears its pushed mark", async () => {
+    const bridge = makeBridge();
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      pushedCardRpcIds: Map<string, Set<string>>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-1", "B"));
+    await flushNotifications();
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("q-1")).toBe(true);
+
+    anyBridge.handleMuxFrame(questionResolvedFrame("q-1", "B"));
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("q-1")).toBe(false);
+  });
+});
+
+describe("full-card push: timeout path", () => {
+  it("card timeout clears the pushed mark", async () => {
+    const bridge = makeBridge();
     const cfg = (bridge as unknown as { config: { cardTimeoutMs: number } }).config;
     cfg.cardTimeoutMs = 30;
 
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
-      notifiedCardSessions: Map<string, Set<string>>;
+      pushedCardRpcIds: Map<string, Set<string>>;
     };
     anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "B"));
     await flushNotifications();
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(true);
-    expect(notificationMessages()).toHaveLength(1);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-1")).toBe(true);
 
-    // Wait past the timeout. cardTimeoutMs=30ms + buffer for microtasks.
     await new Promise((r) => setTimeout(r, 80));
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(false);
-
-    anyBridge.handleMuxFrame(approvalFrame("a-2", "ap-2", "B"));
-    await flushNotifications();
-    expect(notificationMessages()).toHaveLength(2);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-1")).toBe(false);
   });
 });
 
-describe("notification dedupe: cross-session isolation", () => {
-  it("resolving cards for session B does not affect session C's notification mark", async () => {
+describe("full-card push: cross-session isolation", () => {
+  it("resolving session B's card does not affect session C's pushed mark", async () => {
     const bridge = makeBridge();
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
-      notifiedCardSessions: Map<string, Set<string>>;
+      pushedCardRpcIds: Map<string, Set<string>>;
     };
     anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "B"));
     anyBridge.handleMuxFrame(approvalFrame("c-1", "cp-1", "C"));
     await flushNotifications();
-    expect(notificationMessages()).toHaveLength(2);
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(true);
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("C")).toBe(true);
+    expect(approvalCardMessages()).toHaveLength(2);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-1")).toBe(true);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("c-1")).toBe(true);
 
-    // Resolve B → only B's mark clears.
     anyBridge.handleMuxFrame(approvalResolvedFrame("ap-1", "allowed-once", "B"));
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(false);
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("C")).toBe(true);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-1")).toBe(false);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("c-1")).toBe(true);
   });
 });
 
-describe("notification dedupe: switch-in still clears mark (existing behavior)", () => {
-  it("switching into the notified session clears the mark", async () => {
+describe("full-card push: switch-in flush", () => {
+  it("does not re-send a card that was already pushed at arrival", async () => {
     const bridge = makeBridge();
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       flushPendingCardsForSession(u: string, s: string): Promise<void>;
-      notifiedCardSessions: Map<string, Set<string>>;
     };
     anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "B"));
     await flushNotifications();
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(true);
+    expect(approvalCardMessages()).toHaveLength(1);
 
-    // Simulate /session switch B: user switches into B, cards flushed,
-    // line 1113 explicitly clears the notified mark.
+    // Switch into B → flush must NOT repeat the already-pushed card.
     (bridge as unknown as { state: { update(u: string, p: unknown): void } }).state.update("u1", { sessionId: "B" });
     await anyBridge.flushPendingCardsForSession("u1", "B");
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(false);
+    expect(approvalCardMessages()).toHaveLength(1);
+  });
 
-    // Switch back to A, new B card → fresh notification.
-    (bridge as unknown as { state: { update(u: string, p: unknown): void } }).state.update("u1", { sessionId: "A" });
-    anyBridge.handleMuxFrame(approvalFrame("a-2", "ap-2", "B"));
+  it("flushes cards that never got pushed (gate off at arrival)", async () => {
+    const bridge = makeBridge(false);
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      flushPendingCardsForSession(u: string, s: string): Promise<void>;
+    };
+    anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "B"));
     await flushNotifications();
-    expect(notificationMessages()).toHaveLength(2);
+    expect(approvalCardMessages()).toHaveLength(0);
+
+    (bridge as unknown as { state: { update(u: string, p: unknown): void } }).state.update("u1", { sessionId: "B" });
+    await anyBridge.flushPendingCardsForSession("u1", "B");
+    await flushNotifications();
+    expect(approvalCardMessages()).toHaveLength(1);
   });
 });
 
-describe("notification dedupe: WeChat reply path (mark cleared via removeApprovalCard)", () => {
-  it("after switching into B, a WeChat reply calls removeApprovalCard which is a no-op on mark", async () => {
-    // This is the realistic scenario: user switches into B (mark cleared by
-    // flushPendingCardsForSession), then replies from WeChat → removeApprovalCard
-    // runs but the mark was already cleared — invariant preserved.
+describe("full-card push: WeChat reply path", () => {
+  it("answers a non-current session's card directly from WeChat", async () => {
     const bridge = makeBridge();
     const respondMock = vi.fn().mockResolvedValue({ accepted: true });
     const api: ApiProxySurface = {
@@ -285,25 +275,31 @@ describe("notification dedupe: WeChat reply path (mark cleared via removeApprova
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleApprovalReply(u: string, t: string): Promise<void>;
-      notifiedCardSessions: Map<string, Set<string>>;
     };
+    // Card for session B while the user is bound to session A.
     anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "B"));
     await flushNotifications();
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(true);
 
-    // Switch into B → flushPendingCardsForSession clears the mark.
-    (bridge as unknown as { state: { update(u: string, p: unknown): void } }).state.update("u1", { sessionId: "B" });
-    // Trigger the same code path that /session switch takes on line 1113.
-    const bridge2 = bridge as unknown as {
-      flushPendingCardsForSession(u: string, s: string): Promise<void>;
-    };
-    await bridge2.flushPendingCardsForSession("u1", "B");
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(false);
-
-    // Reply from WeChat → removeApprovalCard runs (covered by frames.test.ts).
-    // The helper is a no-op here since mark was already cleared.
     await anyBridge.handleApprovalReply("u1", "1");
-    expect(anyBridge.notifiedCardSessions.get("u1")?.has("B")).toBe(false);
     expect(respondMock).toHaveBeenCalledTimes(1);
+    expect((respondMock.mock.calls[0] as unknown[])[0]).toMatchObject({
+      result: { ok: true, value: { outcome: "allowed-once" } },
+    });
+  });
+
+  it("blocks a bare reply when cards span several sessions", async () => {
+    const bridge = makeBridge();
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      handleApprovalReply(u: string, t: string): Promise<void>;
+    };
+    anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "B"));
+    anyBridge.handleMuxFrame(approvalFrame("a-2", "ap-2", "C"));
+    await flushNotifications();
+    sendTextMessage.mockClear();
+
+    await anyBridge.handleApprovalReply("u1", "1");
+    const texts = sendTextMessage.mock.calls.map((c) => c[1] as string);
+    expect(texts.some((t: string) => t.includes("为避免误操作"))).toBe(true);
   });
 });
