@@ -22,6 +22,12 @@ export interface WeChatDSHConfig {
   cardTimeoutMs: number;
   /** Cross-session notifications (turn/end + error + cards of non-current sessions). Default off. */
   crossSessionNotify: boolean;
+  /**
+   * Background-task completion/error notices for non-current sessions.
+   * Independent of `crossSessionNotify` (which now only gates decision
+   * cards); default off so only decision cards reach WeChat unless enabled.
+   */
+  notifyTaskEvents: boolean;
 }
 
 export function defaultStorageDir(): string {
@@ -38,5 +44,6 @@ export function defaultConfig(): WeChatDSHConfig {
     textChunkLimit: 4000,
     cardTimeoutMs: 30 * 60_000,
     crossSessionNotify: false,
+    notifyTaskEvents: false,
   };
 }
