@@ -219,6 +219,7 @@ describe("Native command dispatch via ctx.commands", () => {
     expect(mock.received.length).toBe(0);
     const user = (bridge as unknown as { state: { getUser(u: string): { silent: boolean } } }).state.getUser("u1");
     expect(user?.silent).toBe(true);
+    expect((bridge as unknown as { config: { silent: boolean } }).config.silent).toBe(true);
   });
 
   it("forwards an unregistered /foo bar to the agent verbatim (fallback)", async () => {

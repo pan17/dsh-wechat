@@ -138,14 +138,14 @@ export class StateStore {
     }
   }
 
-  ensureUser(userId: string, cwd: string): UserState {
+  ensureUser(userId: string, cwd: string, opts?: { silent?: boolean }): UserState {
     let user = this.state.users[userId];
     if (!user) {
       user = {
         userId,
         sessionId: "",
         cwd,
-        silent: false,
+        silent: opts?.silent === true,
         crossSessionNotify: "inherit",
         watchedSessions: [],
       };

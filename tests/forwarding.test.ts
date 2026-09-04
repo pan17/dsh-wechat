@@ -145,6 +145,7 @@ describe("WeChat → agent forwarding chain", () => {
     anyBridge.state.ensureUser("u1", "C:\\work");
     const state = anyBridge.state as { update(u: string, p: unknown): void; getUser(u: string): { silent: boolean } };
     state.update("u1", { sessionId: "wx-s1", silent: true });
+    (bridge as unknown as { config: { silent: boolean } }).config.silent = true;
 
     anyBridge.handleSessionEvent("wx-s1", {
       type: "assistant/message",

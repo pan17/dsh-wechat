@@ -30,6 +30,7 @@ vi.mock("../src/weixin/monitor.js", async (importOriginal) => {
 
 import { WeChatDSHBridge } from "../src/bridge/bridge.js";
 import { defaultConfig } from "../src/config.js";
+import { ConfigStore } from "../src/config-store.js";
 import { StateStore } from "../src/state.js";
 import { MessageType } from "../src/weixin/types.js";
 import { clearSyncBuf } from "../src/weixin/monitor.js";
@@ -200,6 +201,88 @@ describe("relogin / logout unlocks the single-user peer", () => {
     await anyBridge.handleMessage(wechatText("new-user", "别人"));
     expect(mock.received.length).toBe(1);
     expect(anyBridge.peerUserId).toBe("old-user");
+  });
+});
+
+describe("silent mode survives relogin", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeStoredBridge() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-silent-"));
+    const mock = makeMockAgent("wx-s1");
+    const agentsService = {
+      create: async () => mock,
+      resume: async () => mock,
+      get: (id: string) => (id === mock.agent.id ? mock.agent : undefined),
+      list: () => [mock.agent],
+    };
+    const ctx = {
+      get: (name: string) => (name === "agents" ? agentsService : undefined),
+      on: () => () => {},
+    };
+    const store = new ConfigStore(dir);
+    const cfg = store.resolve(defaultConfig());
+    cfg.storageDir = dir;
+    const bridge = new WeChatDSHBridge(ctx, cfg, undefined, store);
+    (bridge as unknown as { token: unknown }).token = {
+      baseUrl: "https://gw",
+      token: "t",
+      accountId: "b1",
+      userId: "u",
+      savedAt: "",
+    };
+    return { bridge, mock, storageDir: dir, store };
+  }
+
+  it("saves silent with no bound user and keeps it after relogin", async () => {
+    const { bridge } = makeStoredBridge();
+    const anyBridge = bridge as unknown as BridgeHarness & {
+      updateConfig(patch: { silent?: boolean }): Promise<{ config: Record<string, unknown> }>;
+      getStatus(): { config?: { silent?: boolean }; users: Array<{ silent?: boolean }> };
+    };
+    anyBridge.startLoginFlow = async () => {};
+
+    const saved = await anyBridge.updateConfig({ silent: true });
+    expect(saved.config.silent).toBe(true);
+    expect(anyBridge.getStatus().config?.silent).toBe(true);
+    expect(anyBridge.getStatus().users).toEqual([]);
+
+    await anyBridge.relogin();
+    expect(anyBridge.state.all()).toEqual([]);
+    expect(anyBridge.getStatus().config?.silent).toBe(true);
+
+    (bridge as unknown as { token: unknown }).token = {
+      baseUrl: "https://gw",
+      token: "t2",
+      accountId: "b2",
+      userId: "u",
+      savedAt: "",
+    };
+    await anyBridge.handleMessage(wechatText("new-user", "你好"));
+    expect(anyBridge.state.all()[0]?.userId).toBe("new-user");
+    expect(anyBridge.state.all()[0]).toMatchObject({ silent: true });
+    expect(anyBridge.getStatus().users[0]?.silent).toBe(true);
+  });
+
+  it("migrates a legacy per-user silent flag into config.json", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-silent-mig-"));
+    try {
+      const state = new StateStore(dir);
+      state.ensureUser("old-user", "C:\\work");
+      state.update("old-user", { silent: true });
+
+      const store = new ConfigStore(dir);
+      const cfg = store.resolve(defaultConfig());
+      cfg.storageDir = dir;
+      const ctx = { get: () => undefined, on: () => () => {} };
+      const bridge = new WeChatDSHBridge(ctx, cfg, undefined, store);
+      expect((bridge as unknown as { config: { silent: boolean } }).config.silent).toBe(true);
+      expect(new ConfigStore(dir).stored().silent).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

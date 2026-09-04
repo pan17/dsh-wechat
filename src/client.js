@@ -122,6 +122,9 @@ window.__ModuleLoader__.load({
 					// locally until Save, and are only re-synced when the user
 					// refreshes the page or after a successful save/relogin/
 					// logout (which all call refresh() explicitly).
+					// Silent is global (config.json). Fall back to the bound
+					// user only for older hosts that have not yet added
+					// config.silent.
 					setForm((prev) => prev ?? {
 						baseUrl: r.body.config?.baseUrl ?? "",
 						cdnBaseUrl: r.body.config?.cdnBaseUrl ?? "",
@@ -132,7 +135,7 @@ window.__ModuleLoader__.load({
 						crossSessionNotify: !!r.body.config?.crossSessionNotify,
 						surfacePromptEnabled: !!r.body.config?.surfacePromptEnabled,
 						surfacePrompt: r.body.config?.surfacePrompt ?? "",
-						silent: !!(firstUser && firstUser.silent),
+						silent: !!(r.body.config?.silent ?? (firstUser && firstUser.silent)),
 					});
 				}).catch(() => {});
 			}, []);
@@ -190,6 +193,7 @@ window.__ModuleLoader__.load({
 							textChunkLimit: Number(form.textChunkLimit) || undefined,
 							cardTimeoutMs: Number(form.cardTimeoutMs) || undefined,
 							crossSessionNotify: !!form.crossSessionNotify,
+							silent: !!form.silent,
 							surfacePromptEnabled: !!form.surfacePromptEnabled,
 							surfacePrompt: form.surfacePrompt,
 						}),
@@ -198,19 +202,6 @@ window.__ModuleLoader__.load({
 						setMsg({ kind: "err", text: r.body.message || `保存失败 (HTTP ${r.status})` });
 						setBusy("");
 						return;
-					}
-					// 同步保存单用户静默开关（与全局一起保存）
-					const firstUser = status && status.users && status.users[0];
-					if (firstUser && typeof form.silent === "boolean" && form.silent !== !!firstUser.silent) {
-						const ru = await api("/user", {
-							method: "POST",
-							body: JSON.stringify({ userId: firstUser.userId, silent: !!form.silent }),
-						});
-						if (!ru.ok) {
-							setMsg({ kind: "err", text: ru.body.message || `静默保存失败 (HTTP ${ru.status})` });
-							setBusy("");
-							return;
-						}
 					}
 					setMsg({ kind: "ok", text: r.body.message || "配置已保存" });
 					refresh();
@@ -293,7 +284,7 @@ window.__ModuleLoader__.load({
 							createElement("span", null, "微信渠道提示词"),
 							createElement(HelpTip, { text: "开启后，最近一条用户消息来自微信时会把下方提示词注入 agent 的 runtime context；GUI 发消息时自动隐藏。也可用微信 /surface on|off 切换。" }),
 						),
-						(status?.users && status.users.length === 0) ? createElement("span", { className: "wx_meta" }, "（暂无绑定用户，静默将在首条微信消息后生效）") : null,
+						(status?.users && status.users.length === 0) ? createElement("span", { className: "wx_meta" }, "（暂无绑定用户也可保存，重新扫码后仍然生效）") : null,
 					),
 					form ? createElement("div", { className: "wx_form", style: { marginTop: "4px" } },
 						createElement("div", { className: "wide wx_prompt_field" },

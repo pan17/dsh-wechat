@@ -93,6 +93,7 @@ function makeBridge(opts: BridgeOpts = {}) {
   const cfg = defaultConfig();
   cfg.storageDir = dir;
   cfg.crossSessionNotify = opts.crossNotify ?? false;
+  cfg.silent = opts.silent ?? false;
   const bridge = new WeChatDSHBridge(ctx, cfg);
   const stateApi = bridge as unknown as {
     state: {

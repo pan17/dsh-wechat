@@ -243,6 +243,17 @@ describe("StateStore", () => {
     }
   });
 
+  it("new users inherit the global silent default", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
+    try {
+      const store = new StateStore(dir);
+      expect(store.ensureUser("u1", "C:\\work").silent).toBe(false);
+      expect(store.ensureUser("u2", "C:\\work", { silent: true }).silent).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("persists and reloads the single-peer outbound snapshot", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
     try {

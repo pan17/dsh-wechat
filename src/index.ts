@@ -28,6 +28,7 @@ export interface PluginConfig {
   cwd?: string;
   textChunkLimit?: number;
   cardTimeoutMs?: number;
+  silent?: boolean;
   surfacePromptEnabled?: boolean;
   surfacePrompt?: string;
 }

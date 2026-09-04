@@ -22,6 +22,11 @@ export interface WeChatDSHConfig {
   cardTimeoutMs: number;
   /** Cross-session notifications (turn/end + error + cards of non-current sessions). Default off. */
   crossSessionNotify: boolean;
+  /**
+   * Silent mode: only send the final text of each turn. Global, survives
+   * re-scan (which clears per-user `state.json`). Default off.
+   */
+  silent: boolean;
   /** Inject the WeChat surface prompt while the last user message came from WeChat. Default off. */
   surfacePromptEnabled: boolean;
   /** Runtime-context text injected for WeChat-driven turns (edited from the settings page). */
@@ -46,6 +51,7 @@ export function defaultConfig(): WeChatDSHConfig {
     textChunkLimit: 4000,
     cardTimeoutMs: 30 * 60_000,
     crossSessionNotify: false,
+    silent: false,
     surfacePromptEnabled: false,
     surfacePrompt: DEFAULT_SURFACE_PROMPT,
   };

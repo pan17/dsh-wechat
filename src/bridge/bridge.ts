@@ -368,10 +368,27 @@ export class WeChatDSHBridge {
     this.config = config;
     this.configStore = configStore;
     this.state = new StateStore(config.storageDir);
+    this.migrateSilentFromUsers();
     this.restoreOutboundState();
     this.agents = new AgentStore(ctx);
     this.ops = new DshOps(ctx);
     if (commandsCtx) this.commandsCtx = commandsCtx;
+  }
+
+  /**
+   * Pre-global-silent installs stored the toggle only on the WeChat user.
+   * Copy it into config.json once so the settings page and a later re-scan
+   * still see the same value.
+   */
+  private migrateSilentFromUsers(): void {
+    if (this.configStore?.stored().silent !== undefined) return;
+    if (!this.state.all().some((u) => u.silent)) return;
+    this.persistEditable({ silent: true });
+  }
+
+  /** Bind or create the WeChat user, inheriting the global silent default. */
+  private ensureBoundUser(userId: string): UserState {
+    return this.state.ensureUser(userId, this.config.cwd, { silent: this.config.silent });
   }
 
   /** Hydrate the one peer's persisted budget and queue without auto-flushing. */
@@ -587,7 +604,7 @@ export class WeChatDSHBridge {
         userId: u.userId,
         sessionId: u.sessionId,
         cwd: u.cwd,
-        silent: u.silent,
+        silent: this.isSilent(),
         crossSessionNotify: u.crossSessionNotify ?? "inherit",
         watchedSessions: u.watchedSessions ?? [],
       })),
@@ -1023,6 +1040,12 @@ export class WeChatDSHBridge {
       }
     }
 
+    if (typeof patch.silent === "boolean") {
+      for (const user of this.state.all()) {
+        this.state.update(user.userId, { silent: patch.silent });
+      }
+    }
+
     const editable: Record<string, unknown> = {};
     for (const key of EDITABLE_KEYS) {
       editable[key] = this.config[key];
@@ -1032,6 +1055,7 @@ export class WeChatDSHBridge {
       void this.reconnect();
       return { config: editable, message: "配置已保存；网关参数已变更，正在重连…" };
     }
+
     if (appliedCwd > 0) {
       return { config: editable, message: `配置已保存；工作目录已应用到 ${appliedCwd} 个用户（显式切换过的保留原样）` };
     }
@@ -1049,7 +1073,10 @@ export class WeChatDSHBridge {
     const user = this.state.getUser(userId);
     if (!user) return { ok: false, message: `未找到用户 ${userId}` };
     const toUpdate: Partial<UserState> = {};
-    if (typeof patch.silent === "boolean") toUpdate.silent = patch.silent;
+    if (typeof patch.silent === "boolean") {
+      this.persistEditable({ silent: patch.silent });
+      toUpdate.silent = patch.silent;
+    }
     if (patch.crossSessionNotify === "on" || patch.crossSessionNotify === "off" || patch.crossSessionNotify === "inherit") {
       toUpdate.crossSessionNotify = patch.crossSessionNotify;
     }
@@ -1090,7 +1117,7 @@ export class WeChatDSHBridge {
     this.wechatMsgCount = 0;
     this.cacheNoticeSent = false;
 
-    const user = this.state.ensureUser(userId, this.config.cwd);
+    const user = this.ensureBoundUser(userId);
     this.persistOutboundState(userId);
 
     // Pull text once so both the card handler and the slash command
@@ -1447,7 +1474,7 @@ export class WeChatDSHBridge {
         // cancel here. agent.status is still "running" while text is being
         // produced; the indicator mirrors that status and is only removed
         // on turn/end / agent/error / plugin stop.
-        if (user.silent) {
+        if (this.isSilent()) {
           const buffer = this.silentBuffers.get(sessionId) ?? [];
           buffer.push(text);
           this.silentBuffers.set(sessionId, buffer);
@@ -2314,16 +2341,27 @@ export class WeChatDSHBridge {
   }
 
   private async handleSilentCommand(userId: string, mode: "on" | "off" | "status"): Promise<void> {
-    const user = this.state.ensureUser(userId, this.config.cwd);
+    const user = this.ensureBoundUser(userId);
     if (mode === "on") {
-      this.state.update(userId, { silent: true });
+      this.setSilent(true, user.userId);
       await this.sendReply(userId, "🔇 静默模式已开启：每轮只发送最终回复。");
     } else if (mode === "off") {
-      this.state.update(userId, { silent: false });
+      this.setSilent(false, user.userId);
       await this.sendReply(userId, "🔊 静默模式已关闭。");
     } else {
-      await this.sendReply(userId, `静默模式: ${user.silent ? "on" : "off"}（/silent on|off 切换）`);
+      await this.sendReply(userId, `静默模式: ${this.isSilent() ? "on" : "off"}（/silent on|off 切换）`);
     }
+  }
+
+  /** Global silent switch, mirrored onto the current peer so runtime reads stay consistent. */
+  private setSilent(silent: boolean, userId?: string): void {
+    this.persistEditable({ silent });
+    const target = userId ?? this.peerUserId ?? this.state.all()[0]?.userId;
+    if (target) this.state.update(target, { silent });
+  }
+
+  private isSilent(): boolean {
+    return this.config.silent === true;
   }
 
   // ─── Busy-Enter delivery behavior (/enter) ───
@@ -2371,7 +2409,7 @@ export class WeChatDSHBridge {
   // ─── Workspace / Session / Agent / Model commands ───
 
   private async handleWorkspaceCommand(userId: string, cmd: WorkspaceCommand): Promise<void> {
-    const user = this.state.ensureUser(userId, this.config.cwd);
+    const user = this.ensureBoundUser(userId);
     switch (cmd.kind) {
       case "list": {
         const workspaces = this.ops.listWorkspaces();
@@ -2476,7 +2514,7 @@ export class WeChatDSHBridge {
   }
 
   private async handleSessionCommand(userId: string, cmd: SessionCommand): Promise<void> {
-    const user = this.state.ensureUser(userId, this.config.cwd);
+    const user = this.ensureBoundUser(userId);
     switch (cmd.kind) {
       case "list": {
         const sessions = await this.ops.listSessions();
@@ -2665,7 +2703,7 @@ export class WeChatDSHBridge {
   }
 
   private async handlePresetCommand(userId: string, cmd: PresetCommand): Promise<void> {
-    const user = this.state.ensureUser(userId, this.config.cwd);
+    const user = this.ensureBoundUser(userId);
     switch (cmd.kind) {
       case "list": {
         const presets = (await this.ops.listPresets()).filter((p) => !p.broken);
@@ -2753,7 +2791,7 @@ export class WeChatDSHBridge {
    * `agent/request` override.
    */
   private async handleReasoningCommand(userId: string, cmd: ReasoningCommand): Promise<void> {
-    const user = this.state.ensureUser(userId, this.config.cwd);
+    const user = this.ensureBoundUser(userId);
     const agent = this.agents.get(user);
     const active = this.resolveEffectiveModel(user, agent);
 
@@ -2936,7 +2974,7 @@ export class WeChatDSHBridge {
   }
 
   private async handleModelCommand(userId: string, cmd: ModelCommand): Promise<void> {
-    const user = this.state.ensureUser(userId, this.config.cwd);
+    const user = this.ensureBoundUser(userId);
     switch (cmd.kind) {
       case "list": {
         const providers = this.ops.listProviders();
@@ -3045,7 +3083,7 @@ export class WeChatDSHBridge {
    * (the default for new sessions, shared with the GUI settings page).
    */
   private async handlePermCommand(userId: string, cmd: PermCommand): Promise<void> {
-    const user = this.state.ensureUser(userId, this.config.cwd);
+    const user = this.ensureBoundUser(userId);
     const service = this.ops.permissionPresets();
     if (!service) {
       await this.sendReply(userId, "⚠️ 当前部署未启用权限预设（permissionPresets 服务不可用）。");
@@ -3271,7 +3309,7 @@ export class WeChatDSHBridge {
         : []),
       presetLines.defaultLine,
       // 静默模式 on = we stop forwarding (warning); off = normal delivery (good).
-      `• 静默模式: ${this.paintBadge(user.silent ? "on" : "off", user.silent ? "warning" : "positive")}`,
+      `• 静默模式: ${this.paintBadge(this.isSilent() ? "on" : "off", this.isSilent() ? "warning" : "positive")}`,
       `• 微信提示词: ${this.paintBadge(this.config.surfacePromptEnabled ? "on" : "off", this.config.surfacePromptEnabled ? "positive" : "neutral")}`,
       `• 繁忙投递: ${this.ops.busyEnter() === "steer" ? this.paintBadge("steer（插话）", "positive") : this.paintBadge("queue（排队）", "neutral")}`,
       // 跨会话通知 on = extra notifications enabled (good); off = quiet (also fine, neutral).

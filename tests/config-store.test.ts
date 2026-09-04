@@ -57,6 +57,34 @@ describe("ConfigStore", () => {
     }
   });
 
+  it("persists silent as a global boolean", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      const store = new ConfigStore(dir);
+      store.update({ silent: true });
+
+      const reloaded = new ConfigStore(dir);
+      expect(reloaded.stored().silent).toBe(true);
+      expect(reloaded.resolve(defaultConfig()).silent).toBe(true);
+
+      store.update({ silent: false });
+      expect(new ConfigStore(dir).stored().silent).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores non-boolean silent", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      const store = new ConfigStore(dir);
+      store.update({ silent: "yes" as never });
+      expect(store.stored().silent).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("persists surfacePromptEnabled and surfacePrompt", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
     try {
