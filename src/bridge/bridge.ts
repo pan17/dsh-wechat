@@ -43,6 +43,7 @@ import {
   type UserState,
 } from "../state.js";
 import type { WeChatDSHConfig } from "../config.js";
+import { EDITABLE_KEYS, type ConfigStore, type EditableConfig } from "../config-store.js";
 import {
   detectUnknownSlashCommand,
   formatHelp,
@@ -63,6 +64,7 @@ import {
   parseRejectQuestionCommand,
   parseSessionCommand,
   parseSilentCommand,
+  parseSurfaceCommand,
   parseStatusCommand,
   parseStopCommand,
   parseWorkspaceCommand,
@@ -72,6 +74,7 @@ import {
   type HistoryCommand,
   type ModelCommand,
   type NotifyCommand,
+  type SurfaceCommand,
   type PermCommand,
   type PresetCommand,
   type ReasoningCommand,
@@ -240,6 +243,7 @@ type CachedMessage = OutboundMessage;
 export class WeChatDSHBridge {
   private readonly ctx: BridgeContext;
   private config: WeChatDSHConfig;
+  private readonly configStore?: ConfigStore;
   private readonly state: StateStore;
   private readonly agents: AgentStore;
   private readonly ops: DshOps;
@@ -354,9 +358,15 @@ export class WeChatDSHBridge {
     safetyTimer: NodeJS.Timeout;
   }>();
 
-  constructor(ctx: BridgeContext, config: WeChatDSHConfig, commandsCtx?: NativeCommandsSurface | null) {
+  constructor(
+    ctx: BridgeContext,
+    config: WeChatDSHConfig,
+    commandsCtx?: NativeCommandsSurface | null,
+    configStore?: ConfigStore,
+  ) {
     this.ctx = ctx;
     this.config = config;
+    this.configStore = configStore;
     this.state = new StateStore(config.storageDir);
     this.restoreOutboundState();
     this.agents = new AgentStore(ctx);
@@ -566,7 +576,7 @@ export class WeChatDSHBridge {
   /** Full status snapshot for the settings page / QR page. */
   getStatus(): Record<string, unknown> {
     const editable: Record<string, unknown> = {};
-    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "textChunkLimit", "cardTimeoutMs", "crossSessionNotify"] as const) {
+    for (const key of EDITABLE_KEYS) {
       editable[key] = this.config[key];
     }
     return {
@@ -989,7 +999,7 @@ export class WeChatDSHBridge {
    * gateway connection fields change while logged in, the monitor is
    * restarted automatically.
    */
-  async updateConfig(patch: Partial<import("../config-store.js").EditableConfig>): Promise<{ config: Record<string, unknown>; message: string }> {
+  async updateConfig(patch: Partial<EditableConfig>): Promise<{ config: Record<string, unknown>; message: string }> {
     const before = { ...this.config };
     const changed = (Object.keys(patch) as Array<keyof typeof patch>).filter((k) => patch[k] !== undefined);
     for (const key of changed) {
@@ -1014,7 +1024,7 @@ export class WeChatDSHBridge {
     }
 
     const editable: Record<string, unknown> = {};
-    for (const key of ["baseUrl", "cdnBaseUrl", "botType", "cwd", "textChunkLimit", "cardTimeoutMs", "crossSessionNotify"] as const) {
+    for (const key of EDITABLE_KEYS) {
       editable[key] = this.config[key];
     }
 
@@ -1177,6 +1187,12 @@ export class WeChatDSHBridge {
         return;
       }
 
+      const surface = parseSurfaceCommand(text);
+      if (surface) {
+        await this.handleSurfaceCommand(userId, surface);
+        return;
+      }
+
       const notifyCmd = parseNotifyCommand(text);
       if (notifyCmd) {
         await this.handleNotifyCommand(userId, notifyCmd);
@@ -1305,8 +1321,7 @@ export class WeChatDSHBridge {
     // window already closed degrades to the next waking queue turn inside
     // AgentLoop, so neither mode can lose the message.
     const mode = agent.status === "running" ? this.ops.busyEnter() : "queue";
-    const messageId = this.agents.followup(agent, blocks, mode);
-    this.markWechatMessage(messageId);
+    this.agents.followup(agent, blocks, mode, (id) => this.markWechatMessage(id));
   }
 
   // ─── Outbound: DSH → WeChat ───
@@ -1373,7 +1388,7 @@ export class WeChatDSHBridge {
         const id = typeof data.id === "string" ? data.id : undefined;
         const isWechatEcho = id !== undefined && this.wechatMessageIds.has(id);
         if (isWechatEcho) {
-          // Defensive cleanup; the marker was already set at followup time.
+          this.markSessionSource(sessionId, "wechat");
           this.wechatMessageIds.delete(id);
         } else {
           this.markSessionSource(sessionId, "gui");
@@ -2252,28 +2267,50 @@ export class WeChatDSHBridge {
       return;
     }
     if (cmd.kind === "on") {
-      this.config.crossSessionNotify = true;
-      try { this.persistGlobalCrossNotify(true); } catch {}
+      this.persistEditable({ crossSessionNotify: true });
       await this.sendReply(userId, "✅ 跨会话通知已开启。");
       return;
     }
     if (cmd.kind === "off") {
-      this.config.crossSessionNotify = false;
-      try { this.persistGlobalCrossNotify(false); } catch {}
+      this.persistEditable({ crossSessionNotify: false });
       await this.sendReply(userId, "🔕 跨会话通知已关闭。");
       return;
     }
   }
 
-  private persistGlobalCrossNotify(enabled: boolean): void {
+  /**
+   * Write one editable field both in memory and, when a ConfigStore is
+   * attached, to `config.json`. Tests that construct the bridge without a
+   * store still see the in-memory change for the rest of the process.
+   */
+  private persistEditable(patch: Partial<EditableConfig>): void {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      (this.config as unknown as Record<string, unknown>)[key] = value;
+    }
     try {
-      const cfgPath = require("node:path").join(this.config.storageDir, "config.json");
-      let cur: Record<string, unknown> = {};
-      try { cur = JSON.parse(require("node:fs").readFileSync(cfgPath, "utf-8")); } catch {}
-      cur.crossSessionNotify = enabled;
-      require("node:fs").mkdirSync(require("node:path").dirname(cfgPath), { recursive: true });
-      require("node:fs").writeFileSync(cfgPath, JSON.stringify(cur, null, 2), "utf-8");
-    } catch {}
+      this.configStore?.update(patch);
+    } catch (err) {
+      this.log(`persist config failed: ${String(err)}`);
+    }
+  }
+
+  private async handleSurfaceCommand(userId: string, cmd: SurfaceCommand): Promise<void> {
+    if (cmd.mode === "on") {
+      this.persistEditable({ surfacePromptEnabled: true });
+      await this.sendReply(userId, "✅ 微信渠道提示词已开启。下一轮微信消息会注入设置页中的提示词。");
+      return;
+    }
+    if (cmd.mode === "off") {
+      this.persistEditable({ surfacePromptEnabled: false });
+      await this.sendReply(userId, "🔕 微信渠道提示词已关闭。");
+      return;
+    }
+    const on = this.config.surfacePromptEnabled ? "on" : "off";
+    await this.sendReply(
+      userId,
+      `微信渠道提示词: ${on}（/surface on|off 切换；正文在设置页编辑）`,
+    );
   }
 
   private async handleSilentCommand(userId: string, mode: "on" | "off" | "status"): Promise<void> {
@@ -3235,6 +3272,7 @@ export class WeChatDSHBridge {
       presetLines.defaultLine,
       // 静默模式 on = we stop forwarding (warning); off = normal delivery (good).
       `• 静默模式: ${this.paintBadge(user.silent ? "on" : "off", user.silent ? "warning" : "positive")}`,
+      `• 微信提示词: ${this.paintBadge(this.config.surfacePromptEnabled ? "on" : "off", this.config.surfacePromptEnabled ? "positive" : "neutral")}`,
       `• 繁忙投递: ${this.ops.busyEnter() === "steer" ? this.paintBadge("steer（插话）", "positive") : this.paintBadge("queue（排队）", "neutral")}`,
       // 跨会话通知 on = extra notifications enabled (good); off = quiet (also fine, neutral).
       `• 跨会话通知: ${this.paintBadge(crossEffective, crossEffective === "on" ? "positive" : "neutral")}`,

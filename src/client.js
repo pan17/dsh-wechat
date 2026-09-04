@@ -40,8 +40,14 @@ window.__ModuleLoader__.load({
 .wx_qr img{width:200px;height:200px;border:1px solid #eee;border-radius:8px}
 .wx_form{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .wx_form label{display:flex;flex-direction:column;gap:4px;font-size:12px}
-.wx_form input{font:inherit;font-size:13px;padding:6px 8px;border-radius:8px;border:1px solid rgba(128,128,128,.4);background:transparent;color:inherit}
+.wx_form input,.wx_form textarea{font:inherit;font-size:13px;padding:6px 8px;border-radius:8px;border:1px solid rgba(128,128,128,.4);background:transparent;color:inherit;width:100%;box-sizing:border-box}
+.wx_form textarea{min-height:88px;resize:vertical;line-height:1.45}
 .wx_form .wide{grid-column:1 / -1}
+.wx_prompt_field{display:flex;flex-direction:column;gap:4px;font-size:12px}
+.wx_disclosure{display:flex;align-items:center;gap:6px;cursor:pointer;font:inherit;font-size:12px;color:inherit;background:none;border:none;padding:0;text-align:left;width:100%}
+.wx_disclosure:hover{opacity:.85}
+.wx_disclosure_chevron{display:inline-block;width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:5px solid currentColor;transition:transform .12s;flex:0 0 auto}
+.wx_disclosure_chevron.open{transform:rotate(90deg)}
 .wx_actions{margin-left:auto;display:flex;gap:8px}
 .wx_check{display:flex;align-items:center;gap:8px;font-size:12px;padding:6px 0}
 .wx_check input{width:16px;height:16px}
@@ -104,6 +110,7 @@ window.__ModuleLoader__.load({
 			const [msg, setMsg] = react.useState({ kind: "", text: "" });
 			// Editable form state (initialized from status.config).
 			const [form, setForm] = react.useState(null);
+			const [promptOpen, setPromptOpen] = react.useState(false);
 
 			const refresh = react.useCallback(() => {
 				api("/status").then((r) => {
@@ -123,6 +130,8 @@ window.__ModuleLoader__.load({
 						textChunkLimit: String(r.body.config?.textChunkLimit ?? ""),
 						cardTimeoutMs: String(r.body.config?.cardTimeoutMs ?? ""),
 						crossSessionNotify: !!r.body.config?.crossSessionNotify,
+						surfacePromptEnabled: !!r.body.config?.surfacePromptEnabled,
+						surfacePrompt: r.body.config?.surfacePrompt ?? "",
 						silent: !!(firstUser && firstUser.silent),
 					});
 				}).catch(() => {});
@@ -181,6 +190,8 @@ window.__ModuleLoader__.load({
 							textChunkLimit: Number(form.textChunkLimit) || undefined,
 							cardTimeoutMs: Number(form.cardTimeoutMs) || undefined,
 							crossSessionNotify: !!form.crossSessionNotify,
+							surfacePromptEnabled: !!form.surfacePromptEnabled,
+							surfacePrompt: form.surfacePrompt,
 						}),
 					});
 					if (!r.ok) {
@@ -277,8 +288,34 @@ window.__ModuleLoader__.load({
 							createElement("span", null, "静默"),
 							createElement(HelpTip, { text: "开启后 agent 每轮的中间过程（工具调用、思考等）不再逐条推送，只在轮次结束时发送最终回复，避免刷屏。" }),
 						),
+						createElement("label", { className: "wx_check" },
+							createElement("input", { type: "checkbox", checked: !!form?.surfacePromptEnabled, onChange: (e) => setForm({ ...form, surfacePromptEnabled: e.target.checked }) }),
+							createElement("span", null, "微信渠道提示词"),
+							createElement(HelpTip, { text: "开启后，最近一条用户消息来自微信时会把下方提示词注入 agent 的 runtime context；GUI 发消息时自动隐藏。也可用微信 /surface on|off 切换。" }),
+						),
 						(status?.users && status.users.length === 0) ? createElement("span", { className: "wx_meta" }, "（暂无绑定用户，静默将在首条微信消息后生效）") : null,
 					),
+					form ? createElement("div", { className: "wx_form", style: { marginTop: "4px" } },
+						createElement("div", { className: "wide wx_prompt_field" },
+							createElement("button", {
+								type: "button",
+								className: "wx_disclosure",
+								onClick: () => setPromptOpen((open) => !open),
+								"aria-expanded": promptOpen,
+							},
+								createElement("span", { className: "wx_disclosure_chevron" + (promptOpen ? " open" : "") }),
+								createElement("span", { className: "wx_field_label" }, "微信渠道提示词正文",
+									createElement(HelpTip, { text: "仅在设置页编辑。微信消息驱动会话时注入到 runtime context；留空等于关闭注入。" })),
+							),
+							promptOpen
+								? createElement("textarea", {
+									value: form.surfacePrompt,
+									onChange: set("surfacePrompt"),
+									placeholder: "你正在通过微信(WeChat)与用户聊天…",
+								})
+								: null,
+						),
+					) : null,
 					msg.text ? createElement("div", { className: msg.kind === "err" ? "wx_err" : "wx_ok" }, msg.text) : null,
 					createElement("div", { className: "wx_row", style: { marginTop: "8px" } },
 						createElement("button", { className: "wx_btn primary", onClick: saveConfig, disabled: busy !== "" || !form }, busy === "config" ? "…" : "保存配置"),

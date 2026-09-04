@@ -175,7 +175,12 @@ export class AgentStore {
    * (a closed window degrades to the next waking queue turn, never lost).
    * The caller resolves the mode from agent.status + the shared setting.
    */
-  followup(agent: Agent, content: ContentBlock[], mode: BusyEnterBehavior = "queue"): string {
+  followup(
+    agent: Agent,
+    content: ContentBlock[],
+    mode: BusyEnterBehavior = "queue",
+    onCreated?: (messageId: string) => void,
+  ): string {
     const message = createUserMessage({
       content,
       // kind 'user' — identical to messages sent from the GUI chat box, so
@@ -183,6 +188,10 @@ export class AgentStore {
       // 'plugin' source renders as "context injection" in the GUI).
       source: { kind: "user" },
     });
+    // Record the minted id BEFORE followup/steer. Those calls synchronously
+    // emit `agent/inbox/spliced`; the surface-prompt marker must already
+    // know this id or the splice handler treats the WeChat message as GUI.
+    onCreated?.(message.id);
     if (mode === "steer") {
       agent.steer(message);
     } else {
@@ -202,8 +211,8 @@ export class AgentStore {
  * scoped context so it never leaks into other sessions.
  *
  * NOTE: the WeChat surface prompt ("you are chatting through WeChat") is NOT
- * registered here anymore — it lives in a global dynamic section registered
- * by index.ts (`dsh-wechat-surface`), whose text is evaluated per assembly
+ * registered here anymore — it lives in a global dynamic runtime context
+ * registered by index.ts (`dsh-wechat-surface`), whose text is evaluated per assembly
  * from the bridge's per-session message-source map. That makes the prompt
  * follow the *message source* (WeChat vs GUI), so any session — old or new,
  * GUI- or WeChat-created — gets the WeChat prompt exactly while WeChat

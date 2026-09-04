@@ -56,4 +56,40 @@ describe("ConfigStore", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("persists surfacePromptEnabled and surfacePrompt", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      const store = new ConfigStore(dir);
+      store.update({
+        surfacePromptEnabled: false,
+        surfacePrompt: "custom wechat prompt",
+      });
+
+      const reloaded = new ConfigStore(dir);
+      expect(reloaded.stored().surfacePromptEnabled).toBe(false);
+      expect(reloaded.stored().surfacePrompt).toBe("custom wechat prompt");
+
+      const resolved = reloaded.resolve(defaultConfig());
+      expect(resolved.surfacePromptEnabled).toBe(false);
+      expect(resolved.surfacePrompt).toBe("custom wechat prompt");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores non-boolean surfacePromptEnabled and non-string surfacePrompt", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      const store = new ConfigStore(dir);
+      store.update({
+        surfacePromptEnabled: "yes" as never,
+        surfacePrompt: 12 as never,
+      });
+      expect(store.stored().surfacePromptEnabled).toBeUndefined();
+      expect(store.stored().surfacePrompt).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

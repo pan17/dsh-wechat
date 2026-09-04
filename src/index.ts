@@ -13,6 +13,8 @@ import { WeChatDSHBridge } from "./bridge/bridge.js";
 import { ConfigStore, type EditableConfig } from "./config-store.js";
 import { defaultConfig, type WeChatDSHConfig } from "./config.js";
 import { qrSvgFor } from "./qr.js";
+import { sessionIdFrom, sessionIdFromAssembleContext, weChatSurfaceText } from "./surface-prompt.js";
+export { sessionIdFrom };
 
 export const name = "dsh-wechat";
 export const inject: string[] = [];
@@ -26,6 +28,8 @@ export interface PluginConfig {
   cwd?: string;
   textChunkLimit?: number;
   cardTimeoutMs?: number;
+  surfacePromptEnabled?: boolean;
+  surfacePrompt?: string;
 }
 
 export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise<void> {
@@ -45,7 +49,7 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
     inject?: (deps: string[], callback: (ctx: unknown) => unknown) => unknown;
   };
 
-  const bridge = new WeChatDSHBridge(context, config);
+  const bridge = new WeChatDSHBridge(context, config, undefined, configStore);
 
   // ─── Session event feed: assistant output → WeChat ───
   context.on("session/event", (session, event) => {
@@ -222,19 +226,14 @@ if (typeof context.inject === "function") {
         name: "dsh-wechat-surface",
         order: 50,
         text: (context) => {
-          const agent = (context as { agent?: unknown })?.agent as
-            | { id?: string; session?: { id?: string; header?: { id?: string } } }
-            | undefined;
-          // Three candidate id paths — the master DSH Agent carries the session
-          // id on `agent.id` (also via `Session.id` / `SessionHeader.id`).
-          // Older or forked shapes may only expose one of them; the cascade
-          // keeps this dynamic context working when DSH's Agent shape drifts.
-          const sessionId =
-            agent?.session?.header?.id ?? agent?.session?.id ?? agent?.id;
+          const sessionId = sessionIdFromAssembleContext(context);
           const source = sessionId ? bridge.surfaceSourceFor(sessionId) : undefined;
-          return source === "wechat"
-            ? "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（纯文本、适度使用 emoji、避免过长的表格）。"
-            : "";
+          const cfg = bridge.getConfig();
+          return weChatSurfaceText({
+            enabled: cfg.surfacePromptEnabled,
+            prompt: cfg.surfacePrompt,
+            source,
+          });
         },
       });
     });
@@ -400,20 +399,6 @@ if (typeof context.inject === "function") {
   });
 
   return () => bridge.stop();
-}
-
-export function sessionIdFrom(session: unknown): string | undefined {
-  if (!session || typeof session !== "object") return undefined;
-  const s = session as {
-    id?: unknown;
-    header?: { id?: unknown };
-    session?: { id?: unknown; header?: { id?: unknown } };
-  };
-  const candidates = [s.id, s.header?.id, s.session?.header?.id, s.session?.id];
-  for (const c of candidates) {
-    if (typeof c === "string" && c) return c;
-  }
-  return undefined;
 }
 
 function pickDefined(raw: PluginConfig): Partial<WeChatDSHConfig> {

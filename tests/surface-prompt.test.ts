@@ -386,4 +386,100 @@ describe("message-source tracking (dynamic surface prompt)", () => {
     });
     expect(anyBridge.surfaceSourceFor("wx-s1")).toBe("gui");
   });
+
+  it("records the WeChat id BEFORE followup's synchronous inbox splice (DSH 0.1.2 race)", async () => {
+    // Regression: createUserMessage mints the id, then agent.followup
+    // synchronously emits agent/inbox/spliced. If markWechatMessage runs
+    // AFTER followup returns, the splice handler sees an unknown id and
+    // overwrites the just-set "wechat" marker with "gui" — prompt
+    // assembly then hides the surface prompt for every WeChat turn.
+    const anyBridge = bridge as unknown as {
+      handleMessage(m: unknown): Promise<void>;
+      handleSessionEvent(s: string, e: unknown): void;
+      state: { getUser(u: string): { sessionId: string } };
+      surfaceSourceFor(s: string): string | undefined;
+    };
+    mock.agent.followup = (m: { content: unknown; source: unknown; id?: string }) => {
+      mock.received.push(m);
+      const sessionId = anyBridge.state.getUser("u1").sessionId;
+      anyBridge.handleSessionEvent(sessionId, {
+        type: "agent/inbox/spliced",
+        seq: 1,
+        time: Date.now(),
+        data: {
+          target: "next-turn",
+          start: 0,
+          removedCount: 0,
+          inserted: [{ id: m.id, role: "user" }],
+        },
+      });
+    };
+
+    await anyBridge.handleMessage(wechatTextMessage("你好"));
+    const sessionId = anyBridge.state.getUser("u1").sessionId;
+    expect(sessionId).toBeTruthy();
+    expect(anyBridge.surfaceSourceFor(sessionId)).toBe("wechat");
+    const sent = mock.received[0] as { id?: string };
+    expect(sent.id).toBeTruthy();
+    const ids = (bridge as unknown as { wechatMessageIds: Map<string, number> }).wechatMessageIds;
+    expect(ids.has(sent.id!)).toBe(true);
+  });
+
+  it("a WeChat user/message echo re-affirms 'wechat' (does not leave a flipped marker)", async () => {
+    const anyBridge = bridge as unknown as {
+      handleMessage(m: unknown): Promise<void>;
+      handleSessionEvent(s: string, e: unknown): void;
+      state: { getUser(u: string): { sessionId: string } };
+      surfaceSourceFor(s: string): string | undefined;
+    };
+    await anyBridge.handleMessage(wechatTextMessage("微信消息"));
+    const sessionId = anyBridge.state.getUser("u1").sessionId;
+    const sent = mock.received[0] as { id?: string };
+    anyBridge.handleSessionEvent(sessionId, {
+      type: "agent/inbox/spliced",
+      seq: 1,
+      time: Date.now(),
+      data: {
+        target: "next-turn",
+        start: 0,
+        removedCount: 0,
+        inserted: [{ id: sent.id, role: "user" }],
+      },
+    });
+    expect(anyBridge.surfaceSourceFor(sessionId)).toBe("wechat");
+    anyBridge.handleSessionEvent(sessionId, {
+      type: "user/message",
+      seq: 2,
+      time: Date.now(),
+      data: {
+        id: sent.id,
+        role: "user",
+        content: [{ type: "text", text: "微信消息" }],
+        source: { kind: "user" },
+      },
+    });
+    expect(anyBridge.surfaceSourceFor(sessionId)).toBe("wechat");
+  });
+});
+
+describe("/surface command", () => {
+  it("toggles the in-memory switch and reports status", async () => {
+    const mockAgent = makeMockAgent("wx-s1");
+    const cmdBridge = makeBridge(mockAgent);
+    const anyBridge = cmdBridge as unknown as {
+      handleMessage(m: unknown): Promise<void>;
+      getConfig(): { surfacePromptEnabled: boolean };
+    };
+
+    await anyBridge.handleMessage(wechatTextMessage("/surface"));
+    expect(sendTextMessage.mock.calls.at(-1)?.[1]).toContain("微信渠道提示词: off");
+
+    await anyBridge.handleMessage(wechatTextMessage("/wxprompt on"));
+    expect(anyBridge.getConfig().surfacePromptEnabled).toBe(true);
+    expect(sendTextMessage.mock.calls.at(-1)?.[1]).toContain("已开启");
+
+    await anyBridge.handleMessage(wechatTextMessage("/surface off"));
+    expect(anyBridge.getConfig().surfacePromptEnabled).toBe(false);
+    expect(sendTextMessage.mock.calls.at(-1)?.[1]).toContain("已关闭");
+  });
 });

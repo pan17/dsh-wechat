@@ -22,7 +22,15 @@ export interface WeChatDSHConfig {
   cardTimeoutMs: number;
   /** Cross-session notifications (turn/end + error + cards of non-current sessions). Default off. */
   crossSessionNotify: boolean;
+  /** Inject the WeChat surface prompt while the last user message came from WeChat. Default off. */
+  surfacePromptEnabled: boolean;
+  /** Runtime-context text injected for WeChat-driven turns (edited from the settings page). */
+  surfacePrompt: string;
 }
+
+/** Default WeChat surface prompt — injected as a runtime-context snapshot. */
+export const DEFAULT_SURFACE_PROMPT =
+  "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（纯文本、适度使用 emoji、避免过长的表格）。";
 
 export function defaultStorageDir(): string {
   return path.join(os.homedir(), ".dsh-wechat");
@@ -38,5 +46,7 @@ export function defaultConfig(): WeChatDSHConfig {
     textChunkLimit: 4000,
     cardTimeoutMs: 30 * 60_000,
     crossSessionNotify: false,
+    surfacePromptEnabled: false,
+    surfacePrompt: DEFAULT_SURFACE_PROMPT,
   };
 }

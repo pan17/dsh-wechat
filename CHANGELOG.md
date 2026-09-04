@@ -8,12 +8,14 @@
 ### Added
 
 - 设置页 WeChat 卡下方新增「已知限制」说明，告知用户微信 iLink 的 10 条/窗口上限（需在微信端主动发消息解锁 /next）和 24 小时互动窗口（超时后必须用户先发消息才能继续接收 bot 回复）。
+- 微信渠道提示词可配置：设置页开关 + 可折叠正文编辑（默认收起）；微信 `/surface on|off|status`（别名 `/wxprompt`）切换开关。默认关闭。配置写入 `~/.dsh-wechat/config.json` 的 `surfacePromptEnabled` / `surfacePrompt`。
 
 ### Fixed
 
 - DSH 0.1.2：微信回答提问/权限卡后，Web UI 卡片一直不消失。瀑布竞速微信先返回时没有 abort 传给 GUI 的 `request.signal`，0.1.2 的 composer 卡只在该 signal abort 时才收起。现在给 `next()` 分叉一份 GUI signal，微信答完或取消后再 abort 这份（不碰 turn 的 `exec.signal`），Web 卡会随 Gateway `cancel` 帧收起。
 - flush 剩余摘要（`✅ 已发送 N 条…`）和 `/status` 正文发送失败时不再写入 outbound 缓存。原先真实缓存发不出去时，这些控制回执会把自己再塞进队列，表现为「已发送 0 条」后缓存条数随 `/status` / `/next` 递增。管理命令仍会先自动 flush。
 - `/status` 会话级投影截断不再切开 emoji 代理对；发送前会清洗孤立 surrogate。这类正文会让 iLink 返回 `ret=-1 invalid request`，flush 卡在队头「已发送 0 条」。flush 遇到无法投递的缓存会丢掉该条并继续发后面的。
+- 微信渠道提示词在 DSH 0.1.2 后失效：`createUserMessage` 禁止调用方传入 id 后，`markWechatMessage` 写在 `followup` 返回之后，而 `agent.followup` 会同步发出 `agent/inbox/spliced`，splice 处理器把刚设的 `"wechat"` 覆盖成 `"gui"`，assemble 时永远读到空上下文。改为在 followup/steer **之前**记录铸造 id；`user/message` echo 命中微信 id 时重新标 wechat。
 
 ## [0.8.0] - 2026-09-01
 

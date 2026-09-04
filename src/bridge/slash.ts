@@ -11,6 +11,7 @@
 export type HelpCommand = { kind: "help" };
 export type StatusCommand = { kind: "status" };
 export type SilentCommand = { kind: "silent"; mode: "on" | "off" | "status" };
+export type SurfaceCommand = { kind: "surface"; mode: "on" | "off" | "status" };
 export type StopCommand = { kind: "stop" };
 export type RejectQuestionCommand = { kind: "reject-question" };
 export type RejectPermissionCommand = { kind: "reject-permission" };
@@ -52,6 +53,21 @@ export function parseSilentCommand(text: string): SilentCommand | null {
   const m = trimmed.match(/^\/(?:silent|sl)\s+(on|off|status)\s*$/);
   if (!m) return null;
   return { kind: "silent", mode: m[1] as "on" | "off" | "status" };
+}
+
+/**
+ * Parse `/surface` (alias `/wxprompt`) — query or toggle the WeChat
+ * surface-prompt injection. Bare command defaults to status. The prompt
+ * text itself is edited from the settings page, not this command.
+ */
+export function parseSurfaceCommand(text: string): SurfaceCommand | null {
+  const trimmed = text.trim().toLowerCase();
+  if (trimmed === "/surface" || trimmed === "/wxprompt") {
+    return { kind: "surface", mode: "status" };
+  }
+  const m = trimmed.match(/^\/(?:surface|wxprompt)\s+(on|off|status)\s*$/);
+  if (!m) return null;
+  return { kind: "surface", mode: m[1] as "on" | "off" | "status" };
 }
 
 /** Parse `/stop`. */
@@ -452,6 +468,7 @@ export function isBypassSlashCommand(text: string): boolean {
     parseHelpCommand(text) ||
     parseNextCommand(text) ||
     parseSilentCommand(text) !== null ||
+    parseSurfaceCommand(text) !== null ||
     parseStatusCommand(text) !== null ||
     parseWorkspaceCommand(text) !== null ||
     parseSessionCommand(text) !== null ||
@@ -492,6 +509,8 @@ export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "busy",
   "silent",
   "sl",
+  "surface",
+  "wxprompt",
   "stop",
   "next",
   "history",
@@ -521,6 +540,7 @@ export function formatHelp(
     "• /reasoning — 查看/设置推理等级：/reasoning [list|default|switch <等级>]",
     "• /enter (busy) — queue|steer|status 繁忙时消息投递（排队/插话，与 DSH 设置「繁忙时 Enter 键行为」同步）",
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
+    "• /surface on|off|status (wxprompt) — 微信渠道提示词注入开关（默认关；正文在设置页编辑）",
     "• /notify on|off|status (watch) — 跨会话通知：完成/报错/卡片（默认关闭）",
     "• /history [数量] — 查看最近历史消息（默认 5 条，最多 20 条）；有待处理卡时会完整重发",
     "• /stop — 中断当前任务",

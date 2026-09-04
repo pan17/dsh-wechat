@@ -164,6 +164,16 @@ describe("/status — emoji color markers", () => {
     expect(text).toContain("• 跨会话通知: ⚪ off");
   });
 
+  it("微信提示词 on is good green, off is neutral", async () => {
+    const off = await runStatus(makeBridge());
+    expect(off).toContain("• 微信提示词: ⚪ off");
+
+    const bridge = makeBridge();
+    (bridge as unknown as { config: { surfacePromptEnabled: boolean } }).config.surfacePromptEnabled = true;
+    const on = await runStatus(bridge);
+    expect(on).toContain("• 微信提示词: 🟢 on");
+  });
+
   it("Agent running is green, idle is neutral, missing is red", async () => {
     const running = await runStatus(makeBridge({ agent: { agentStatus: "running" } }));
     expect(running).toContain("• Agent: 🟢 running");

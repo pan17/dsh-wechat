@@ -18,9 +18,11 @@ export type EditableConfig = Pick<
   | "textChunkLimit"
   | "cardTimeoutMs"
   | "crossSessionNotify"
+  | "surfacePromptEnabled"
+  | "surfacePrompt"
 >;
 
-const EDITABLE_KEYS: Array<keyof EditableConfig> = [
+export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "baseUrl",
   "cdnBaseUrl",
   "botType",
@@ -28,6 +30,8 @@ const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "textChunkLimit",
   "cardTimeoutMs",
   "crossSessionNotify",
+  "surfacePromptEnabled",
+  "surfacePrompt",
 ];
 
 export class ConfigStore {
@@ -73,6 +77,8 @@ export class ConfigStore {
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) continue;
       if (!(EDITABLE_KEYS as string[]).includes(key)) continue;
+      if (key === "surfacePromptEnabled" && typeof value !== "boolean") continue;
+      if (key === "surfacePrompt" && typeof value !== "string") continue;
       (this.overrides as Record<string, unknown>)[key] = value;
     }
     this.save();

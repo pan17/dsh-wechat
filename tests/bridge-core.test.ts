@@ -17,6 +17,7 @@ import {
   parseRejectQuestionCommand,
   parseSessionCommand,
   parseSilentCommand,
+  parseSurfaceCommand,
   parseStatusCommand,
   parseStopCommand,
   parseWorkspaceCommand,
@@ -47,6 +48,14 @@ describe("slash parsers", () => {
     expect(parseSilentCommand("/silent off")).toEqual({ kind: "silent", mode: "off" });
     expect(parseSilentCommand("/silent status")).toEqual({ kind: "silent", mode: "status" });
     expect(parseSilentCommand("/silent maybe")).toBeNull();
+  });
+
+  it("parseSurfaceCommand: bare → status, on/off/status subcommands", () => {
+    expect(parseSurfaceCommand("/surface")).toEqual({ kind: "surface", mode: "status" });
+    expect(parseSurfaceCommand("/wxprompt on")).toEqual({ kind: "surface", mode: "on" });
+    expect(parseSurfaceCommand("/surface off")).toEqual({ kind: "surface", mode: "off" });
+    expect(parseSurfaceCommand("/surface status")).toEqual({ kind: "surface", mode: "status" });
+    expect(parseSurfaceCommand("/surface maybe")).toBeNull();
   });
 
   it("parseStopCommand matches bare /stop", () => {
@@ -156,6 +165,7 @@ describe("slash parsers", () => {
     expect(help).toContain("/perm");
     expect(help).toContain("/reasoning");
     expect(help).toContain("/silent");
+    expect(help).toContain("/surface");
     expect(help).toContain("/stop");
     expect(help).toContain("/next");
     // /compact used to be in this list — it is now a native command
@@ -179,6 +189,9 @@ describe("isBypassSlashCommand", () => {
     expect(isBypassSlashCommand("/silent on")).toBe(true);
     expect(isBypassSlashCommand("/silent")).toBe(true);
     expect(isBypassSlashCommand("/sl off")).toBe(true);
+    expect(isBypassSlashCommand("/surface")).toBe(true);
+    expect(isBypassSlashCommand("/surface off")).toBe(true);
+    expect(isBypassSlashCommand("/wxprompt on")).toBe(true);
     expect(isBypassSlashCommand("/status")).toBe(true);
     expect(isBypassSlashCommand("/workspace list")).toBe(true);
     expect(isBypassSlashCommand("/ws switch 1")).toBe(true);
