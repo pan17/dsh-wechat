@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 兼容 DSH 0.1.3 的 `session.v2.jsonl[.zstd]` generation 文件名与新的 Session 目录编码，同时保留旧 v0/v1 会话读取。
+- 串行化同一微信用户的冷会话创建/恢复，并识别 Session 写锁冲突，避免并发恢复时误判会话损坏并新建会话。
+
 ## [0.8.0] - 2026-09-04
 
 ### Added

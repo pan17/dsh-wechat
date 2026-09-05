@@ -51,6 +51,29 @@ export interface EnsureAgentOptions {
   readonly replaceOnResumeFailure?: boolean;
 }
 
+/**
+ * DSH 0.1.3 reports a held SessionHandle as a stable named error. Walk the
+ * cause chain without importing the host package so this third-party bridge
+ * remains runtime-decoupled from `@deepseek-ai/*`.
+ */
+function isSessionOwnershipConflict(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { name?: unknown; message?: unknown; cause?: unknown };
+    if (
+      candidate.name === "SessionAlreadyOwnedError" ||
+      candidate.name === "SessionOwnershipLostError" ||
+      (typeof candidate.message === "string" && /already owned by an active write handle|write ownership was lost/i.test(candidate.message))
+    ) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
+}
+
 /** Minimal workspace entity surface (dsh-workspace). */
 interface WorkspaceEntity {
   readonly path: string;
@@ -70,6 +93,14 @@ export function mintSessionId(): string {
 }
 
 export class AgentStore {
+  /**
+   * The DSH 0.1.3 persistence layer takes a single write owner per session.
+   * Keep cold create/resume attempts for one WeChat user ordered so a burst of
+   * messages after restart cannot make the second caller lose the lock and be
+   * mistaken for a corrupt session.
+   */
+  private readonly ensureInFlight = new Map<string, Promise<EnsureAgentResult>>();
+
   constructor(private readonly ctx: BridgeContext) {}
 
   private agents(): AgentsService | undefined {
@@ -88,8 +119,29 @@ export class AgentStore {
    * Returns `{ agent }` (agent undefined when the agents service is
    * unavailable or create/resume failed). With `replaceOnResumeFailure`,
    * a corrupt or unreadable bound session is unbound and replaced.
+   *
+   * Calls for one user are serialized across the async create/resume boundary.
+   * A later caller re-checks the live registry after the earlier call
+   * publishes, so it reuses the same agent instead of opening the session a
+   * second time.
    */
   async ensure(user: UserState, options?: EnsureAgentOptions): Promise<EnsureAgentResult> {
+    const previous = this.ensureInFlight.get(user.userId);
+    const waitForPrevious = previous === undefined
+      ? Promise.resolve()
+      : previous.then(() => undefined, () => undefined);
+    const current = waitForPrevious.then(() => this.ensureOnce(user, options));
+    this.ensureInFlight.set(user.userId, current);
+    try {
+      return await current;
+    } finally {
+      if (this.ensureInFlight.get(user.userId) === current) {
+        this.ensureInFlight.delete(user.userId);
+      }
+    }
+  }
+
+  private async ensureOnce(user: UserState, options?: EnsureAgentOptions): Promise<EnsureAgentResult> {
     const agents = this.agents();
     if (!agents) return { agent: undefined };
 
@@ -107,6 +159,10 @@ export class AgentStore {
         return { agent: handle.agent };
       } catch (err) {
         console.error(`[dsh-wechat] resume session ${user.sessionId} failed: ${String(err)}`);
+        // A 0.1.3 SessionHandle ownership conflict means another lifecycle
+        // (possibly another DSH process) owns this exact session. It is not
+        // corruption and must never trigger replacement of the user's binding.
+        if (isSessionOwnershipConflict(err)) return { agent: undefined };
         if (!options?.replaceOnResumeFailure) return { agent: undefined };
         replacedSessionId = user.sessionId;
         user.sessionId = "";

@@ -46,14 +46,24 @@ async function writeLog(opts: {
   cwd: string;
   sessionId: string;
   headerAgentPreset?: string;
+  formatVersion?: number;
+  fileName?: string;
   events?: Array<{ type: string; data?: unknown }>;
 }) {
-  const { dshHome, cwd, sessionId, headerAgentPreset, events = [] } = opts;
+  const {
+    dshHome,
+    cwd,
+    sessionId,
+    headerAgentPreset,
+    formatVersion = 0,
+    fileName = "session.jsonl.zstd",
+    events = [],
+  } = opts;
   const dir = path.join(dshHome, "sessions", log.projectKey(cwd), encodeURIComponent(sessionId));
   fs.mkdirSync(dir, { recursive: true });
   const header = JSON.stringify({
     type: "session",
-    version: 0,
+    version: formatVersion,
     id: sessionId,
     createdAt: Date.now(),
     cwd,
@@ -63,7 +73,7 @@ async function writeLog(opts: {
   for (const ev of events) {
     frames.push(await zstdCompressBuffer(Buffer.from(JSON.stringify(ev) + "\n")));
   }
-  fs.writeFileSync(path.join(dir, "session.jsonl.zstd"), Buffer.concat(frames));
+  fs.writeFileSync(path.join(dir, fileName), Buffer.concat(frames));
 }
 
 async function appendFrame(opts: {
@@ -112,6 +122,70 @@ describe("session-log runtime preset cache", () => {
       ],
     });
     expect(log.readSessionRuntimePreset(cwd, "s-1", dshHome)).toBe("cordis");
+  });
+
+  it("reads the v2 generation and prefers it over an older generation", async () => {
+    const cwd = "C:\\work";
+    await writeLog({
+      dshHome,
+      cwd,
+      sessionId: "s-v2",
+      headerAgentPreset: "legacy",
+      formatVersion: 0,
+      fileName: "session.jsonl.zstd",
+    });
+    await writeLog({
+      dshHome,
+      cwd,
+      sessionId: "s-v2",
+      headerAgentPreset: "standard",
+      formatVersion: 2,
+      fileName: "session.v2.jsonl.zstd",
+      events: [{ type: "agent-preset/selected", data: { agentPreset: "cordis" } }],
+    });
+    expect(log.readSessionRuntimePreset(cwd, "s-v2", dshHome)).toBe("cordis");
+  });
+
+  it("reads a plaintext v2 generation", async () => {
+    const cwd = "C:\\work";
+    const sessionId = "s-v2-plain";
+    const dir = path.join(dshHome, "sessions", log.projectKey(cwd), encodeURIComponent(sessionId));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "session.v2.jsonl"),
+      JSON.stringify({
+        type: "session",
+        version: 2,
+        id: sessionId,
+        createdAt: Date.now(),
+        cwd,
+        isSeeded: false,
+        delegationDepth: 0,
+        agentPreset: "standard",
+      }) + "\n",
+    );
+    expect(log.readSessionRuntimePreset(cwd, sessionId, dshHome)).toBe("standard");
+  });
+
+  it("finds a v2 log under DSH's escaped session-id directory", async () => {
+    const cwd = "C:\\work";
+    const sessionId = "s/escaped";
+    const dir = path.join(dshHome, "sessions", log.projectKey(cwd), "s~002Fescaped");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "session.v2.jsonl"),
+      JSON.stringify({
+        type: "session",
+        version: 2,
+        id: sessionId,
+        createdAt: Date.now(),
+        cwd,
+        isSeeded: false,
+        delegationDepth: 0,
+        agentPreset: "standard",
+      }) + "\n",
+    );
+    expect(log.readSessionRuntimePreset(cwd, sessionId, dshHome)).toBe("standard");
   });
 
   it("returns the cached preset when size and mtime are unchanged (no re-read)", async () => {

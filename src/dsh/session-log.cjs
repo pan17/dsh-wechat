@@ -10,7 +10,9 @@
  * frozen header value.
  *
  * The persistence layer keeps each session as a multi-frame Zstandard
- * file at `$DSH_HOME/sessions/${projectKey(cwd)}/${encodeSegment(id)}/session.jsonl.zstd`.
+ * generation file at `$DSH_HOME/sessions/${projectKey(cwd)}/${encodeSegment(id)}/session.vN.jsonl.zstd`;
+ * v0 uses the original `session.jsonl.zstd` spelling and migrated generations
+ * may coexist in the same directory.
  *
  * Cost: a long session can be thousands of independent zstd frames
  * (one per write batch). Decompressing every frame on every `/s list`
@@ -37,6 +39,14 @@ const ZSTD_MAGIC = 4247762216; // 0xFD2FB528 little-endian
 
 /** The Zstandard-compressed suffix DSH uses for session artifacts. */
 const COMPRESSED_SUFFIX = ".jsonl.zstd";
+
+/**
+ * DSH 0.1.3 stores immutable Session format generations as
+ * `session.vN.jsonl[.zstd]`; v0 kept the original `session.jsonl[.zstd]`
+ * spelling. Keep the parser deliberately structural so future generations
+ * remain discoverable without coupling this bridge to a runtime package.
+ */
+const GENERATION_FILENAME_RE = /^session(?:\.v([1-9][0-9]*))?\.jsonl(\.zstd)?$/;
 
 /** Bound the in-process cache so a long-lived bridge cannot grow without limit. */
 const CACHE_LIMIT = 256;
@@ -91,40 +101,97 @@ function projectKey(cwd) {
 }
 
 /**
- * Reproduce `@deepseek-ai/dsh-session-persistence-jsonl`'s
- * `encodeSegment` for the per-session directory name. The host uses
- * `encodeURIComponent` with a few safe chars re-added; we mirror
- * that exact set so a path built here resolves to the same on-disk
- * directory as one written by DSH.
+ * Reproduce the current DSH `encodeSegment` for the per-session directory
+ * name. DSH 0.1.3 stopped using URI escaping: every unsafe UTF-16 code unit
+ * is written as `~XXXX`, while `.` and `..` are escaped to prevent traversal.
  */
 function encodeSegment(segment) {
+  if (typeof segment !== "string" || segment.length === 0) {
+    throw new Error("cannot encode an empty path segment");
+  }
+  if (segment === "." || segment === "..") {
+    return segment === "." ? "~002E" : "~002E~002E";
+  }
+  let out = "";
+  for (let i = 0; i < segment.length; i++) {
+    const code = segment.charCodeAt(i);
+    const ch = String.fromCharCode(code);
+    if (ch !== "~" && /^[A-Za-z0-9._-]$/.test(ch)) {
+      out += ch;
+    } else {
+      out += "~" + code.toString(16).toUpperCase().padStart(4, "0");
+    }
+  }
+  return out;
+}
+
+/** The pre-v0.1.3 directory encoding, retained for old session artifacts. */
+function legacyEncodeSegment(segment) {
   return encodeURIComponent(segment);
 }
 
 /**
- * Build the on-disk session log path for `(cwd, sessionId)`. Returns
- * a `.jsonl.zstd` path even if the artifact is currently plaintext —
- * we just read what exists at the compressed path or the plain path.
+ * Build the legacy on-disk session log path for `(cwd, sessionId)`. The
+ * exported helper remains a compatibility hint; `locateSessionLog` scans all
+ * known generation names and both old/new directory encodings.
  */
 function sessionLogPath(cwd, sessionId, root) {
+  return path.join(
+    sessionDirectoryPath(cwd, sessionId, root, legacyEncodeSegment),
+    `session${COMPRESSED_SUFFIX}`,
+  );
+}
+
+function sessionDirectoryPath(cwd, sessionId, root, encoder) {
   const base = root || resolveDshHome();
-  const projectDir = path.join(base, "sessions", projectKey(cwd));
-  return path.join(projectDir, encodeSegment(sessionId), `session${COMPRESSED_SUFFIX}`);
+  return path.join(base, "sessions", projectKey(cwd), encoder(sessionId));
 }
 
 /**
- * Locate the session log file. Returns the absolute path of the
- * compressed artifact if it exists; otherwise the plaintext JSONL;
- * otherwise undefined. We do not synthesise or write — read-only
- * helper.
+ * Parse one canonical DSH JSONL generation filename. Version zero uses the
+ * original suffix-only name; v1+ carries `.vN` before `.jsonl`.
+ */
+function parseGenerationFilename(filename) {
+  const match = GENERATION_FILENAME_RE.exec(filename);
+  if (!match) return undefined;
+  const version = match[1] === undefined ? 0 : Number(match[1]);
+  if (!Number.isSafeInteger(version)) return undefined;
+  return { version, compressed: match[2] === ".zstd" };
+}
+
+/**
+ * Locate the newest session generation. DSH 0.1.3 writes `session.v2.jsonl`
+ * or `session.v2.jsonl.zstd`, while migrated v0/v1 files may remain beside
+ * it. Prefer the highest generation and compressed storage on a same-version
+ * tie, matching the historical compressed-first behavior.
  */
 function locateSessionLog(cwd, sessionId, root) {
-  const dir = path.dirname(sessionLogPath(cwd, sessionId, root));
-  const compressedCandidate = path.join(dir, "session.jsonl.zstd");
-  const plainCandidate = path.join(dir, "session.jsonl");
-  if (fs.existsSync(compressedCandidate)) return compressedCandidate;
-  if (fs.existsSync(plainCandidate)) return plainCandidate;
-  return undefined;
+  const candidates = [];
+  const dirs = [
+    sessionDirectoryPath(cwd, sessionId, root, encodeSegment),
+    sessionDirectoryPath(cwd, sessionId, root, legacyEncodeSegment),
+  ];
+  const seenDirs = new Set();
+  for (const dir of dirs) {
+    if (seenDirs.has(dir)) continue;
+    seenDirs.add(dir);
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      if (err && err.code === "ENOENT") continue;
+      throw err;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const generation = parseGenerationFilename(entry.name);
+      if (!generation) continue;
+      candidates.push({ path: path.join(dir, entry.name), ...generation });
+    }
+  }
+  candidates.sort((left, right) =>
+    right.version - left.version || Number(right.compressed) - Number(left.compressed));
+  return candidates[0]?.path;
 }
 
 /**

@@ -22,9 +22,9 @@ CHANGELOG.md 是 GitHub Release Notes 的数据源，以下情况**需要更新*
 - **用户可见的变更**：新增功能、行为变化、Bug 修复
 - **格式**：遵循 [Keep a Changelog](https://keepachangelog.com/) 规范，分 `Added` / `Changed` / `Fixed` / `Removed` 等分类
 
-以下情况**不需要更新**：
-- 内部重构（不影响用户）
-- 文档/注释调整
+### 检查 DSH 版本约束
+
+确认 `package.json` 的 `engines.dsh` 是否需要更新，通常使用精确版本：`"dsh": "=x.y.z"`。
 
 ---
 

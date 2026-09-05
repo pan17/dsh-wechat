@@ -93,6 +93,79 @@ describe("AgentStore.ensure replaceOnResumeFailure", () => {
     expect(resume).toHaveBeenCalledTimes(1);
     expect(create).toHaveBeenCalledTimes(1);
   });
+
+  it("serializes concurrent cold resumes for one user", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    type TestAgent = {
+      id: string;
+      status: "idle";
+      options: Record<string, unknown>;
+      followup: () => void;
+      steer: () => void;
+      cancel: () => void;
+      whenIdle: () => Promise<void>;
+    };
+    let liveAgent: TestAgent | undefined;
+    const resumedAgent: TestAgent = {
+      id: CORRUPT_ID,
+      status: "idle" as const,
+      options: {},
+      followup: () => {},
+      steer: () => {},
+      cancel: () => {},
+      whenIdle: async () => {},
+    };
+    const resume = vi.fn(async () => {
+      await gate;
+      liveAgent = resumedAgent;
+      return { agent: resumedAgent };
+    });
+    const create = vi.fn();
+    const store = new AgentStore({
+      get: (name: string) =>
+        name === "agents"
+          ? { create, resume, get: () => liveAgent, list: () => [] }
+          : undefined,
+      on: () => () => {},
+    });
+    const user = makeUser(CORRUPT_ID);
+
+    const first = store.ensure(user, { replaceOnResumeFailure: true });
+    const second = store.ensure(user, { replaceOnResumeFailure: true });
+    await Promise.resolve();
+    expect(resume).toHaveBeenCalledTimes(1);
+
+    release();
+    const [one, two] = await Promise.all([first, second]);
+    expect(one.agent).toBe(resumedAgent);
+    expect(two.agent).toBe(resumedAgent);
+    expect(create).not.toHaveBeenCalled();
+    expect(user.sessionId).toBe(CORRUPT_ID);
+  });
+
+  it("does not replace a session rejected by the 0.1.3 write lock", async () => {
+    const resume = vi.fn(async () => {
+      const error = new Error(`session ${CORRUPT_ID} is already owned by an active write handle`);
+      error.name = "SessionAlreadyOwnedError";
+      throw error;
+    });
+    const create = vi.fn();
+    const store = new AgentStore({
+      get: (name: string) =>
+        name === "agents"
+          ? { create, resume, get: () => undefined, list: () => [] }
+          : undefined,
+      on: () => () => {},
+    });
+    const user = makeUser(CORRUPT_ID);
+
+    const result = await store.ensure(user, { replaceOnResumeFailure: true });
+    expect(result.agent).toBeUndefined();
+    expect(result.replacedSessionId).toBeUndefined();
+    expect(user.sessionId).toBe(CORRUPT_ID);
+    expect(create).not.toHaveBeenCalled();
+  });
 });
 
 describe("forwarding replaces a corrupt bound session", () => {
