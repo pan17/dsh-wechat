@@ -20,8 +20,14 @@ export interface WeChatDSHConfig {
   textChunkLimit: number;
   /** Soft timeout for question/permission cards (ms). */
   cardTimeoutMs: number;
-  /** Cross-session notifications (turn/end + error + cards of non-current sessions). Default off. */
+  /** Cross-session decision push (full permission/question cards of non-current sessions). Default off. */
   crossSessionNotify: boolean;
+  /**
+   * Background-task completion/error notices for non-current sessions.
+   * Independent of `crossSessionNotify` (which now only gates decision
+   * cards); default off so only decision cards reach WeChat unless enabled.
+   */
+  notifyTaskEvents: boolean;
   /**
    * Silent mode: only send the final text of each turn. Global, survives
    * re-scan (which clears per-user `state.json`). Default off.
@@ -51,6 +57,7 @@ export function defaultConfig(): WeChatDSHConfig {
     textChunkLimit: 4000,
     cardTimeoutMs: 30 * 60_000,
     crossSessionNotify: false,
+    notifyTaskEvents: false,
     silent: false,
     surfacePromptEnabled: false,
     surfacePrompt: DEFAULT_SURFACE_PROMPT,
