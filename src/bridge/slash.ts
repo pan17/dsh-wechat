@@ -18,7 +18,9 @@ export type RejectPermissionCommand = { kind: "reject-permission" };
 export type NotifyCommand =
   | { kind: "status" }
   | { kind: "on" }
-  | { kind: "off" };
+  | { kind: "off" }
+  | { kind: "tasks-on" }
+  | { kind: "tasks-off" };
 
 export type SlashCommand =
   | HelpCommand
@@ -78,10 +80,12 @@ export function parseStopCommand(text: string): StopCommand | null {
 }
 
 /**
- * Parse `/notify` (aliases `/watch`, `/notice`) — cross-session notification toggle.
- *   /notify          → status
- *   /notify status   → status
- *   /notify on|off   → on/off (also enable/disable)
+ * Parse `/notify` (aliases `/watch`, `/notice`) — cross-session decision
+ * push, plus an independent task-event toggle:
+ *   /notify                → status
+ *   /notify status         → status
+ *   /notify on|off         → decision-card gate
+ *   /notify tasks on|off   → background turn/end + error notices
  */
 export function parseNotifyCommand(text: string): NotifyCommand | null {
   const trimmed = text.trim().toLowerCase();
@@ -91,6 +95,12 @@ export function parseNotifyCommand(text: string): NotifyCommand | null {
   if (!rest || rest === "status") return { kind: "status" };
   if (rest === "on" || rest === "enable" || rest === "enabled") return { kind: "on" };
   if (rest === "off" || rest === "disable" || rest === "disabled") return { kind: "off" };
+  const tasks = rest.match(/^tasks?\s+(on|off|enable|enabled|disable|disabled)$/);
+  if (tasks) {
+    const value = tasks[1]!;
+    if (value === "on" || value === "enable" || value === "enabled") return { kind: "tasks-on" };
+    return { kind: "tasks-off" };
+  }
   return null;
 }
 
@@ -111,6 +121,30 @@ export function parseRejectQuestionCommand(text: string): RejectQuestionCommand 
     return { kind: "reject-question" };
   }
   return null;
+}
+
+/**
+ * Parse a `P{n}=…` / `P{n}:…` / `P{n}-…` prefix that addresses one pending
+ * card by its WeChat number. Used so a lone cross-session card cannot
+ * swallow a bare reply meant for the current session, and so `P1=/rq`
+ * closes that card instead of being forwarded as chat.
+ */
+export function parsePnCardReply(text: string): { index: number; rest: string } | null {
+  return parseAllPnCardReplies(text)[0] ?? null;
+}
+
+/** Every `P{n}=` / `P{n}-` segment in the line, in order. */
+export function parseAllPnCardReplies(text: string): Array<{ index: number; rest: string }> {
+  const trimmed = text.trim();
+  const re = /P(\d+)\s*[:=\-]\s*([\s\S]*?)(?=P\d+\s*[:=\-]|$)/gi;
+  const out: Array<{ index: number; rest: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(trimmed)) !== null) {
+    const index = parseInt(m[1]!, 10);
+    if (!Number.isFinite(index) || index < 1) continue;
+    out.push({ index, rest: (m[2] ?? "").trim() });
+  }
+  return out;
 }
 
 /** Parse `/reject-permission` (alias `/rp`). */
@@ -452,10 +486,8 @@ export function isHistoryCommandAttempt(text: string): boolean {
  * answer (questions) or rejects it as "unrecognized reply" (approvals),
  * dropping the user's real intent.
  *
- * Card-specific commands (`/rp`, `/rq`) are intentionally excluded so
- * they keep their existing card semantics. `/stop` is also excluded: it
- * lives in `handleQuestionReply`'s priority branch (stop-agent +
- * reject-question) and a behaviour change is out of scope. `/help` is
+ * Card-specific commands (`/rq`, leftover `/rp`) are intentionally
+ * excluded so they keep card semantics. `/help` is
  * included: its only effect is "print the help text", which
  * `handleMessage` already handles; the card handlers' two duplicate
  * `parseHelpCommand` branches become dead code once `/help` bypasses.
@@ -478,7 +510,8 @@ export function isBypassSlashCommand(text: string): boolean {
     parseReasoningCommand(text) !== null ||
     parseEnterCommand(text) !== null ||
     parseNotifyCommand(text) !== null ||
-    parseHistoryCommand(text) !== null
+    parseHistoryCommand(text) !== null ||
+    parseStopCommand(text) !== null
   );
 }
 
@@ -541,12 +574,11 @@ export function formatHelp(
     "• /enter (busy) — queue|steer|status 繁忙时消息投递（排队/插话，与 DSH 设置「繁忙时 Enter 键行为」同步）",
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
     "• /surface on|off|status (wxprompt) — 微信渠道提示词注入开关（默认关；正文在设置页编辑）",
-    "• /notify on|off|status (watch) — 跨会话通知：完成/报错/卡片（默认关闭）",
+    "• /notify on|off|status (watch) — 跨会话决策推送：权限/提问卡整卡（默认关闭）；/notify tasks on|off 后台任务完成/报错提醒",
     "• /history [数量] — 查看最近历史消息（默认 5 条，最多 20 条）；有待处理卡时会完整重发",
     "• /stop — 中断当前任务",
     "• /next — 继续发送因微信限制被缓存的消息",
-    "• /rp — 拒绝所有待处理权限卡（微信端）",
-    "• /rq — 拒绝所有待处理的问题卡（微信端）",
+    "• /rq — 关闭当前会话的待处理卡；其它会话用 P1=/rq",
   ];
   if (nativeCommands && nativeCommands.length > 0) {
     lines.push("", "── DSH 原生命令（当前 profile 已注册）──");

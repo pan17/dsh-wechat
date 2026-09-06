@@ -171,7 +171,7 @@ describe("cross-session gates: cards on, tasks off", () => {
     expect(card).toBeDefined();
     expect(card).toContain("权限");
     expect(card).toContain("来自其他会话");
-    expect(card).toContain("此卡编号 P1");
+    expect(card).toContain("P1=1");
   });
 
   it("turn/end and error stay silent while tasks are off", async () => {
@@ -278,7 +278,7 @@ describe("cross-session gates: per-user override (single-user: global only)", ()
 });
 
 describe("/notify command", () => {
-  it("parses /notify on|off|status", async () => {
+  it("parses /notify on|off|status and /notify tasks on|off", async () => {
     const { parseNotifyCommand } = await import("../src/bridge/slash.js");
     expect(parseNotifyCommand("/notify")).toEqual({ kind: "status" });
     expect(parseNotifyCommand("/notify status")).toEqual({ kind: "status" });
@@ -286,6 +286,8 @@ describe("/notify command", () => {
     expect(parseNotifyCommand("/notify off")).toEqual({ kind: "off" });
     expect(parseNotifyCommand("/watch on")).toEqual({ kind: "on" });
     expect(parseNotifyCommand("/notice off")).toEqual({ kind: "off" });
+    expect(parseNotifyCommand("/notify tasks on")).toEqual({ kind: "tasks-on" });
+    expect(parseNotifyCommand("/notify task off")).toEqual({ kind: "tasks-off" });
   });
 
   it("/notify on updates only the card gate; status shows both gates", async () => {
@@ -312,6 +314,25 @@ describe("/notify command", () => {
     expect(statusText).toContain("后台任务完成/报错提醒: on");
   });
 
+  it("/notify on flushes unseen background cards", async () => {
+    const bridge = makeBridgeWithConfig(false, false);
+    const anyBridge: any = bridge;
+    anyBridge.handleMuxFrame(questionFrame("q-rpc"));
+    await flushTicks();
+    expect(sendTextMessage.mock.calls.length).toBe(0);
+    await anyBridge.handleMessage({
+      message_type: MessageType.USER,
+      from_user_id: "u1",
+      context_token: "tok",
+      item_list: [{ type: 1, text_item: { text: "/notify on" } }],
+    });
+    await flushTicks();
+    await new Promise((r) => setTimeout(r, 10));
+    const texts = sendTextMessage.mock.calls.map((c: any) => c[1] as string);
+    expect(texts.some((t: string) => t.includes("Continue?"))).toBe(true);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("q-rpc")).toBe(true);
+  });
+
   it("/notify off leaves the task gate untouched", async () => {
     const bridge = makeBridgeWithConfig(true, true);
     const anyBridge: any = bridge;
@@ -323,5 +344,174 @@ describe("/notify command", () => {
     });
     expect((anyBridge as any).config.crossSessionNotify).toBe(false);
     expect((anyBridge as any).config.notifyTaskEvents).toBe(true);
+  });
+
+  it("/notify tasks on|off toggles only the task gate", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    const anyBridge: any = bridge;
+    await anyBridge.handleMessage({
+      message_type: MessageType.USER,
+      from_user_id: "u1",
+      context_token: "tok",
+      item_list: [{ type: 1, text_item: { text: "/notify tasks on" } }],
+    });
+    expect(anyBridge.config.crossSessionNotify).toBe(true);
+    expect(anyBridge.config.notifyTaskEvents).toBe(true);
+    await anyBridge.handleMessage({
+      message_type: MessageType.USER,
+      from_user_id: "u1",
+      context_token: "tok",
+      item_list: [{ type: 1, text_item: { text: "/notify tasks off" } }],
+    });
+    expect(anyBridge.config.crossSessionNotify).toBe(true);
+    expect(anyBridge.config.notifyTaskEvents).toBe(false);
+  });
+});
+
+function wechatText(text: string) {
+  return {
+    message_type: MessageType.USER,
+    from_user_id: "u1",
+    context_token: "tok",
+    item_list: [{ type: 1, text_item: { text } }],
+  };
+}
+
+describe("inbound intercept follows the decision gate", () => {
+  it("gate off: a hidden background question does not swallow current-session chat", async () => {
+    const bridge = makeBridgeWithConfig(false, false);
+    bridge.handleMuxFrame(questionFrame("q-rpc"));
+    const card = bridge.pendingQuestions.get("u1")![0]!;
+    let answered = false;
+    card.settleWechat = () => {
+      answered = true;
+    };
+    sendTextMessage.mockClear();
+    await bridge.handleMessage(wechatText("好的继续"));
+    expect(answered).toBe(false);
+    expect(bridge.pendingQuestions.get("u1")?.length).toBe(1);
+    const texts = sendTextMessage.mock.calls.map((c: any) => c[1] as string);
+    expect(texts.some((t: string) => t.includes("提问卡待处理"))).toBe(false);
+  });
+
+  it("gate on: a lone background question does not swallow a bare reply", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleMuxFrame(questionFrame("q-rpc"));
+    const card = bridge.pendingQuestions.get("u1")![0]!;
+    let answered = false;
+    card.settleWechat = () => {
+      answered = true;
+    };
+    await bridge.handleMessage(wechatText("1"));
+    expect(answered).toBe(false);
+    expect(bridge.pendingQuestions.get("u1")?.length).toBe(1);
+  });
+
+  it("gate on: P1= custom text answers a background plan card even if a current approval is pending", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleMuxFrame(questionFrame("q-plan", "sess-B"));
+    bridge.handleMuxFrame(approvalFrame("a-cur", "ap-cur", "sess-A"));
+    const q = bridge.pendingQuestions.get("u1")![0]!;
+    const answers: unknown[] = [];
+    q.settleWechat = (a: unknown) => answers.push(a);
+    const ap = bridge.pendingApprovals.get("u1")![0]!;
+    let approvalHit = false;
+    ap.settleWechat = () => {
+      approvalHit = true;
+    };
+    await bridge.handleMessage(wechatText("P1=我的意思不是退出plan"));
+    expect(approvalHit).toBe(false);
+    expect(answers).toHaveLength(1);
+    const item = (answers[0] as { answers: Array<{ custom?: string; selected: string[] }> }).answers[0]!;
+    expect(item.custom ?? item.selected.join("")).toContain("我的意思不是退出plan");
+    expect(bridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
+    expect(bridge.pendingApprovals.get("u1")?.length).toBe(1);
+  });
+
+  it("gate on: P1= answers a background question without switching", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleMuxFrame(questionFrame("q-rpc"));
+    const card = bridge.pendingQuestions.get("u1")![0]!;
+    const answers: unknown[] = [];
+    card.settleWechat = (a: unknown) => answers.push(a);
+    await bridge.handleMessage(wechatText("P1=1"));
+    expect(answers).toHaveLength(1);
+    expect(bridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
+  });
+
+  it("gate on: P1=/rq closes that question card", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleMuxFrame(questionFrame("q-rpc"));
+    const card = bridge.pendingQuestions.get("u1")![0]!;
+    const cancelled: unknown[] = [];
+    card.cancelWechat = (r: unknown) => cancelled.push(r);
+    await bridge.handleMessage(wechatText("P1=/rq"));
+    expect(cancelled).toHaveLength(1);
+    expect(bridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
+    const texts = sendTextMessage.mock.calls.map((c: any) => c[1] as string);
+    expect(texts.some((t: string) => t.includes("已关闭提问卡 P1"))).toBe(true);
+  });
+
+  it("gate on: bare 1 answers only the current session's approval", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleMuxFrame(approvalFrame("a-cur", "ap-cur", "sess-A"));
+    bridge.handleMuxFrame(approvalFrame("a-bg", "ap-bg", "sess-B"));
+    const cur = bridge.pendingApprovals.get("u1")!.find((c: any) => c.rpcId === "a-cur")!;
+    const bg = bridge.pendingApprovals.get("u1")!.find((c: any) => c.rpcId === "a-bg")!;
+    let currentAnswered = false;
+    let bgAnswered = false;
+    cur.settleWechat = () => {
+      currentAnswered = true;
+    };
+    bg.settleWechat = () => {
+      bgAnswered = true;
+    };
+    await bridge.handleMessage(wechatText("1"));
+    expect(currentAnswered).toBe(true);
+    expect(bgAnswered).toBe(false);
+    expect(bridge.pendingApprovals.get("u1")?.map((c: any) => c.rpcId)).toEqual(["a-bg"]);
+  });
+
+  it("gate on: P1=/rq closes that approval card", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleMuxFrame(approvalFrame("a-bg", "ap-bg"));
+    const card = bridge.pendingApprovals.get("u1")![0]!;
+    const outcomes: string[] = [];
+    card.settleWechat = (o: string) => outcomes.push(o);
+    await bridge.handleMessage(wechatText("P1=/rq"));
+    expect(outcomes).toEqual(["rejected"]);
+    expect(bridge.pendingApprovals.get("u1") ?? []).toHaveLength(0);
+  });
+
+  it("/status splits current vs cross-session pending cards", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleMuxFrame(questionFrame("q-cur", "sess-A"));
+    bridge.handleMuxFrame(approvalFrame("a-bg", "ap-bg", "sess-B"));
+    sendTextMessage.mockClear();
+    await bridge.handleMessage(wechatText("/status"));
+    const statusText = sendTextMessage.mock.calls.map((c: any) => c[1] as string).join("\n");
+    expect(statusText).toContain("🔴 • 待处理(当前): 1 张提问卡");
+    expect(statusText).toContain("🔴 • 待处理(跨会话): 1 张权限卡（用 P{n}= 回复）");
+  });
+
+  it("/rq closes only current-session cards, not background ones", async () => {
+    const bridge = makeBridgeWithConfig(true, false);
+    bridge.handleMuxFrame(questionFrame("q-cur", "sess-A"));
+    bridge.handleMuxFrame(approvalFrame("a-bg", "ap-bg", "sess-B"));
+    const cur = bridge.pendingQuestions.get("u1")![0]!;
+    const cancelled: unknown[] = [];
+    cur.cancelWechat = (r: unknown) => cancelled.push(r);
+    await bridge.handleMessage(wechatText("/rq"));
+    expect(cancelled).toHaveLength(1);
+    expect(bridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
+    expect(bridge.pendingApprovals.get("u1")?.length).toBe(1);
+  });
+
+  it("gate off: /rq does not reject a hidden background approval", async () => {
+    const bridge = makeBridgeWithConfig(false, false);
+    bridge.handleMuxFrame(approvalFrame("a-bg", "ap-bg"));
+    expect(bridge.pendingApprovals.get("u1")?.length).toBe(1);
+    await bridge.handleMessage(wechatText("/rq"));
+    expect(bridge.pendingApprovals.get("u1")?.length).toBe(1);
   });
 });

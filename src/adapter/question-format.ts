@@ -150,7 +150,7 @@ function buildHint(q: AskUserQuestionItem): string {
     (q.options?.length ?? 0) === 0
       ? "💡 直接回复你的答案。"
       : "💡 回复选项编号（如 1），多选可用 1, 3，也可以直接打自己的话。";
-  return base + "\n   跳过：发送 `/rq`（别名 `/reject-question`）关闭此卡。";
+  return base + "\n   跳过：发送 `/rq` 关闭当前会话此卡。";
 }
 
 function buildMultiHint(items: ReadonlyArray<AskUserQuestionItem>): string {
@@ -167,7 +167,7 @@ function buildMultiHint(items: ReadonlyArray<AskUserQuestionItem>): string {
   }
   lines.push("   标记两侧空格可忽略：Q1 = 1、Q1 =1、Q1= 1 都可以。");
   lines.push("");
-  lines.push("   全部跳过：发送 `/rq`（别名 `/reject-question`）。");
+  lines.push("   跳过：发送 `/rq` 关闭当前会话的卡。");
   lines.push("");
   lines.push("   简写（按顺序）：1 --- 2 --- 3");
   return lines.join("\n");

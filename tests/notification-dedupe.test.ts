@@ -7,7 +7,8 @@
  *     later switch-in flush shows only those unseen cards and records them.
  *   - When the card leaves the pending table (resolve / timeout / /rp / /rq),
  *     the pushed marker clears so the next card for that rpcId can push again.
- *   - /history re-sends every still-pending card of ANY session on demand.
+ *   - /history re-sends every still-answerable card (all sessions when the
+ *     gate is on; current session only when it is off).
  *
  * Cards are seeded through `handleMuxFrame` (test/replay helper); no
  * `apiProxy.respond` mock is involved.
@@ -141,7 +142,8 @@ describe("pushed-card dedupe: question cards", () => {
     const second = texts.find((t) => t.includes("Continue?"));
     expect(second).toBeDefined();
     expect(second).toContain("提问卡 2/2");
-    expect(second).toContain("此卡编号 P2");
+    expect(second).toContain("来自其他会话");
+    expect(second).toContain("P2=");
   });
 
   it("resolve clears the pushed marker", async () => {
@@ -220,7 +222,7 @@ describe("pushed-card dedupe: approval cards", () => {
 
     const texts = cardMessages();
     expect(texts).toHaveLength(1);
-    expect(texts[0]).toContain("此卡编号 P1");
+    expect(texts[0]).toContain("P1=1");
     expect(anyBridge.pushedCardRpcIds.get("u1")?.has("a-1")).toBe(true);
   });
 
@@ -258,7 +260,7 @@ describe("pushed-card dedupe: approval cards", () => {
 });
 
 describe("/history resend", () => {
-  it("resends every still-pending card of ANY session in full", async () => {
+  it("gate off: does not resend unseen cards of other sessions", async () => {
     const bridge = makeBridge(false);
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
@@ -268,6 +270,21 @@ describe("/history resend", () => {
     anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "C"));
     await flushPushes();
     expect(cardMessages()).toHaveLength(0);
+
+    await anyBridge.resendPendingCardsForHistory("u1");
+    expect(cardMessages()).toHaveLength(0);
+  });
+
+  it("gate on: resends every still-pending card of any session in full", async () => {
+    const bridge = makeBridge(true);
+    const anyBridge = bridge as unknown as {
+      handleMuxFrame(f: unknown): void;
+      resendPendingCardsForHistory(u: string): Promise<void>;
+    };
+    anyBridge.handleMuxFrame(questionFrame("q-1", "B"));
+    anyBridge.handleMuxFrame(approvalFrame("a-1", "ap-1", "C"));
+    await flushPushes();
+    sendTextMessage.mockClear();
 
     await anyBridge.resendPendingCardsForHistory("u1");
     const texts = sendTextMessage.mock.calls.map((c) => c[1] as string);

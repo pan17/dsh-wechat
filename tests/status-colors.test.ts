@@ -6,8 +6,8 @@
  * Each field has its own polarity:
  *   - 静默模式 on = we stop forwarding → 🔴 warning
  *     静默模式 off = normal delivery     → 🟢 good
- *   - 跨会话通知 on  = extra notifications on → 🟢
- *     跨会话通知 off = off                  → ⚪ neutral
+ *   - 跨会话决策推送 on  = extra notifications on → 🟢
+ *     跨会话决策推送 off = off                  → ⚪ neutral
  *   - Agent running      → 🟢 positive
  *     Agent idle         → ⚪ neutral
  *     Agent 未加载       → 🔴 warning
@@ -153,16 +153,17 @@ describe("/status — emoji color markers", () => {
     expect(text).toContain("• 静默模式: 🟢 off");
   });
 
-  it("跨会话通知 on is good green", async () => {
+  it("跨会话决策推送 on is good green", async () => {
     const bridge = makeBridge({ crossNotify: true });
     const text = await runStatus(bridge);
-    expect(text).toContain("• 跨会话通知: 🟢 on");
+    expect(text).toContain("• 跨会话决策推送: 🟢 on");
   });
 
-  it("跨会话通知 off is neutral (not a warning state)", async () => {
+  it("跨会话决策推送 off is neutral (not a warning state)", async () => {
     const bridge = makeBridge({ crossNotify: false });
     const text = await runStatus(bridge);
-    expect(text).toContain("• 跨会话通知: ⚪ off");
+    expect(text).toContain("• 跨会话决策推送: ⚪ off");
+    expect(text).toContain("• 任务完成提醒: ⚪ off");
   });
 
   it("微信提示词 on is good green, off is neutral", async () => {
@@ -217,7 +218,7 @@ describe("/status — emoji color markers", () => {
     ]);
 
     const text = await runStatus(bridge);
-    expect(text).toContain("🔴 • 待处理: 1 张提问卡");
+    expect(text).toContain("🔴 • 待处理(当前): 1 张提问卡");
   });
 
   it("pending row is omitted when no cards are queued", async () => {
