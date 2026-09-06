@@ -202,16 +202,19 @@ describe("frame-driven question cards", () => {
     expect(answer.answers[0]!.selected).toEqual(["No"]);
   });
 
-  it("/rq rejects all pending question cards with cancelled", async () => {
+  it("/rq rejects current-session question cards with cancelled", async () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
-      rejectPendingQuestion(u: string): Promise<void>;
+      rejectCurrentSessionCards(u: string): Promise<void>;
     };
     anyBridge.handleMuxFrame(questionFrame("q-rpc-2"));
     const answers = captureQuestionAnswers(bridge);
-    await anyBridge.rejectPendingQuestion("u1");
+    await anyBridge.rejectCurrentSessionCards("u1");
     expect(answers).toHaveLength(1);
     expect(answers[0]).toMatchObject({ cancelled: true });
+    const reason = (answers[0] as { reason?: { code?: string; message?: string } }).reason;
+    expect(reason?.code).toBe("ASK_CANCELLED");
+    expect(reason?.message).toBe("the user cancelled ask_user_question");
   });
 });
 
@@ -274,7 +277,7 @@ describe("card-bypass for slash commands", () => {
     await anyBridge.handleMessage(userTextMessage("/status"));
     expect(sendTextMessage).toHaveBeenCalled();
     const statusText = sendTextMessage.mock.calls.map((c) => String(c[1])).join("\n");
-    expect(statusText).toContain("🔴 • 待处理: 1 张提问卡");
+    expect(statusText).toContain("🔴 • 待处理(当前): 1 张提问卡");
     expect(anyBridge.pendingQuestions.get("u1")?.length).toBe(1);
   });
 
@@ -288,7 +291,7 @@ describe("card-bypass for slash commands", () => {
     sendTextMessage.mockClear();
     await anyBridge.handleMessage(userTextMessage("/status"));
     const statusText = sendTextMessage.mock.calls.map((c) => String(c[1])).join("\n");
-    expect(statusText).toContain("🔴 • 待处理: 1 张提问卡 · 1 张权限卡");
+    expect(statusText).toContain("🔴 • 待处理(当前): 1 张提问卡 · 1 张权限卡");
   });
 
   it("/history resends the full pending question card after the empty-history notice", async () => {
@@ -347,7 +350,7 @@ describe("card-bypass for slash commands", () => {
     expect(anyBridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
   });
 
-  it("approval card + /rp still rejects (card-specific command stays)", async () => {
+  it("approval card + /rq still rejects (card-specific command stays)", async () => {
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       handleMessage(m: unknown): Promise<void>;
@@ -355,7 +358,7 @@ describe("card-bypass for slash commands", () => {
     };
     anyBridge.handleMuxFrame(approvalFrame("a-rpc", "a-id", "pwsh"));
     const outcomes = captureApprovalOutcomes(bridge);
-    await anyBridge.handleMessage(userTextMessage("/rp"));
+    await anyBridge.handleMessage(userTextMessage("/rq"));
     expect(outcomes).toEqual(["rejected"]);
     expect(anyBridge.pendingApprovals.get("u1") ?? []).toHaveLength(0);
   });
@@ -531,6 +534,34 @@ describe("waterfall race: WeChat vs GUI", () => {
     await expect(pending).resolves.toBe("allowed-once");
     expect(toolAbort.signal.aborted).toBe(false);
     expect(guiSignal!.aborted).toBe(true);
+  });
+
+  it("/rq on a plan-review card selects Keep planning instead of aborting", async () => {
+    const pending = bridge.answerQuestionRequest(
+      {
+        agent: { id: "wx-1" },
+        questions: [{
+          id: "plan-review",
+          header: "Plan review",
+          question: "Approve this plan and leave plan mode?",
+          options: [
+            { label: "Approve", description: "Leave plan mode" },
+            { label: "Keep planning", description: "Stay in plan mode" },
+          ],
+          intent: { kind: "plan-review", approve: "Approve" },
+        }],
+      },
+      () => new Promise<{ answers: Array<{ id: string; selected: string[] }> }>(() => {
+        /* GUI stays pending; WeChat /rq should win with Keep planning */
+      }),
+    );
+    await Promise.resolve();
+    const anyBridge = bridge as unknown as {
+      rejectCurrentSessionCards(u: string): Promise<void>;
+    };
+    await anyBridge.rejectCurrentSessionCards("u1");
+    const answer = await pending;
+    expect(answer.answers[0]!.selected).toEqual(["Keep planning"]);
   });
 
   it("forwards the original tool abort onto the GUI card signal", async () => {

@@ -394,11 +394,9 @@ describe("Native command dispatch via ctx.commands", () => {
       wechatTextMessage("/rq"),
     );
 
-    // Native handler must NOT have been called for either; both were
-    // routed through the existing local-whitelist branches. Since
-    // there are no pending cards, both /rp and /rq short-circuit
-    // silently on the local side (existing behavior); the important
-    // invariant is that no "✅ rejected all" string leaked out.
+    // Native handler must NOT have been called for either; both stay
+    // on the local card-close path. With no pending cards, /rq replies
+    // "当前会话没有待处理卡片" and leftover /rp is treated the same.
     const allReplies = sendTextMessage.mock.calls.map((c) => c[1] as string);
     expect(allReplies.some((t) => t.includes("rejected all"))).toBe(false);
     expect(mock.received.length).toBe(0);

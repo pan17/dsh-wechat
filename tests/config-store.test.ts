@@ -57,6 +57,19 @@ describe("ConfigStore", () => {
     }
   });
 
+  it("persists notifyTaskEvents as a global boolean", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      const store = new ConfigStore(dir);
+      store.update({ notifyTaskEvents: true });
+      expect(new ConfigStore(dir).resolve(defaultConfig()).notifyTaskEvents).toBe(true);
+      store.update({ notifyTaskEvents: false });
+      expect(new ConfigStore(dir).stored().notifyTaskEvents).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("persists silent as a global boolean", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
     try {

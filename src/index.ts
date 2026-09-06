@@ -154,8 +154,10 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
       return await bridge.answerQuestionRequest(req as never, nextFn as never);
     } catch (err) {
       // WeChat /rq cancels by rejecting the waiter; rethrow so the Host
-      // settles the ask as aborted. Other failures fall through to GUI.
-      if (err && typeof err === "object" && (err as { code?: string }).code === "ASK_ABORTED") {
+      // settles the ask. ASK_CANCELLED = user closed the card (Web X);
+      // ASK_ABORTED = turn/signal abort. Other failures fall through to GUI.
+      const code = err && typeof err === "object" ? (err as { code?: string }).code : undefined;
+      if (code === "ASK_CANCELLED" || code === "ASK_ABORTED") {
         throw err;
       }
       console.error(`[dsh-wechat] user-questions/request answerer failed: ${String(err)}`);

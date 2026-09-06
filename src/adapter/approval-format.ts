@@ -58,10 +58,10 @@ export function formatApprovalCard(entry: PendingApprovalCard, index?: number, t
 
   if (index !== undefined && total !== undefined && total > 1) {
     lines.push(`💡 当前有 ${total} 张权限卡待处理。可发送：`);
-    lines.push(`  • 1 | 2        — 对全部 ${total} 张卡生效`);
-    lines.push(`  • P${index}=1 P${nextIndex(index)}=2 …  — 分别指定`);
+    lines.push(`  • P${index}=1 P${nextIndex(index)}=2 …  — 分别指定（跨会话必须用此格式）`);
+    lines.push(`  • 1 | 2        — 仅当全部卡来自同一会话时对全部生效`);
   } else {
-    lines.push("回复：1 或 2");
+    lines.push("回复：1 或 2；关闭：/rq");
   }
   lines.push("");
   lines.push("（30 分钟未回复自动移除此卡；可在 DSH 界面继续处理）");

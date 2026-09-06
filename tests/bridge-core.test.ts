@@ -13,6 +13,7 @@ import {
   parsePermCommand,
   parsePresetCommand,
   parseReasoningCommand,
+  parsePnCardReply,
   parseRejectPermissionCommand,
   parseRejectQuestionCommand,
   parseSessionCommand,
@@ -66,6 +67,10 @@ describe("slash parsers", () => {
   it("reject parsers match aliases", () => {
     expect(parseRejectQuestionCommand("/rq")).toEqual({ kind: "reject-question" });
     expect(parseRejectQuestionCommand("/reject-question")).toEqual({ kind: "reject-question" });
+    expect(parsePnCardReply("P1=/rq")).toEqual({ index: 1, rest: "/rq" });
+    expect(parsePnCardReply("P2 = 1")).toEqual({ index: 2, rest: "1" });
+    expect(parsePnCardReply("p1- /rp")).toEqual({ index: 1, rest: "/rp" });
+    expect(parsePnCardReply("1")).toBeNull();
     expect(parseRejectPermissionCommand("/rp")).toEqual({ kind: "reject-permission" });
     expect(parseRejectPermissionCommand("/reject-permission")).toEqual({ kind: "reject-permission" });
   });
@@ -211,10 +216,7 @@ describe("isBypassSlashCommand", () => {
     expect(isBypassSlashCommand("/reject-permission")).toBe(false);
     expect(isBypassSlashCommand("/rq")).toBe(false);
     expect(isBypassSlashCommand("/reject-question")).toBe(false);
-    // /stop is intentionally NOT in the bypass set: it lives in the
-    // question-card priority branch (stop-agent + reject-question) and
-    // changing that behaviour is out of scope for the bypass fix.
-    expect(isBypassSlashCommand("/stop")).toBe(false);
+    expect(isBypassSlashCommand("/stop")).toBe(true);
     // Plain text and unrecognized commands stay as card answers.
     expect(isBypassSlashCommand("")).toBe(false);
     expect(isBypassSlashCommand("hello")).toBe(false);

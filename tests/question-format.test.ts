@@ -32,7 +32,7 @@ describe("formatQuestionForWeChat", () => {
     expect(out).toContain("2. No, stop — abort");
     expect(out).toContain("/rq");
     expect(out).toContain("回复选项编号");
-    expect(out).toContain("跳过：发送 `/rq`");
+    expect(out).toContain("跳过：发送 `/rq` 关闭当前会话此卡。");
   });
 
   it("renders multi-question with Qn hints", () => {

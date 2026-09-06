@@ -107,6 +107,8 @@ export interface AskUserQuestionItem {
   header?: string;
   options?: Array<{ label: string; description?: string }>;
   multiSelect?: boolean;
+  /** Host intent, e.g. plan-mode `{ kind: "plan-review", approve: "Approve" }`. */
+  intent?: { kind?: string; approve?: string };
 }
 
 export interface AskUserQuestionAnswerItem {
