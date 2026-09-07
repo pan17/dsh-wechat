@@ -48,7 +48,12 @@ window.__ModuleLoader__.load({
 .wx_disclosure:hover{opacity:.85}
 .wx_disclosure_chevron{display:inline-block;width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:5px solid currentColor;transition:transform .12s;flex:0 0 auto}
 .wx_disclosure_chevron.open{transform:rotate(90deg)}
-.wx_actions{margin-left:auto;display:flex;gap:8px}
+.wx_actions{margin-left:auto;display:flex;gap:8px;align-items:center}
+.wx_help_btn{cursor:pointer;font:inherit;font-size:13px;font-weight:700;padding:7px 14px 7px 10px;border-radius:999px;border:none;background:#1976d2;color:#fff;display:inline-flex;align-items:center;gap:6px;line-height:1;box-shadow:0 2px 8px rgba(25,118,210,.35);animation:wx_help_pulse 1.4s ease-out 4}
+.wx_help_btn:hover{background:#1565c0}
+.wx_help_btn.open{background:#0d47a1;animation:none}
+.wx_help_btn_icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:rgba(255,255,255,.22);font-size:12px;font-weight:800}
+@keyframes wx_help_pulse{0%{box-shadow:0 0 0 0 rgba(25,118,210,.55)}70%{box-shadow:0 0 0 12px rgba(25,118,210,0)}100%{box-shadow:0 2px 8px rgba(25,118,210,.35)}}
 .wx_check{display:flex;align-items:center;gap:8px;font-size:12px;padding:6px 0}
 .wx_check input{width:16px;height:16px}
 .wx_user{border:1px solid rgba(128,128,128,.2);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
@@ -56,20 +61,22 @@ window.__ModuleLoader__.load({
 .wx_toggle{display:flex;align-items:center;gap:8px;font-size:12px}
 .wx_help{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;background:rgba(128,128,128,.22);color:var(--dsw-alias-label-secondary,#888);font-size:10px;font-weight:600;cursor:help;margin-left:6px;vertical-align:middle;position:relative;user-select:none;line-height:1}
 .wx_help:hover,.wx_help:focus{background:rgba(128,128,128,.42);outline:none;color:inherit}
-.wx_help::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);padding:6px 10px;background:rgba(20,20,20,.92);color:#fff;font-size:11px;font-weight:400;white-space:normal;width:max-content;max-width:260px;border-radius:6px;opacity:0;pointer-events:none;transition:opacity .12s;z-index:20;line-height:1.5;text-align:left}
-.wx_help::before{content:"";position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);border:4px solid transparent;border-top-color:rgba(20,20,20,.92);opacity:0;pointer-events:none;transition:opacity .12s;z-index:20}
-.wx_help:hover::after,.wx_help:focus::after,.wx_help:hover::before,.wx_help:focus::before{opacity:1}
+.wx_help_float{position:fixed;z-index:10000;padding:6px 10px;background:rgba(20,20,20,.92);color:#fff;font-size:11px;font-weight:400;white-space:normal;width:max-content;max-width:min(260px,calc(100vw - 16px));border-radius:6px;line-height:1.5;text-align:left;pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.28)}
 .wx_field_label{display:inline-flex;align-items:center}
 .wx_limits{border:1px solid rgba(237,108,2,.4);border-radius:12px;padding:12px 16px;background:rgba(237,108,2,.06);display:flex;flex-direction:column;gap:8px}
 .wx_limits_title{font-weight:600;font-size:13px;color:#ed6c02;display:flex;align-items:center;gap:6px}
 .wx_limits ol{margin:0;padding-left:20px;font-size:12px;color:var(--dsw-alias-label-secondary,#888);line-height:1.6}
-.wx_limits li{margin-bottom:4px}`;
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=\"dsh-wechat/section\"]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "dsh-wechat";
-			tag.dataset.pluginCss = "dsh-wechat/section";
+.wx_limits li{margin-bottom:4px}
+.wx_help_panel{max-height:360px;overflow:auto;white-space:pre-wrap;font-size:12px;line-height:1.55;padding:10px 12px;border:1px solid rgba(128,128,128,.25);border-radius:8px;background:rgba(128,128,128,.06)}`;
+		if (typeof document !== "undefined") {
+			let tag = document.querySelector("style[data-plugin-css=\"dsh-wechat/section\"]");
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "dsh-wechat";
+				tag.dataset.pluginCss = "dsh-wechat/section";
+				document.head.appendChild(tag);
+			}
 			tag.textContent = css;
-			document.head.appendChild(tag);
 		}
 
 		const PHASE_LABEL = {
@@ -80,20 +87,56 @@ window.__ModuleLoader__.load({
 			failed: "登录失败",
 		};
 
-		// Small "?" badge with a CSS-driven tooltip (data-tip). Used next to
-		// settings labels whose semantics are not obvious. Hover or keyboard
-		// focus shows the explanation; clicking it does not toggle the
-		// surrounding <label>/checkbox.
+		// Small "?" badge. Tooltips are portaled to document.body so the
+		// settings dialog's overflow:hidden cannot clip them (cwd sits at
+		// the top-left of the card).
+		let helpFloatEl = null;
+		function removeHelpFloat() {
+			if (helpFloatEl) {
+				helpFloatEl.remove();
+				helpFloatEl = null;
+			}
+		}
+		function placeHelpFloat(trigger, text) {
+			removeHelpFloat();
+			const float = document.createElement("div");
+			float.className = "wx_help_float";
+			float.setAttribute("role", "tooltip");
+			float.textContent = text;
+			document.body.appendChild(float);
+			helpFloatEl = float;
+			const r = trigger.getBoundingClientRect();
+			const w = float.offsetWidth;
+			const h = float.offsetHeight;
+			const gap = 8;
+			const vw = window.innerWidth;
+			const vh = window.innerHeight;
+			let left = r.left + r.width / 2 - w / 2;
+			left = Math.min(Math.max(8, left), Math.max(8, vw - w - 8));
+			const below = r.bottom + gap;
+			const above = r.top - h - gap;
+			let top = below;
+			if (below + h > vh - 8 && above >= 8) top = above;
+			top = Math.min(Math.max(8, top), Math.max(8, vh - h - 8));
+			float.style.top = top + "px";
+			float.style.left = left + "px";
+		}
 		function HelpTip(props) {
 			const text = props.text;
+			react.useEffect(() => () => removeHelpFloat(), []);
+			const show = (e) => placeHelpFloat(e.currentTarget, text);
+			const hide = () => removeHelpFloat();
 			return createElement("span", {
 				className: "wx_help",
-				"data-tip": text,
-				role: "tooltip",
+				role: "button",
 				tabIndex: 0,
 				"aria-label": text,
 				onMouseDown: (e) => e.stopPropagation(),
 				onClick: (e) => e.stopPropagation(),
+				onMouseEnter: show,
+				onMouseLeave: hide,
+				onFocus: show,
+				onBlur: hide,
 			}, "?");
 		}
 
@@ -111,6 +154,9 @@ window.__ModuleLoader__.load({
 			// Editable form state (initialized from status.config).
 			const [form, setForm] = react.useState(null);
 			const [promptOpen, setPromptOpen] = react.useState(false);
+			const [helpOpen, setHelpOpen] = react.useState(false);
+			const [helpText, setHelpText] = react.useState("");
+			const [helpBusy, setHelpBusy] = react.useState(false);
 
 			const refresh = react.useCallback(() => {
 				api("/status").then((r) => {
@@ -126,11 +172,7 @@ window.__ModuleLoader__.load({
 					// user only for older hosts that have not yet added
 					// config.silent.
 					setForm((prev) => prev ?? {
-						baseUrl: r.body.config?.baseUrl ?? "",
-						cdnBaseUrl: r.body.config?.cdnBaseUrl ?? "",
-						botType: r.body.config?.botType ?? "",
 						cwd: r.body.config?.cwd ?? "",
-						textChunkLimit: String(r.body.config?.textChunkLimit ?? ""),
 						cardTimeoutMs: String(r.body.config?.cardTimeoutMs ?? ""),
 						crossSessionNotify: !!r.body.config?.crossSessionNotify,
 						notifyTaskEvents: !!r.body.config?.notifyTaskEvents,
@@ -187,11 +229,7 @@ window.__ModuleLoader__.load({
 					const r = await api("/config", {
 						method: "POST",
 						body: JSON.stringify({
-							baseUrl: form.baseUrl.trim(),
-							cdnBaseUrl: form.cdnBaseUrl.trim(),
-							botType: form.botType.trim(),
 							cwd: form.cwd.trim(),
-							textChunkLimit: Number(form.textChunkLimit) || undefined,
 							cardTimeoutMs: Number(form.cardTimeoutMs) || undefined,
 							crossSessionNotify: !!form.crossSessionNotify,
 							notifyTaskEvents: !!form.notifyTaskEvents,
@@ -232,13 +270,47 @@ window.__ModuleLoader__.load({
 			const badgeClass = phase === "logged-in" ? "ok" : phase === "failed" ? "err" : "wait";
 			const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 
+			const toggleHelp = async () => {
+				if (helpOpen) {
+					setHelpOpen(false);
+					return;
+				}
+				setHelpOpen(true);
+				if (helpText) return;
+				setHelpBusy(true);
+				try {
+					const r = await api("/help");
+					if (r.ok && typeof r.body.text === "string" && r.body.text) {
+						setHelpText(r.body.text);
+					} else {
+						setHelpText(r.body.message || `无法加载命令帮助 (HTTP ${r.status})`);
+					}
+				} catch (e) {
+					setHelpText(String(e));
+				}
+				setHelpBusy(false);
+			};
+
 			return createElement("div", { className: "wx_section" },
 				createElement("div", { className: "wx_card" },
 					createElement("div", { className: "wx_row" },
 						createElement("span", { className: "wx_title" }, "WeChat"),
 						createElement("span", { className: `wx_badge ${badgeClass}` }, PHASE_LABEL[phase] ?? phase),
 						status?.monitorRunning ? createElement("span", { className: "wx_meta" }, "监控运行中") : createElement("span", { className: "wx_meta" }, "监控未运行"),
+						createElement("div", { className: "wx_actions" },
+							createElement("button", {
+								type: "button",
+								className: "wx_help_btn" + (helpOpen ? " open" : ""),
+								onClick: toggleHelp,
+								"aria-expanded": helpOpen,
+								title: "查看全部微信指令和说明",
+							},
+								createElement("span", { className: "wx_help_btn_icon", "aria-hidden": "true" }, "?"),
+								helpOpen ? "收起指令" : "指令帮助",
+							),
+						),
 					),
+					helpOpen ? createElement("div", { className: "wx_help_panel" }, helpBusy ? "正在加载命令帮助…" : (helpText || "暂无命令说明")) : null,
 					status?.botId ? createElement("div", { className: "wx_meta" }, `Bot: ${status.botId}`) : null,
 					status?.userCount ? createElement("div", { className: "wx_meta" }, `已绑定微信用户: ${status.userCount}`) : null,
 					status?.error ? createElement("div", { className: "wx_err" }, status.error) : null,
@@ -252,20 +324,10 @@ window.__ModuleLoader__.load({
 						: null,
 					createElement("div", { style: { height: "1px", background: "rgba(128,128,128,.2)", margin: "6px 0" } }),
 					form ? createElement("div", { className: "wx_form" },
-						createElement("label", null, "baseUrl",
-							createElement("input", { value: form.baseUrl, onChange: set("baseUrl"), placeholder: "https://ilinkai.weixin.qq.com" })),
-						createElement("label", null, "cdnBaseUrl",
-							createElement("input", { value: form.cdnBaseUrl, onChange: set("cdnBaseUrl"), placeholder: "https://novac2c.cdn.weixin.qq.com/c2c" })),
-						createElement("label", null, "botType",
-							createElement("input", { value: form.botType, onChange: set("botType"), placeholder: "3" })),
 						createElement("label", null,
 							createElement("span", { className: "wx_field_label" }, "cwd",
 								createElement(HelpTip, { text: "新会话的工作目录。仅影响未通过 /workspace 或 /session switch 显式切过工作区的用户；显式切过的保留原样。" })),
 							createElement("input", { value: form.cwd, onChange: set("cwd"), placeholder: "F:\\work" })),
-						createElement("label", null,
-							createElement("span", { className: "wx_field_label" }, "textChunkLimit",
-								createElement(HelpTip, { text: "微信单条消息长度上限（字符）。超出后会被自动拆成多条发送。" })),
-							createElement("input", { value: form.textChunkLimit, onChange: set("textChunkLimit"), placeholder: "4000" })),
 						createElement("label", null,
 							createElement("span", { className: "wx_field_label" }, "cardTimeoutMs",
 								createElement(HelpTip, { text: "提问 / 权限卡软超时（毫秒），默认 1800000（30 分钟）。超时未答复的卡会被自动撤回。" })),

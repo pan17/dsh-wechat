@@ -10,6 +10,7 @@
  */
 
 import { WeChatDSHBridge } from "./bridge/bridge.js";
+import { formatHelp } from "./bridge/slash.js";
 import { ConfigStore, type EditableConfig } from "./config-store.js";
 import { defaultConfig, type WeChatDSHConfig } from "./config.js";
 import { qrSvgFor } from "./qr.js";
@@ -307,6 +308,13 @@ if (typeof context.inject === "function") {
         path: "/wechat/api/status",
         handler: (_req, res) => {
           sendJson(res, 200, bridge.getStatus());
+        },
+      });
+      webServer.register({
+        kind: "exact",
+        path: "/wechat/api/help",
+        handler: (_req, res) => {
+          sendJson(res, 200, { ok: true, text: formatHelp() });
         },
       });
       webServer.register({

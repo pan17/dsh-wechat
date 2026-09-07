@@ -143,11 +143,10 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
   监控运行状态、已绑定用户数，与 `跨会话决策推送` / `任务完成提醒` / `静默` 开关同卡展示
 - **扫码** — 未登录时页面内直接显示二维码，扫码确认后自动进入已登录
 - **操作按钮** — `重新扫码`（清除 token 重新登录）、`退出登录`，与保存配置同行
-- **连接配置** — baseUrl / cdnBaseUrl / botType / cwd /
-  textChunkLimit / cardTimeoutMs / 跨会话决策推送 / 任务完成提醒 / 静默 / 微信渠道提示词（开关 + 正文）；保存即生效，
-  网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
+- **连接配置** — 设置页只展示 `cwd` / `cardTimeoutMs`，以及 `跨会话决策推送` / `任务完成提醒` / `静默` / 微信渠道提示词（开关 + 正文）；保存即生效。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` 仍可写 `~/.dsh-wechat/config.json` 或插件行 `config:`，设置页保存不会覆盖它们。网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
+- **帮助** — 卡片标题行的 **帮助** 按钮展开本地命令表（与微信 `/help` 同源）；DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出
 
-与宿主通信走插件自己的 HTTP API（`/wechat/api/status|config|relogin|
+与宿主通信走插件自己的 HTTP API（`/wechat/api/status|help|config|relogin|
 logout`），客户端零 `@deepseek-ai` 依赖。
 
 ## 配置

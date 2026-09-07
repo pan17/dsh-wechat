@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-07
+
+### Changed
+
+- 设置页连接表单只保留 `cwd` 与 `cardTimeoutMs`；`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` 仍可写 `config.json` 或插件 `config:`，保存配置不会清空它们。
+- 设置页 WeChat 卡标题行新增醒目的 **指令帮助** 按钮，展开与微信 `/help` 同源的本地命令列表（`GET /wechat/api/help`）。DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出。
+
+### Fixed
+
+- 设置页字段 `?` 说明气泡改为挂到页面上并避开视口边缘，不再被设置对话框裁切。
+
 ## [0.9.0] - 2026-09-06
 
 ### Added
