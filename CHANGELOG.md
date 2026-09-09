@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/model switch` 按已知提供商前缀切分，不再用第一个 `/` 截断模型 id。OpenRouter 这类 `openrouter/inclusionai/ling-3.0-flash-fin:free` 可以切到正确模型；漏写 `/` 时提示用法，不再当未知命令转发给 agent。
+
 ### Changed
 
 - `/s list` 冷启动不再对每个会话走 `sessionQuery.listEvents()`（会完整 inspect 整本日志）。排序改为 live 会话内存日志 → 投影缓存 `sessionListMetadata.lastPromptAt` → 原始日志**从尾部**找最近一次 `user/message`；只有实际展示的 20 条才折叠 title + live preset。同一条日志的二次 `/s list` 仍是 stat 命中缓存。

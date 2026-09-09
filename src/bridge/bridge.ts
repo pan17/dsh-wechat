@@ -55,6 +55,7 @@ import {
   renderProjectionSection,
   parseEnterCommand,
   parseModelCommand,
+  splitProviderModelTarget,
   parseNextCommand,
   parseNotifyCommand,
   parsePermCommand,
@@ -3143,17 +3144,40 @@ export class WeChatDSHBridge {
         return;
       }
       case "switch": {
-        const [provider, model] = cmd.target.split("/");
+        const target = cmd.target.trim();
+        if (!target) {
+          await this.sendReply(
+            userId,
+            "⚠️ 用法: /model switch <提供商>/<模型id>。模型 id 可含 /，例如 /model switch openrouter/inclusionai/foo:free",
+          );
+          return;
+        }
         const providers = this.ops.listProviders();
-        const matchedProvider = providers.find((p) => p.id === provider || p.name === provider);
+        const split = splitProviderModelTarget(target, providers);
+        if (!split) {
+          const hint = providers.map((p) => p.id).join(", ") || "(无)";
+          if (!target.includes("/")) {
+            await this.sendReply(
+              userId,
+              `⚠️ 用法: /model switch <提供商>/<模型id>。可用提供商: ${hint}`,
+            );
+          } else {
+            await this.sendReply(
+              userId,
+              `⚠️ 未知提供商: ${target.slice(0, target.indexOf("/"))}。可用: ${hint}`,
+            );
+          }
+          return;
+        }
+        const matchedProvider = providers.find((p) => p.id === split.provider);
         if (!matchedProvider) {
-          await this.sendReply(userId, `⚠️ 未知提供商: ${provider}。可用: ${providers.map((p) => p.id).join(", ")}`);
+          await this.sendReply(userId, `⚠️ 未知提供商: ${split.provider}。可用: ${providers.map((p) => p.id).join(", ")}`);
           return;
         }
         const models = await this.ops.listModels(matchedProvider.id);
-        const matchedModel = models.find((m) => m.id === model || m.name === model);
+        const matchedModel = models.find((m) => m.id === split.model || m.name === split.model);
         if (!matchedModel) {
-          await this.sendReply(userId, `⚠️ 未知模型: ${model}。用 /model list ${matchedProvider.id} 查看可用模型。`);
+          await this.sendReply(userId, `⚠️ 未知模型: ${split.model}。用 /model list ${matchedProvider.id} 查看可用模型。`);
           return;
         }
         // Apply to the live agent (via agent/request) and as the new default.

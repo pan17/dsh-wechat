@@ -333,6 +333,11 @@ export function parsePresetCommand(text: string): PresetCommand | null {
 /**
  * Parse `/model`:
  *   list [provider] | switch <provider/model> | status
+ *
+ * `switch` keeps the rest of the line intact — OpenRouter-style model ids
+ * contain `/` (`inclusionai/ling-3.0-flash-fin:free`), so the provider
+ * split happens later against the known provider list. A missing target
+ * still parses so the handler can print usage instead of forwarding.
  */
 export function parseModelCommand(text: string): ModelCommand | null {
   const trimmed = text.trim();
@@ -346,9 +351,37 @@ export function parseModelCommand(text: string): ModelCommand | null {
     case "list":
       return { kind: "list", ...(rest ? { provider: rest } : {}) };
     case "switch":
-      if (!rest || !rest.includes("/")) return null;
       return { kind: "switch", target: rest };
   }
+}
+
+/**
+ * Split `provider/model` after a known provider id or name. Model ids may
+ * themselves contain `/`, so this is not `split("/")[0]`.
+ *
+ * Longest matching prefix wins (`foo-bar/x` beats `foo` if both exist).
+ * Returns null when no known provider owns the first segment.
+ */
+export function splitProviderModelTarget(
+  target: string,
+  providers: ReadonlyArray<{ id: string; name?: string }>,
+): { provider: string; model: string } | null {
+  const trimmed = target.trim();
+  if (!trimmed.includes("/")) return null;
+  let best: { provider: string; model: string; len: number } | null = null;
+  for (const p of providers) {
+    const keys = [p.id, p.name].filter((k): k is string => typeof k === "string" && k.length > 0);
+    for (const key of keys) {
+      const prefix = `${key}/`;
+      if (!trimmed.startsWith(prefix)) continue;
+      const model = trimmed.slice(prefix.length);
+      if (!model) continue;
+      if (!best || key.length > best.len) {
+        best = { provider: p.id, model, len: key.length };
+      }
+    }
+  }
+  return best ? { provider: best.provider, model: best.model } : null;
 }
 
 /**

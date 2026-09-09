@@ -73,6 +73,7 @@ function makeBridge(opts: {
     listProviders: () => [
       { id: "deepseek", name: "DeepSeek" },
       { id: "openai", name: "OpenAI" },
+      { id: "openrouter", name: "OpenRouter" },
     ],
     listModels: async (provider: string) => {
       if (provider === "deepseek") {
@@ -85,6 +86,15 @@ function makeBridge(opts: {
         return [
           { provider: "openai", id: "gpt-4", name: "GPT-4" },
           { provider: "openai", id: "no-reasoning", name: "No Reasoning" },
+        ];
+      }
+      if (provider === "openrouter") {
+        return [
+          {
+            provider: "openrouter",
+            id: "inclusionai/ling-3.0-flash-fin:free",
+            name: "Ling 3.0 Flash",
+          },
         ];
       }
       return [];
@@ -275,6 +285,36 @@ describe("/model switch preserves reasoningEffort", () => {
     }).handleModelCommand("u1", { kind: "switch", target: "openai/no-reasoning" });
     expect(savedSelections).toEqual([{ provider: "openai", model: "no-reasoning" }]);
     expect(lastText()).not.toContain("保留");
+  });
+
+  it("model id containing `/` is not truncated at the first slash", async () => {
+    const { bridge, savedSelections } = makeBridge({ reasoning: EFFORTS_DS_CHAT });
+    await (bridge as unknown as {
+      handleModelCommand(u: string, c: unknown): Promise<void>;
+    }).handleModelCommand("u1", {
+      kind: "switch",
+      target: "openrouter/inclusionai/ling-3.0-flash-fin:free",
+    });
+    const override = (bridge as unknown as { modelOverrides: Map<string, unknown> }).modelOverrides.get("wx-s1");
+    expect(override).toEqual({
+      provider: "openrouter",
+      model: "inclusionai/ling-3.0-flash-fin:free",
+    });
+    expect(savedSelections).toEqual([
+      { provider: "openrouter", model: "inclusionai/ling-3.0-flash-fin:free" },
+    ]);
+    expect(lastText()).toContain("openrouter/inclusionai/ling-3.0-flash-fin:free");
+    expect(lastText()).not.toContain("未知模型");
+  });
+
+  it("bare model id without provider prints usage instead of unknown-model", async () => {
+    const { bridge, savedSelections } = makeBridge({ reasoning: EFFORTS_DS_CHAT });
+    await (bridge as unknown as {
+      handleModelCommand(u: string, c: unknown): Promise<void>;
+    }).handleModelCommand("u1", { kind: "switch", target: "ling-3.0-flash-fin:free" });
+    expect(savedSelections).toEqual([]);
+    expect(lastText()).toContain("用法");
+    expect(lastText()).toContain("openrouter");
   });
 });
 

@@ -9,6 +9,7 @@ import fs from "node:fs";
 import {
   parseHelpCommand,
   parseModelCommand,
+  splitProviderModelTarget,
   parseNextCommand,
   parsePermCommand,
   parsePresetCommand,
@@ -117,9 +118,44 @@ describe("slash parsers", () => {
     expect(parseModelCommand("/model list")).toEqual({ kind: "list" });
     expect(parseModelCommand("/model list deepseek")).toEqual({ kind: "list", provider: "deepseek" });
     expect(parseModelCommand("/model switch deepseek/deepseek-chat")).toEqual({ kind: "switch", target: "deepseek/deepseek-chat" });
+    expect(parseModelCommand("/model switch openrouter/inclusionai/ling-3.0-flash-fin:free")).toEqual({
+      kind: "switch",
+      target: "openrouter/inclusionai/ling-3.0-flash-fin:free",
+    });
     expect(parseModelCommand("/model status")).toEqual({ kind: "status" });
-    expect(parseModelCommand("/model switch deepseek")).toBeNull();
+    // Missing `/` still parses so the handler can print usage instead of
+    // forwarding `/model` as an unknown command.
+    expect(parseModelCommand("/model switch deepseek")).toEqual({ kind: "switch", target: "deepseek" });
+    expect(parseModelCommand("/model switch")).toEqual({ kind: "switch", target: "" });
     expect(parseModelCommand("/model")).toBeNull();
+  });
+
+  it("splitProviderModelTarget keeps slashes inside the model id", () => {
+    const providers = [
+      { id: "openrouter", name: "OpenRouter" },
+      { id: "deepseek", name: "DeepSeek" },
+      { id: "open", name: "Open" },
+    ];
+    expect(splitProviderModelTarget("openrouter/inclusionai/ling-3.0-flash-fin:free", providers)).toEqual({
+      provider: "openrouter",
+      model: "inclusionai/ling-3.0-flash-fin:free",
+    });
+    expect(splitProviderModelTarget("deepseek/deepseek-chat", providers)).toEqual({
+      provider: "deepseek",
+      model: "deepseek-chat",
+    });
+    expect(splitProviderModelTarget("OpenRouter/foo/bar", providers)).toEqual({
+      provider: "openrouter",
+      model: "foo/bar",
+    });
+    // Longest prefix wins over a shorter id that also matches.
+    expect(splitProviderModelTarget("openrouter/x", providers)).toEqual({
+      provider: "openrouter",
+      model: "x",
+    });
+    expect(splitProviderModelTarget("ling-3.0-flash-fin:free", providers)).toBeNull();
+    expect(splitProviderModelTarget("unknown/foo", providers)).toBeNull();
+    expect(splitProviderModelTarget("openrouter/", providers)).toBeNull();
   });
 
   it("parsePermCommand", () => {
@@ -205,6 +241,7 @@ describe("isBypassSlashCommand", () => {
     expect(isBypassSlashCommand("/preset list")).toBe(true);
     expect(isBypassSlashCommand("/p switch build")).toBe(true);
     expect(isBypassSlashCommand("/model list")).toBe(true);
+    expect(isBypassSlashCommand("/model switch ling-3.0-flash-fin:free")).toBe(true);
     expect(isBypassSlashCommand("/perm status")).toBe(true);
     expect(isBypassSlashCommand("/permission list")).toBe(true);
     expect(isBypassSlashCommand("/reasoning switch high")).toBe(true);
