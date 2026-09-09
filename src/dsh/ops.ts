@@ -108,6 +108,21 @@ export interface SessionQuery {
   }>;
 }
 
+/** Listing facts folded from a session log without a full `listEvents` inspect. */
+export interface SessionListFacts {
+  preset?: string;
+  title?: string;
+  lastUserMessageTime?: number;
+}
+
+/** Durable projection-cache snapshot used as a zero-I/O listing hint. */
+interface ProjectionCacheService {
+  cachedSnapshot(
+    header: SessionHeader,
+    inheritedEventCount: number,
+  ): { values?: Record<string, unknown> } | undefined;
+}
+
 /**
  * Outcome of reading a session log for "has the user spoken?" checks.
  * `ok: false` means the log could not be validated (corrupt persistence);
@@ -272,15 +287,15 @@ export class DshOps {
     }
   }
 
-  async readSessionTitle(sessionId: string): Promise<string | undefined> {
-    const query = this.get<SessionQuery>("sessionQuery");
-    if (!query) return undefined;
-    try {
-      const snapshot = await query.readTitle(sessionId);
-      return snapshot?.title;
-    } catch {
-      return undefined;
-    }
+  /**
+   * Latest `session/title` text. Does not call host `readTitle()` (that
+   * inspects the complete validated log). Live events / projection cache /
+   * the raw-log fold used by `/s list` are enough for WeChat labels.
+   */
+  async readSessionTitle(sessionId: string, cwd?: string, header?: SessionHeader): Promise<string | undefined> {
+    if (!sessionId) return undefined;
+    const facts = await this.readSessionListFacts(sessionId, cwd, header);
+    return facts.title;
   }
 
   /**
@@ -313,30 +328,92 @@ export class DshOps {
    * @returns the preset id, or undefined when the session has none on
    *   record (no header value, no switch events, no readable log).
    */
-  async resolveSessionPreset(sessionId: string, cwd?: string): Promise<string | undefined> {
+  async resolveSessionPreset(sessionId: string, cwd?: string, header?: SessionHeader): Promise<string | undefined> {
     if (!sessionId) return undefined;
-    let resolvedCwd = typeof cwd === "string" && cwd.length > 0 ? cwd : undefined;
-    if (!resolvedCwd) {
-      // Fallback for callers that only have the id (`/status`). The
-      // roster header is enough to locate the log; we do not walk
-      // events here.
-      const query = this.get<SessionQuery>("sessionQuery");
-      if (!query) return undefined;
-      try {
-        const all = await query.listSessions();
-        resolvedCwd = all.find((r) => r.header.id === sessionId)?.header.cwd;
-      } catch {
-        resolvedCwd = undefined;
-      }
-    }
-    if (!resolvedCwd) return undefined;
-    // Defer to the CJS helper for the actual frame scan + event walk.
-    // The helper catches its own errors and returns `undefined`, so a
-    // missing log or a corrupt frame degrades gracefully (the bridge
-    // renders "no preset" rather than a wrong preset).
+    const facts = await this.readSessionListFacts(sessionId, cwd, header);
+    return facts.preset;
+  }
+
+  private async sessionLog(): Promise<{
+    readSessionRecency: (cwd: string, sessionId: string, root?: string) => number | undefined;
+    readSessionListFacts: (cwd: string, sessionId: string, root?: string) => SessionListFacts;
+    readSessionRuntimePreset: (cwd: string, sessionId: string, root?: string) => string | undefined;
+    readSessionUsedHint: (
+      cwd: string,
+      sessionId: string,
+      root?: string,
+    ) => { status: "used"; time?: number } | { status: "blank" } | { status: "unknown" };
+  } | undefined> {
     try {
-      const runtime = await import("./session-log.cjs");
-      return runtime.readSessionRuntimePreset(resolvedCwd, sessionId, undefined);
+      return await import("./session-log.cjs");
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Walk a live agent's in-memory log newest-first. `found: true` means
+   * the session is attached (even when it has no user prompt).
+   */
+  private liveListFacts(sessionId: string): { found: boolean; facts: SessionListFacts } {
+    try {
+      const agents = this.get<{
+        get(id: string): {
+          session?: {
+            header?: { agentPreset?: string };
+            events?: readonly { type?: string; time?: number; data?: unknown }[];
+          };
+        } | undefined;
+      }>("agents");
+      const session = agents?.get(sessionId)?.session;
+      const events = session?.events;
+      if (!Array.isArray(events)) return { found: false, facts: {} };
+      const facts: SessionListFacts = {};
+      if (typeof session?.header?.agentPreset === "string" && session.header.agentPreset.length > 0) {
+        facts.preset = session.header.agentPreset;
+      }
+      for (const ev of events) {
+        if (!ev || typeof ev !== "object") continue;
+        if (ev.type === "agent-preset/selected") {
+          const data = ev.data as { agentPreset?: unknown } | undefined;
+          if (typeof data?.agentPreset === "string" && data.agentPreset.length > 0) {
+            facts.preset = data.agentPreset;
+          }
+        } else if (ev.type === "session/title") {
+          const data = ev.data as { title?: unknown } | undefined;
+          if (typeof data?.title === "string" && data.title.length > 0) {
+            facts.title = data.title;
+          }
+        } else if (ev.type === "user/message" && typeof ev.time === "number") {
+          const data = ev.data as { source?: { kind?: string } } | undefined;
+          const kind = data?.source?.kind;
+          if (!kind || kind === "user") facts.lastUserMessageTime = ev.time;
+        }
+      }
+      return { found: true, facts };
+    } catch {
+      return { found: false, facts: {} };
+    }
+  }
+
+  /** Zero-I/O listing hint from the host projection cache (same source as the GUI sidebar). */
+  private cachedListHint(header: SessionHeader | undefined): SessionListFacts | undefined {
+    if (!header) return undefined;
+    const cache = this.get<ProjectionCacheService>("sessionProjectionCache");
+    if (!cache || typeof cache.cachedSnapshot !== "function") return undefined;
+    try {
+      const snap = cache.cachedSnapshot(header, 0);
+      const values = snap?.values;
+      if (!values) return undefined;
+      const hint: SessionListFacts = {};
+      const meta = values.sessionListMetadata;
+      if (meta && typeof meta === "object") {
+        const lastPromptAt = (meta as { lastPromptAt?: unknown }).lastPromptAt;
+        if (typeof lastPromptAt === "number") hint.lastUserMessageTime = lastPromptAt;
+      }
+      const title = values.title;
+      if (typeof title === "string" && title.length > 0) hint.title = title;
+      return hint;
     } catch {
       return undefined;
     }
@@ -347,8 +424,39 @@ export class DshOps {
    * `user/message` landed. Distinguishes a true blank session (readable,
    * never spoken to) from a corrupt / unreadable log — `/s new` must not
    * treat the latter as "already blank".
+   *
+   * With `cwd`, `/s new` can skip `listEvents()` for sessions that are
+   * obviously used (live log, projection cache, or an artifact larger
+   * than a blank header). Full inspect remains the authority for small
+   * unknown files and for callers that only have an id.
    */
-  async inspectSessionActivity(sessionId: string): Promise<SessionLogActivity> {
+  async inspectSessionActivity(
+    sessionId: string,
+    cwd?: string,
+    header?: SessionHeader,
+  ): Promise<SessionLogActivity> {
+    const live = this.liveListFacts(sessionId);
+    if (live.found) {
+      return { ok: true, lastUserMessageTime: live.facts.lastUserMessageTime };
+    }
+    const cachedPrompt = this.cachedListHint(header)?.lastUserMessageTime;
+    if (cachedPrompt !== undefined) {
+      return { ok: true, lastUserMessageTime: cachedPrompt };
+    }
+    if (typeof cwd === "string" && cwd.length > 0) {
+      const runtime = await this.sessionLog();
+      if (runtime) {
+        try {
+          const hint = runtime.readSessionUsedHint(cwd, sessionId, undefined);
+          if (hint.status === "used") {
+            return { ok: true, lastUserMessageTime: hint.time ?? header?.createdAt ?? 1 };
+          }
+          if (hint.status === "blank") return { ok: true };
+        } catch {
+          // fall through to listEvents
+        }
+      }
+    }
     const query = this.get<SessionQuery>("sessionQuery");
     // No query service: we cannot prove corruption. Treat as a readable
     // empty log so `/s new` keeps the historical "already blank" path
@@ -368,15 +476,77 @@ export class DshOps {
   }
 
   /**
-   * Time of the session's last user-prompt event (`user/message`), read from
-   * the raw log. Used to recover recency after a restart, when the in-memory
-   * activity map is empty; undefined when the log holds no user prompt or
-   * cannot be read (callers that need to tell those apart use
-   * {@link inspectSessionActivity}).
+   * Time of the session's last user-prompt event (`user/message`).
+   *
+   * `/s list` calls this for every visible session on a cold start, so this
+   * must not `listEvents()` (that inspects the complete validated log).
+   * Prefer the live in-memory log, then the GUI's projection-cache hint,
+   * then a newest-first tail read of the raw artifact. `cwd` comes from
+   * the roster header; without it we fall back to {@link inspectSessionActivity}.
    */
-  async lastUserMessageTime(sessionId: string): Promise<number | undefined> {
+  async lastUserMessageTime(
+    sessionId: string,
+    cwd?: string,
+    header?: SessionHeader,
+  ): Promise<number | undefined> {
+    const live = this.liveListFacts(sessionId);
+    if (live.found) return live.facts.lastUserMessageTime;
+    const cached = this.cachedListHint(header)?.lastUserMessageTime;
+    if (cached !== undefined) return cached;
+    if (typeof cwd === "string" && cwd.length > 0) {
+      const runtime = await this.sessionLog();
+      if (!runtime) return undefined;
+      try {
+        // `undefined` here means "no prompt in the cheap tail" (or blank),
+        // not "try the full inspect". `/s list` falls back to createdAt.
+        return runtime.readSessionRecency(cwd, sessionId, undefined);
+      } catch {
+        return undefined;
+      }
+    }
     const activity = await this.inspectSessionActivity(sessionId);
     return activity.ok ? activity.lastUserMessageTime : undefined;
+  }
+
+  /**
+   * Title + live preset + recency for one displayed `/s list` row. One
+   * raw-log fold replaces a `readTitle` inspect plus a second preset scan.
+   */
+  async readSessionListFacts(sessionId: string, cwd?: string, header?: SessionHeader): Promise<SessionListFacts> {
+    const live = this.liveListFacts(sessionId);
+    if (live.found) {
+      return {
+        ...this.cachedListHint(header),
+        ...live.facts,
+      };
+    }
+    const hint = this.cachedListHint(header) ?? {};
+    let resolvedCwd = typeof cwd === "string" && cwd.length > 0 ? cwd : undefined;
+    if (!resolvedCwd) {
+      const query = this.get<SessionQuery>("sessionQuery");
+      if (query) {
+        try {
+          resolvedCwd = (await query.listSessions()).find((r) => r.header.id === sessionId)?.header.cwd;
+        } catch {
+          resolvedCwd = undefined;
+        }
+      }
+    }
+    if (!resolvedCwd) return hint;
+    const runtime = await this.sessionLog();
+    if (!runtime) return hint;
+    try {
+      const facts = runtime.readSessionListFacts(resolvedCwd, sessionId, undefined);
+      return {
+        ...hint,
+        ...facts,
+        lastUserMessageTime: facts.lastUserMessageTime ?? hint.lastUserMessageTime,
+        title: facts.title ?? hint.title,
+        preset: facts.preset ?? hint.preset,
+      };
+    } catch {
+      return hint;
+    }
   }
 
   // ─── History ──────────────────────────────────────────────────────────────

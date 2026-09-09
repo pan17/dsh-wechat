@@ -39,6 +39,17 @@ const log = require("../src/dsh/session-log.cjs") as {
   clearSessionLogCache: () => void;
   projectKey: (cwd: string) => string;
   readSessionRuntimePreset: (cwd: string, sessionId: string, root?: string) => string | undefined;
+  readSessionRecency: (cwd: string, sessionId: string, root?: string) => number | undefined;
+  readSessionListFacts: (
+    cwd: string,
+    sessionId: string,
+    root?: string,
+  ) => { preset?: string; title?: string; lastUserMessageTime?: number };
+  readSessionUsedHint: (
+    cwd: string,
+    sessionId: string,
+    root?: string,
+  ) => { status: "used"; time?: number } | { status: "blank" } | { status: "unknown" };
 };
 
 async function writeLog(opts: {
@@ -46,7 +57,7 @@ async function writeLog(opts: {
   cwd: string;
   sessionId: string;
   headerAgentPreset?: string;
-  events?: Array<{ type: string; data?: unknown }>;
+  events?: Array<{ type: string; data?: unknown; time?: number }>;
 }) {
   const { dshHome, cwd, sessionId, headerAgentPreset, events = [] } = opts;
   const dir = path.join(dshHome, "sessions", log.projectKey(cwd), encodeURIComponent(sessionId));
@@ -156,6 +167,70 @@ describe("session-log runtime preset cache", () => {
     // incremental path reads just the new suffix, not the full file.
     const readSpy = vi.spyOn(fs, "readFileSync");
     expect(log.readSessionRuntimePreset(cwd, "s-tail", dshHome)).toBe("cordis");
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+
+  it("readSessionRecency finds the last user/message without readFileSync", async () => {
+    const cwd = "C:\\work";
+    await writeLog({
+      dshHome, cwd, sessionId: "s-recency",
+      headerAgentPreset: "standard",
+      events: [
+        { type: "user/message", data: {}, time: 10 },
+        { type: "assistant/message", data: {}, time: 11 },
+        { type: "user/message", data: {}, time: 99 },
+        { type: "assistant/message", data: {}, time: 100 },
+      ],
+    });
+    const readSpy = vi.spyOn(fs, "readFileSync");
+    expect(log.readSessionRecency(cwd, "s-recency", dshHome)).toBe(99);
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+
+  it("readSessionListFacts returns title, live preset, and recency together", async () => {
+    const cwd = "C:\\work";
+    await writeLog({
+      dshHome, cwd, sessionId: "s-facts",
+      headerAgentPreset: "standard",
+      events: [
+        { type: "user/message", data: {}, time: 5 },
+        { type: "session/title", data: { title: "修列表速度", messageSeqs: [], source: { kind: "fallback" } } },
+        { type: "agent-preset/selected", data: { agentPreset: "cordis" } },
+        { type: "user/message", data: {}, time: 50 },
+      ],
+    });
+    expect(log.readSessionListFacts(cwd, "s-facts", dshHome)).toEqual({
+      preset: "cordis",
+      title: "修列表速度",
+      lastUserMessageTime: 50,
+    });
+  });
+
+  it("readSessionUsedHint reports a header-only log as blank", async () => {
+    const cwd = "C:\\work";
+    await writeLog({
+      dshHome, cwd, sessionId: "s-blank",
+      headerAgentPreset: "standard",
+    });
+    expect(log.readSessionUsedHint(cwd, "s-blank", dshHome)).toEqual({ status: "blank" });
+  });
+
+  it("readSessionUsedHint treats a large artifact as used without readFileSync", async () => {
+    const cwd = "C:\\work";
+    await writeLog({
+      dshHome, cwd, sessionId: "s-fat",
+      headerAgentPreset: "standard",
+    });
+    const file = path.join(
+      dshHome,
+      "sessions",
+      log.projectKey(cwd),
+      encodeURIComponent("s-fat"),
+      "session.jsonl.zstd",
+    );
+    fs.appendFileSync(file, Buffer.alloc(2048, 1));
+    const readSpy = vi.spyOn(fs, "readFileSync");
+    expect(log.readSessionUsedHint(cwd, "s-fat", dshHome)).toEqual({ status: "used" });
     expect(readSpy).not.toHaveBeenCalled();
   });
 

@@ -1862,7 +1862,7 @@ export class WeChatDSHBridge {
     const record = sessions.find((r) => r.header.id === sessionId);
     const workspace = record?.header.cwd?.split(/[\\/]/).pop() ?? "?";
     const title = record
-      ? (await this.ops.readSessionTitle(sessionId)) ?? sessionId.slice(0, 8)
+      ? (await this.ops.readSessionTitle(sessionId, record.header.cwd, record.header)) ?? sessionId.slice(0, 8)
       : sessionId.slice(0, 8);
     return `📂 ${workspace} · 💬 ${title}`;
   }
@@ -2628,14 +2628,14 @@ export class WeChatDSHBridge {
     if (!sessionId) {
       return `${head}\n💬 该工作区暂无会话，发送消息将创建`;
     }
-    return `${head}\n💬 已恢复会话: ${await this.formatSessionLabel(sessionId)}`;
+    return `${head}\n💬 已恢复会话: ${await this.formatSessionLabel(sessionId, path)}`;
   }
 
   /**
    * WeChat-facing session label: cleaned title (id prefix fallback) + full id.
    */
-  private async formatSessionLabel(sessionId: string): Promise<string> {
-    const raw = (await this.ops.readSessionTitle(sessionId)) ?? sessionId.slice(0, 12);
+  private async formatSessionLabel(sessionId: string, cwd?: string): Promise<string> {
+    const raw = (await this.ops.readSessionTitle(sessionId, cwd)) ?? sessionId.slice(0, 12);
     return `${cleanSessionTitle(raw)}（${sessionId}）`;
   }
 
@@ -2657,13 +2657,14 @@ export class WeChatDSHBridge {
           await this.sendReply(userId, `💬 当前工作目录（${user.cwd}）下暂无会话。发送消息即可创建第一个会话。`);
           return;
         }
-        // Cold-start recency recovery: sessions without an in-memory activity
-        // record (e.g. right after a restart) read their last user-prompt
-        // time from the raw log, in parallel; results are cached afterwards.
+        // Cold-start recency: never `listEvents()` the whole roster (that
+        // inspects every complete log). Live agents / projection cache /
+        // a newest-first tail read are enough to sort; only the 20 rows
+        // we render then pay for title+preset.
         await Promise.all(
           scoped.map(async (r) => {
             if (this.lastActivityBySession.has(r.header.id)) return;
-            const t = await this.ops.lastUserMessageTime(r.header.id);
+            const t = await this.ops.lastUserMessageTime(r.header.id, r.header.cwd, r.header);
             if (t !== undefined) this.lastActivityBySession.set(r.header.id, t);
           }),
         );
@@ -2673,20 +2674,22 @@ export class WeChatDSHBridge {
         const lines = [cmd.scope === "current"
           ? `💬 最近会话（${user.cwd}，/session switch <编号> 切换）`
           : "💬 最近会话（按最近活动排序，/session switch <编号> 切换）"];
-        // Pass each row's already-known cwd so we don't re-query the
-        // session roster per line. Reads run in parallel; session-log.cjs
-        // caches by (path, size, mtime) so a second `/s list` is a stat.
-        const [titles, presetIds, presets] = await Promise.all([
-          Promise.all(recent.map((r) => this.ops.readSessionTitle(r.header.id))),
-          Promise.all(recent.map((r) => this.ops.resolveSessionPreset(r.header.id, r.header.cwd))),
+        // One log fold per displayed row (title + live preset). A second
+        // `/s list` is a stat: session-log.cjs caches by (path, size, mtime).
+        const [facts, presets] = await Promise.all([
+          Promise.all(recent.map((r) => this.ops.readSessionListFacts(r.header.id, r.header.cwd, r.header))),
           this.ops.listPresets(),
         ]);
         for (let i = 0; i < recent.length; i++) {
           const record = recent[i]!;
+          const row = facts[i];
           const marker = record.header.id === user.sessionId ? " ◀ 当前" : "";
-          const title = cleanSessionTitle(titles[i] ?? record.header.id.slice(0, 12));
+          const title = cleanSessionTitle(row?.title ?? record.header.id.slice(0, 12));
+          if (row?.lastUserMessageTime !== undefined) {
+            this.lastActivityBySession.set(record.header.id, row.lastUserMessageTime);
+          }
           const when = this.formatRelativeTime(this.sessionActivityTime(record));
-          const presetId = presetIds[i];
+          const presetId = row?.preset;
           const presetLabel = presetId
             ? (presets.find((p) => p.id === presetId)?.name ?? presetId)
             : undefined;
@@ -2702,6 +2705,15 @@ export class WeChatDSHBridge {
       }
       case "switch": {
         const sessions = await this.ops.listSessions();
+        // Same cheap recency fill as `/s list`, so the number the user
+        // just saw still maps to the same row after a restart.
+        await Promise.all(
+          sessions.map(async (r) => {
+            if (this.lastActivityBySession.has(r.header.id)) return;
+            const t = await this.ops.lastUserMessageTime(r.header.id, r.header.cwd, r.header);
+            if (t !== undefined) this.lastActivityBySession.set(r.header.id, t);
+          }),
+        );
         const recent = sessions.sort((a, b) => this.sessionActivityTime(b) - this.sessionActivityTime(a));
         const index = cmd.index;
         if (index < 1 || index > recent.length) {
@@ -2720,7 +2732,7 @@ export class WeChatDSHBridge {
         // session. A corrupt target stays bound so `/s new` can mint a
         // replacement instead of silently swapping ids on switch.
         const { agent } = await this.agents.ensure(user);
-        const label = await this.formatSessionLabel(record.header.id);
+        const label = await this.formatSessionLabel(record.header.id, record.header.cwd);
         await this.sendReply(
           userId,
           agent
@@ -2740,7 +2752,7 @@ export class WeChatDSHBridge {
         // NOT blank — staying on it would lock the user out of every later
         // message (resume fails, binding never changes).
         if (user.sessionId) {
-          const current = await this.ops.inspectSessionActivity(user.sessionId);
+          const current = await this.ops.inspectSessionActivity(user.sessionId, user.cwd);
           if (current.ok && current.lastUserMessageTime === undefined) {
             const agent = this.agents.get(user);
             await this.sendReply(userId, `✅ 已在空白会话（${user.sessionId.slice(0, 12)}）${agent ? `，Agent ${agent.status}` : ""}。`);
@@ -2822,7 +2834,7 @@ export class WeChatDSHBridge {
       .filter((r) => r.header.cwd === cwd && r.header.id !== excludeId)
       .sort((a, b) => b.header.createdAt - a.header.createdAt);
     for (const record of sessions) {
-      const activity = await this.ops.inspectSessionActivity(record.header.id);
+      const activity = await this.ops.inspectSessionActivity(record.header.id, record.header.cwd, record.header);
       if (activity.ok && activity.lastUserMessageTime === undefined) return record.header.id;
     }
     return undefined;
@@ -2894,7 +2906,7 @@ export class WeChatDSHBridge {
         const defaultLabel = (await this.resolvePresetLabel(defaultId)) ?? "（未设置）";
         const lines = [`🤖 默认 Preset: ${defaultLabel}`];
         const liveId = user.sessionId
-          ? await this.ops.resolveSessionPreset(user.sessionId)
+          ? await this.ops.resolveSessionPreset(user.sessionId, user.cwd)
           : undefined;
         if (liveId && liveId !== defaultId) {
           const liveLabel = (await this.resolvePresetLabel(liveId)) ?? liveId;
@@ -3387,7 +3399,7 @@ export class WeChatDSHBridge {
 
     // 会话标题（sessionQuery 投影），无标题时退回 id 前 12 位。
     const sessionLabel = user.sessionId
-      ? (await this.ops.readSessionTitle(user.sessionId)) ?? user.sessionId.slice(0, 12)
+      ? (await this.ops.readSessionTitle(user.sessionId, user.cwd)) ?? user.sessionId.slice(0, 12)
       : "（未绑定）";
 
     // 实际生效的模型：本会话 override（/model switch）> 会话最近请求记录 >
@@ -3521,7 +3533,7 @@ export class WeChatDSHBridge {
     if (!user.sessionId) {
       return { defaultLine, sessionLine: "• 当前会话 Preset: （未绑定）" };
     }
-    const liveId = await this.ops.resolveSessionPreset(user.sessionId);
+    const liveId = await this.ops.resolveSessionPreset(user.sessionId, user.cwd);
     const liveLabel = liveId
       ? ((await this.resolvePresetLabel(liveId)) ?? liveId)
       : "（无记录）";

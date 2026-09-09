@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/s list` 冷启动不再对每个会话走 `sessionQuery.listEvents()`（会完整 inspect 整本日志）。排序改为 live 会话内存日志 → 投影缓存 `sessionListMetadata.lastPromptAt` → 原始日志**从尾部**找最近一次 `user/message`；只有实际展示的 20 条才折叠 title + live preset。同一条日志的二次 `/s list` 仍是 stat 命中缓存。
+- `/s new` 找可复用空白会话时，对明显已经聊过的会话（live 日志 / 投影缓存 / 日志大于空白 header）不再 `listEvents()` 整本 inspect；只有小文件且无法判定时才回落到完整读取。
+- `/status`、`/s switch`、`/workspace switch`、`/preset status` 以及卡片来源标签不再走 host `readTitle()`（整本 inspect）；标题和 live preset 与 `/s list` 共用 raw-log fold。`/s switch` 编号与 `/s list` 使用同一套廉价 recency。
+
 ## [0.9.1] - 2026-09-07
 
 ### Changed

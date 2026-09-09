@@ -136,6 +136,7 @@ async function writeSessionLog(opts: {
 interface FakeSessionQuery {
   listSessions: () => Promise<Array<{ header: { id: string; createdAt: number; cwd?: string; agentPreset?: string }; live: boolean; persisted: boolean }>>;
   readTitle: (sessionId: string) => Promise<{ title?: string } | undefined>;
+  listEvents?: (sessionId: string) => Promise<Array<{ type: string; time: number }>>;
 }
 
 function makeBridge(opts: {
@@ -260,6 +261,53 @@ describe("preset display — session list uses live preset (event-aware)", () =>
     expect(text).not.toMatch(/Preset:cordis\b/);
   });
 
+  it("does not inspect every session log via listEvents on /s list", async () => {
+    const cwd = "C:\\work";
+    await writeSessionLog({
+      dshHome, cwd, sessionId: "s-a",
+      headerAgentPreset: "standard",
+      events: [
+        { type: "user/message", data: {}, seq: 1, time: 1000 },
+        { type: "session/title", data: { title: "列表会话", messageSeqs: [], source: { kind: "fallback" } }, seq: 2, time: 1001 },
+      ],
+    });
+    await writeSessionLog({ dshHome, cwd, sessionId: "s-b", headerAgentPreset: "standard" });
+    const listEvents = vi.fn(async () => {
+      throw new Error("listEvents should not run for /s list recency");
+    });
+    const readTitle = vi.fn(async () => {
+      throw new Error("readTitle should not run for /s list rows");
+    });
+    const sessions = [
+      { header: { id: "s-a", createdAt: 100, cwd, agentPreset: "standard" }, live: true, persisted: true },
+      { header: { id: "s-b", createdAt: 200, cwd, agentPreset: "standard" }, live: true, persisted: true },
+    ];
+    const query: FakeSessionQuery = {
+      listSessions: async () => sessions,
+      readTitle,
+      listEvents,
+    };
+    const bridge = makeBridge({
+      agent: { agent: { id: "s-a", status: "idle" } },
+      query,
+      agentPresets: [{ id: "standard", name: "标准模式" }],
+    });
+    {
+      const state = (bridge as unknown as {
+        state: { ensureUser(u: string, c: string): unknown };
+      }).state;
+      state.ensureUser("u1", cwd);
+    }
+    await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
+      wechatTextMessage("/s list"),
+    );
+    expect(listEvents).not.toHaveBeenCalled();
+    expect(readTitle).not.toHaveBeenCalled();
+    const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    expect(text).toContain("列表会话");
+    expect(text).toContain("Preset:标准模式");
+  });
+
   it("does not re-scan the session roster once per /s list row", async () => {
     const cwd = "C:\\work";
     await writeSessionLog({ dshHome, cwd, sessionId: "s-a", headerAgentPreset: "standard" });
@@ -334,14 +382,18 @@ describe("preset display — session list uses live preset (event-aware)", () =>
       headerAgentPreset: "standard",
       events: [
         { type: "user/message", data: {}, seq: 1, time: 1000 },
+        { type: "session/title", data: { title: "状态会话", messageSeqs: [], source: { kind: "fallback" } }, seq: 2, time: 1050 },
         { type: "agent-preset/selected", data: { agentPreset: "cordis" }, seq: 3, time: 1100 },
       ],
+    });
+    const readTitle = vi.fn(async () => {
+      throw new Error("readTitle should not inspect the log for /status");
     });
     const query: FakeSessionQuery = {
       listSessions: async () => [
         { header: { id: "s-live", createdAt: 100, cwd, agentPreset: "standard" }, live: true, persisted: true },
       ],
-      readTitle: async () => undefined,
+      readTitle,
     };
     const bridge = makeBridge({
       agent: { agent: { id: "s-live", status: "idle" } },
@@ -360,6 +412,8 @@ describe("preset display — session list uses live preset (event-aware)", () =>
       wechatTextMessage("/status"),
     );
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
+    expect(readTitle).not.toHaveBeenCalled();
+    expect(text).toContain("状态会话");
     expect(text).toMatch(/• 默认 Preset:\s*标准模式/);
     expect(text).toMatch(/• 当前会话 Preset:\s*创造模式/);
     expect(text.indexOf("• 当前会话 Preset:")).toBeLessThan(text.indexOf("• 模型:"));

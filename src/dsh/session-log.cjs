@@ -1,26 +1,20 @@
 /**
- * Read the runtime preset of a session by walking its raw JSONL log.
+ * Read listing facts from a session's raw JSONL log.
  *
- * Why this exists: the host's `sessionQuery.listEvents()` returns
- * lightweight records (`{sessionId, seq, type, time, surface}`) — NO
- * `data` field — because it's a recency-recovery API. The bridge needs
- * the payload of `agent-preset/selected` events (`data.agentPreset`)
- * to honour the host's `resolveSessionPreset` semantics: a session
- * switched after creation reads as the switched preset, not the
- * frozen header value.
+ * Why this exists: the host's `sessionQuery.listEvents()` / `readTitle()`
+ * both `inspect()` the complete validated log. `/s list` only needs a
+ * handful of facts (runtime preset, last `user/message` time, latest
+ * `session/title`) and must not scale with session count × log size.
  *
  * The persistence layer keeps each session as a multi-frame Zstandard
  * file at `$DSH_HOME/sessions/${projectKey(cwd)}/${encodeSegment(id)}/session.jsonl.zstd`.
  *
- * Cost: a long session can be thousands of independent zstd frames
- * (one per write batch). Decompressing every frame on every `/s list`
- * row would scale with session count × log size. This module therefore:
- *   - caches the resolved preset against (path, size, mtime)
+ * This module therefore:
+ *   - caches folded facts against (path, size, mtime)
  *   - on append, only scans frames after the previously consumed byte
- *     (newest `agent-preset/selected` in the tail wins; otherwise the
- *     cached value still holds — logs are append-only)
- *   - skips JSON.parse on frames that cannot contain a header or a
- *     preset-selected event
+ *   - recovers recency by walking zstd frames newest-first and stopping
+ *     at the first `user/message` (no full decompress)
+ *   - skips JSON.parse on frames that cannot contain a relevant event
  *
  * The disk layout and projectKey encoding are documented in
  * `@deepseek-ai/dsh-session-persistence-jsonl` (`projectKey` /
@@ -41,6 +35,16 @@ const COMPRESSED_SUFFIX = ".jsonl.zstd";
 /** Bound the in-process cache so a long-lived bridge cannot grow without limit. */
 const CACHE_LIMIT = 256;
 
+/** Byte window for newest-first recency recovery of compressed logs. */
+const RECENCY_CHUNK = 512 * 1024;
+
+/**
+ * GUI `DEFAULT_COLD_BLANK_PROBE_MAX_BYTES` is 1024: a reusable blank
+ * session is header-only. Anything larger is treated as used without
+ * decompressing the log (`/s new` must not inspect every cwd session).
+ */
+const BLANK_LOG_MAX_BYTES = 1024;
+
 /**
  * @typedef {{
  *   size: number,
@@ -48,6 +52,10 @@ const CACHE_LIMIT = 256;
  *   scannedBytes: number,
  *   preset: string | undefined,
  *   headerPreset: string | undefined,
+ *   title: string | undefined,
+ *   lastUserMessageTime: number | undefined,
+ *   recencyChecked: boolean,
+ *   complete: boolean,
  * }} CacheEntry
  */
 
@@ -210,15 +218,40 @@ function parseJsonl(text) {
   return out;
 }
 
+function userMessageTime(ev) {
+  if (!ev || typeof ev !== "object" || ev.type !== "user/message") return undefined;
+  if (typeof ev.time !== "number") return undefined;
+  const source = ev.data && typeof ev.data === "object" ? ev.data.source : undefined;
+  // Missing source is treated as a user prompt — older logs and the
+  // recency-recovery path in `inspectSessionActivity` both walk every
+  // `user/message`. An explicit non-user source (plugin / skill / goal)
+  // is skipped so a synthetic context injection cannot steal recency.
+  if (source && typeof source === "object" && source.kind && source.kind !== "user") {
+    return undefined;
+  }
+  return ev.time;
+}
+
+function eventTitle(ev) {
+  if (!ev || typeof ev !== "object" || ev.type !== "session/title") return undefined;
+  const data = ev.data;
+  if (!data || typeof data !== "object") return undefined;
+  if (typeof data.title === "string" && data.title.length > 0) return data.title;
+  return undefined;
+}
+
 /**
- * Fold header / selected-preset facts out of one JSONL chunk.
- * `into.lastSelected` is updated in log order (newest wins).
- * `into.headerPreset` is captured once from the session header.
+ * Fold listing facts out of one JSONL chunk.
+ * `into.lastSelected` / `into.title` / `into.lastUserMessageTime` are
+ * updated in log order (newest wins). `into.headerPreset` is captured
+ * once from the session header.
  */
 function extractFromText(text, into) {
   const hasSelected = text.includes("agent-preset/selected");
+  const hasTitle = text.includes("session/title");
+  const hasUser = text.includes("user/message");
   const needHeader = into.headerPreset === undefined && text.includes('"type":"session"');
-  if (!hasSelected && !needHeader) return;
+  if (!hasSelected && !hasTitle && !hasUser && !needHeader) return;
   for (const ev of parseJsonl(text)) {
     if (!ev || typeof ev !== "object") continue;
     if (ev.type === "agent-preset/selected") {
@@ -234,7 +267,20 @@ function extractFromText(text, into) {
     ) {
       into.headerPreset = ev.agentPreset;
     }
+    const title = eventTitle(ev);
+    if (title !== undefined) into.title = title;
+    const t = userMessageTime(ev);
+    if (t !== undefined) into.lastUserMessageTime = t;
   }
+}
+
+function emptyFacts() {
+  return {
+    lastSelected: undefined,
+    headerPreset: undefined,
+    title: undefined,
+    lastUserMessageTime: undefined,
+  };
 }
 
 function scanLogBuffer(buffer, compressed, into) {
@@ -254,6 +300,43 @@ function scanLogBuffer(buffer, compressed, into) {
   }
   if (typeof tornStart === "number") return { scannedBytes: tornStart };
   return { scannedBytes: buffer.length };
+}
+
+function mergeFacts(base, extra) {
+  return {
+    lastSelected: extra.lastSelected !== undefined ? extra.lastSelected : base.lastSelected,
+    headerPreset: extra.headerPreset !== undefined ? extra.headerPreset : base.headerPreset,
+    title: extra.title !== undefined ? extra.title : base.title,
+    lastUserMessageTime: extra.lastUserMessageTime !== undefined
+      ? extra.lastUserMessageTime
+      : base.lastUserMessageTime,
+  };
+}
+
+function factsFromCache(hit) {
+  return {
+    // Seed the already-resolved preset so a tail without a new
+    // `agent-preset/selected` keeps the cached value (newest still wins
+    // when the tail does contain one).
+    lastSelected: hit.preset,
+    headerPreset: hit.headerPreset,
+    title: hit.title,
+    lastUserMessageTime: hit.lastUserMessageTime,
+  };
+}
+
+function entryFromFacts(st, scannedBytes, facts, flags) {
+  return {
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    scannedBytes,
+    headerPreset: facts.headerPreset,
+    preset: facts.lastSelected ?? facts.headerPreset,
+    title: facts.title,
+    lastUserMessageTime: facts.lastUserMessageTime,
+    recencyChecked: flags.recencyChecked === true,
+    complete: flags.complete === true,
+  };
 }
 
 function remember(file, entry) {
@@ -296,16 +379,248 @@ function readSessionEvents(cwd, sessionId, root) {
   return events;
 }
 
-function readTail(file, start, size) {
-  const length = size - start;
+function readRange(file, start, length) {
   if (length <= 0) return Buffer.alloc(0);
   const fd = fs.openSync(file, "r");
   try {
-    const tail = Buffer.alloc(length);
-    const n = fs.readSync(fd, tail, 0, length, start);
-    return n === length ? tail : tail.subarray(0, n);
+    const buf = Buffer.alloc(length);
+    const n = fs.readSync(fd, buf, 0, length, start);
+    return n === length ? buf : buf.subarray(0, n);
   } finally {
     fs.closeSync(fd);
+  }
+}
+
+function readTail(file, start, size) {
+  return readRange(file, start, size - start);
+}
+
+function lastUserMessageTimeInText(text) {
+  if (!text.includes("user/message")) return undefined;
+  const events = parseJsonl(text);
+  for (let i = events.length - 1; i >= 0; i--) {
+    const t = userMessageTime(events[i]);
+    if (t !== undefined) return t;
+  }
+  return undefined;
+}
+
+function lastUserMessageTimeInFrames(buffer, frames) {
+  for (let i = frames.length - 1; i >= 0; i--) {
+    let text = "";
+    try {
+      text = decompressZstdFrame(buffer, frames[i]).toString("utf8");
+    } catch {
+      continue;
+    }
+    const t = lastUserMessageTimeInText(text);
+    if (t !== undefined) return t;
+  }
+  return undefined;
+}
+
+/**
+ * Walk a compressed log newest-frame-first until a user prompt is found.
+ * A tail window rarely starts on a frame boundary, so we locate Zstandard
+ * magics inside the window instead of requiring the first byte to be one.
+ */
+function recencyFromCompressedTail(file, size) {
+  const start = Math.max(0, size - RECENCY_CHUNK);
+  const chunk = readRange(file, start, size - start);
+  if (chunk.length < 4) return { time: undefined, recencyChecked: start === 0 };
+  // A tail window usually starts mid-frame. The first valid magic is
+  // the oldest complete frame in this window; one scan then covers
+  // every newer frame through the torn tail. Finding a user prompt
+  // here is the last prompt in the file (logs are append-only).
+  for (let offset = 0; offset <= chunk.length - 4; offset++) {
+    if (chunk.readUInt32LE(offset) !== ZSTD_MAGIC) continue;
+    let frames;
+    try {
+      ({ frames } = scanZstdFrames(chunk.subarray(offset)));
+    } catch {
+      continue;
+    }
+    if (frames.length === 0) continue;
+    const time = lastUserMessageTimeInFrames(chunk.subarray(offset), frames);
+    if (time !== undefined) return { time, recencyChecked: true };
+    return { time: undefined, recencyChecked: start === 0 };
+  }
+  return { time: undefined, recencyChecked: start === 0 };
+}
+
+function recencyFromPlainTail(file, size) {
+  const window = Math.min(size, RECENCY_CHUNK);
+  const chunk = readRange(file, size - window, window);
+  const time = lastUserMessageTimeInText(chunk.toString("utf8"));
+  if (time !== undefined) return { time, recencyChecked: true };
+  // A short file is complete; a truncated first line of a large file
+  // is not a proof of "no user message".
+  return { time: undefined, recencyChecked: size <= RECENCY_CHUNK };
+}
+
+function emptyListFacts() {
+  return { preset: undefined, title: undefined, lastUserMessageTime: undefined };
+}
+
+function listFactsFromEntry(entry) {
+  if (!entry) return emptyListFacts();
+  return {
+    preset: entry.preset,
+    title: entry.title,
+    lastUserMessageTime: entry.lastUserMessageTime,
+  };
+}
+
+function locateStat(cwd, sessionId, root) {
+  if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
+  if (typeof cwd !== "string" || cwd.length === 0) return undefined;
+  const file = locateSessionLog(cwd, sessionId, root);
+  if (!file) return undefined;
+  try {
+    return { file, st: fs.statSync(file), compressed: file.endsWith(COMPRESSED_SUFFIX) };
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberRecency(file, st, hit, recency) {
+  const base = hit && hit.size <= st.size ? hit : undefined;
+  const entry = {
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    scannedBytes: base && base.complete ? base.scannedBytes : 0,
+    headerPreset: base?.headerPreset,
+    preset: base?.preset,
+    title: base?.title,
+    lastUserMessageTime: recency.time !== undefined ? recency.time : base?.lastUserMessageTime,
+    recencyChecked: recency.recencyChecked === true,
+    complete: base && base.complete && base.size === st.size,
+  };
+  remember(file, entry);
+  return entry;
+}
+
+function recencyOfFile(file, st, compressed) {
+  return compressed
+    ? recencyFromCompressedTail(file, st.size)
+    : recencyFromPlainTail(file, st.size);
+}
+
+/**
+ * Cheap used/blank hint for `/s new`.
+ * - `used`: has a user prompt, or the artifact is larger than a blank header
+ * - `blank`: small artifact, fully readable, no `user/message`
+ * - `unknown`: missing file or unreadable small artifact (caller may inspect)
+ *
+ * @returns {{ status: "used", time?: number } | { status: "blank" } | { status: "unknown" }}
+ */
+function readSessionUsedHint(cwd, sessionId, root) {
+  const located = locateStat(cwd, sessionId, root);
+  if (!located) return { status: "unknown" };
+  const { file, st, compressed } = located;
+  const hit = cache.get(file);
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) {
+    if (hit.lastUserMessageTime !== undefined) return { status: "used", time: hit.lastUserMessageTime };
+    if (hit.recencyChecked && (hit.complete || st.size <= BLANK_LOG_MAX_BYTES)) {
+      return { status: "blank" };
+    }
+  }
+  if (st.size > BLANK_LOG_MAX_BYTES) return { status: "used" };
+  try {
+    const recency = recencyOfFile(file, st, compressed);
+    rememberRecency(file, st, hit, recency);
+    if (recency.time !== undefined) return { status: "used", time: recency.time };
+    if (recency.recencyChecked) return { status: "blank" };
+    return { status: "unknown" };
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
+/**
+ * Last `user/message` time, recovered newest-first. Does not decompress
+ * the whole log — `/s list` uses this to sort every session before it
+ * spends a full scan on the 20 rows it will actually render.
+ */
+function readSessionRecency(cwd, sessionId, root) {
+  const located = locateStat(cwd, sessionId, root);
+  if (!located) return undefined;
+  const { file, st, compressed } = located;
+  const hit = cache.get(file);
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs && hit.recencyChecked) {
+    remember(file, hit);
+    return hit.lastUserMessageTime;
+  }
+  try {
+    if (hit && hit.complete && st.size > hit.size && hit.scannedBytes <= hit.size) {
+      const tail = readTail(file, hit.scannedBytes, st.size);
+      const aligned = !(compressed && tail.length >= 4 && tail.readUInt32LE(0) !== ZSTD_MAGIC);
+      if (tail.length > 0 && aligned) {
+        const into = factsFromCache(hit);
+        const { scannedBytes: tailScanned } = scanLogBuffer(tail, compressed, into);
+        const facts = mergeFacts(factsFromCache(hit), into);
+        const recencyChecked = facts.lastUserMessageTime !== undefined || hit.recencyChecked;
+        const entry = entryFromFacts(st, hit.scannedBytes + tailScanned, facts, {
+          recencyChecked,
+          complete: true,
+        });
+        remember(file, entry);
+        return entry.lastUserMessageTime;
+      }
+    }
+    const recency = recencyOfFile(file, st, compressed);
+    const entry = rememberRecency(file, st, hit, recency);
+    return entry.lastUserMessageTime;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fold listing facts (runtime preset, last user-prompt time, latest
+ * title) from the raw log. Used for the displayed `/s list` rows after
+ * recency has already picked the top 20.
+ */
+function readSessionListFacts(cwd, sessionId, root) {
+  const located = locateStat(cwd, sessionId, root);
+  if (!located) return emptyListFacts();
+  const { file, st, compressed } = located;
+  const hit = cache.get(file);
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs && hit.complete) {
+    remember(file, hit);
+    return listFactsFromEntry(hit);
+  }
+  try {
+    if (hit && hit.complete && st.size > hit.size && hit.scannedBytes <= hit.size) {
+      const tail = readTail(file, hit.scannedBytes, st.size);
+      const aligned = !(compressed && tail.length >= 4 && tail.readUInt32LE(0) !== ZSTD_MAGIC);
+      if (tail.length > 0 && aligned) {
+        const into = factsFromCache(hit);
+        const { scannedBytes: tailScanned } = scanLogBuffer(tail, compressed, into);
+        const facts = mergeFacts(factsFromCache(hit), into);
+        const recencyChecked = facts.lastUserMessageTime !== undefined || hit.recencyChecked;
+        const entry = entryFromFacts(st, hit.scannedBytes + tailScanned, facts, {
+          recencyChecked,
+          complete: true,
+        });
+        remember(file, entry);
+        return listFactsFromEntry(entry);
+      }
+    }
+    const buffer = fs.readFileSync(file);
+    const into = emptyFacts();
+    const { scannedBytes } = scanLogBuffer(buffer, compressed, into);
+    if (into.lastUserMessageTime === undefined && hit && hit.recencyChecked) {
+      into.lastUserMessageTime = hit.lastUserMessageTime;
+    }
+    const entry = entryFromFacts(st, scannedBytes, into, {
+      recencyChecked: into.lastUserMessageTime !== undefined || hit?.recencyChecked === true,
+      complete: true,
+    });
+    remember(file, entry);
+    return listFactsFromEntry(entry);
+  } catch {
+    return emptyListFacts();
   }
 }
 
@@ -313,61 +628,9 @@ function readTail(file, start, size) {
  * The preset a session actually runs under, walking the raw event
  * log for `agent-preset/selected` (newest wins, header fallback).
  * Mirrors `@deepseek-ai/dsh-agent-presets.resolveSessionPreset`.
- *
- * @param cwd - the session's recorded working directory.
- * @param sessionId - the durable session id.
- * @param root - optional `$DSH_HOME` override (defaults to env or `~/.dsh`).
- * @returns the preset id, or undefined when the log has no record.
  */
 function readSessionRuntimePreset(cwd, sessionId, root) {
-  if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
-  if (typeof cwd !== "string" || cwd.length === 0) return undefined;
-  const file = locateSessionLog(cwd, sessionId, root);
-  if (!file) return undefined;
-  let st;
-  try {
-    st = fs.statSync(file);
-  } catch {
-    return undefined;
-  }
-  const hit = cache.get(file);
-  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) {
-    remember(file, hit);
-    return hit.preset;
-  }
-  const compressed = file.endsWith(COMPRESSED_SUFFIX);
-  try {
-    if (hit && st.size > hit.size && hit.scannedBytes <= hit.size) {
-      const tail = readTail(file, hit.scannedBytes, st.size);
-      if (tail.length > 0 && !(compressed && tail.length >= 4 && tail.readUInt32LE(0) !== ZSTD_MAGIC)) {
-        const into = { lastSelected: undefined, headerPreset: hit.headerPreset };
-        const { scannedBytes: tailScanned } = scanLogBuffer(tail, compressed, into);
-        const entry = {
-          size: st.size,
-          mtimeMs: st.mtimeMs,
-          scannedBytes: hit.scannedBytes + tailScanned,
-          headerPreset: into.headerPreset,
-          preset: into.lastSelected ?? hit.preset,
-        };
-        remember(file, entry);
-        return entry.preset;
-      }
-    }
-    const buffer = fs.readFileSync(file);
-    const into = { lastSelected: undefined, headerPreset: undefined };
-    const { scannedBytes } = scanLogBuffer(buffer, compressed, into);
-    const entry = {
-      size: st.size,
-      mtimeMs: st.mtimeMs,
-      scannedBytes,
-      headerPreset: into.headerPreset,
-      preset: into.lastSelected ?? into.headerPreset,
-    };
-    remember(file, entry);
-    return entry.preset;
-  } catch {
-    return undefined;
-  }
+  return readSessionListFacts(cwd, sessionId, root).preset;
 }
 
 module.exports = {
@@ -376,7 +639,10 @@ module.exports = {
   locateSessionLog,
   projectKey,
   readSessionEvents,
+  readSessionListFacts,
+  readSessionRecency,
   readSessionRuntimePreset,
+  readSessionUsedHint,
   resolveDshHome,
   scanZstdFrames,
   sessionLogPath,

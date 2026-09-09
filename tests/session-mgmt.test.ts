@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -128,6 +129,37 @@ describe("listSessions filters archived sessions", () => {
       ok: false,
       error: "stored session failed validation",
     });
+  });
+
+  it("inspectSessionActivity skips listEvents for a large on-disk session", async () => {
+    const require = createRequire(import.meta.url);
+    const slog = require("../src/dsh/session-log.cjs") as {
+      projectKey: (cwd: string) => string;
+      clearSessionLogCache: () => void;
+    };
+    slog.clearSessionLogCache();
+    const dshHome = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-home-snew-"));
+    const previous = process.env.DSH_HOME;
+    process.env.DSH_HOME = dshHome;
+    try {
+      const cwd = "C:\\work";
+      const sessionId = "s-fat";
+      const dir = path.join(dshHome, "sessions", slog.projectKey(cwd), encodeURIComponent(sessionId));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "session.jsonl.zstd"), Buffer.alloc(2048, 1));
+      const listEvents = vi.fn(async () => {
+        throw new Error("listEvents should not run for a large used session");
+      });
+      const ops = makeOps([], [], listEvents);
+      await expect(
+        ops.inspectSessionActivity(sessionId, cwd, { version: 0, id: sessionId, createdAt: 1, cwd }),
+      ).resolves.toEqual({ ok: true, lastUserMessageTime: 1 });
+      expect(listEvents).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = previous;
+      slog.clearSessionLogCache();
+    }
   });
 
   it("keeps everything when nothing is archived", async () => {
