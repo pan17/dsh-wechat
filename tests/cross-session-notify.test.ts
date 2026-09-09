@@ -77,6 +77,10 @@ function makeBridgeWithConfig(cards: boolean, tasks: boolean) {
   // Ensure watchedSessions includes sess-B for turn/end recipient resolution.
   state.watchSession("u1", "sess-B");
   (bridge as any).token = { baseUrl: "https://x", token: "t" };
+  // Card/task labels use the cheap title path (`ops.readSessionTitle`), not
+  // host `sessionQuery.readTitle()`.
+  (bridge as any).ops.readSessionTitle = async (id: string) =>
+    id === "sess-B" ? "后台任务" : "当前会话";
   return bridge as any;
 }
 
