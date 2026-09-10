@@ -310,6 +310,18 @@ export class WeChatDSHBridge {
    */
   private readonly lastActivityBySession = new Map<string, number>();
   /**
+   * The most recent numbered session list per WeChat user. Keeping the exact
+   * ids (rather than only its scope) lets a following shorthand `/s switch
+   * <n>` select the row the user actually saw, even if recency changes before
+   * the switch arrives. Explicit `/s switch current <n>` bypasses this
+   * ephemeral snapshot and resolves the current scope afresh.
+   */
+  private readonly lastSessionListByUser = new Map<string, {
+    scope?: "current";
+    cwd: string;
+    sessionIds: string[];
+  }>();
+  /**
    * Per-session message-source tracking for the dynamic WeChat surface
    * prompt: the most recent user-message origin per session ("wechat" when
    * the last user message was injected from WeChat, "gui" when it came from
@@ -2604,6 +2616,7 @@ export class WeChatDSHBridge {
    * (the next user message will create one — this method does not mint).
    */
   private async switchUserWorkspace(user: UserState, workspacePath: string): Promise<string> {
+    this.lastSessionListByUser.delete(user.userId);
     user.cwd = workspacePath;
     user.cwdExplicit = true;
     user.sessionId = "";
@@ -2641,40 +2654,73 @@ export class WeChatDSHBridge {
     return `${cleanSessionTitle(raw)}（${sessionId}）`;
   }
 
+  /**
+   * Resolve the same recency-ordered session set for both `/s list` and
+   * `/s switch`. `scope` is explicit on the command so `list current` cannot
+   * accidentally be paired with the unfiltered switch list.
+   */
+  private async listRecentSessions(user: UserState, scope?: "current") {
+    const sessions = await this.ops.listSessions();
+    const scoped = scope === "current"
+      ? sessions.filter((record) => record.header.cwd === user.cwd)
+      : sessions;
+
+    // Cold-start recency: avoid inspecting every complete session log. Live
+    // agents / projection cache / a newest-first tail read are sufficient.
+    await Promise.all(
+      scoped.map(async (record) => {
+        if (this.lastActivityBySession.has(record.header.id)) return;
+        const time = await this.ops.lastUserMessageTime(record.header.id, record.header.cwd, record.header);
+        if (time !== undefined) this.lastActivityBySession.set(record.header.id, time);
+      }),
+    );
+
+    return [...scoped].sort((a, b) => this.sessionActivityTime(b) - this.sessionActivityTime(a));
+  }
+
+  /**
+   * Resolve a shorthand switch against the exact rows from the last list.
+   * Return `undefined` when the snapshot is unavailable or no longer valid;
+   * the caller then falls back to a fresh all-session list.
+   */
+  private async sessionsFromLastList(user: UserState) {
+    const snapshot = this.lastSessionListByUser.get(user.userId);
+    if (!snapshot || snapshot.sessionIds.length === 0) return undefined;
+    if (snapshot.scope === "current" && snapshot.cwd !== user.cwd) return undefined;
+
+    const current = await this.ops.listSessions();
+    const byId = new Map(current.map((record) => [record.header.id, record]));
+    const rows = snapshot.sessionIds
+      .map((id) => byId.get(id))
+      .filter((record): record is NonNullable<typeof record> => record !== undefined);
+    return rows.length === snapshot.sessionIds.length ? rows : undefined;
+  }
+
   private async handleSessionCommand(userId: string, cmd: SessionCommand): Promise<void> {
     const user = this.ensureBoundUser(userId);
     switch (cmd.kind) {
       case "list": {
-        const sessions = await this.ops.listSessions();
-        if (sessions.length === 0) {
-          await this.sendReply(userId, "💬 暂无会话。发送消息即可创建第一个会话。");
+        // Both display and switching use this same scoped, recency-ordered
+        // source. `/s list current` advertises the explicit scoped switch
+        // form so its row numbers cannot be interpreted against all sessions.
+        const allRecent = await this.listRecentSessions(user, cmd.scope);
+        this.lastSessionListByUser.set(user.userId, {
+          scope: cmd.scope,
+          cwd: user.cwd,
+          sessionIds: allRecent.map((record) => record.header.id),
+        });
+        const recent = allRecent.slice(0, 20);
+        if (recent.length === 0) {
+          await this.sendReply(
+            userId,
+            cmd.scope === "current"
+              ? `💬 当前工作目录（${user.cwd}）下暂无会话。发送消息即可创建第一个会话。`
+              : "💬 暂无会话。发送消息即可创建第一个会话。",
+          );
           return;
         }
-        // `/s list current` narrows to sessions of the current working
-        // directory; plain `/s list` shows every session.
-        const scoped = cmd.scope === "current"
-          ? sessions.filter((r) => r.header.cwd === user.cwd)
-          : sessions;
-        if (scoped.length === 0) {
-          await this.sendReply(userId, `💬 当前工作目录（${user.cwd}）下暂无会话。发送消息即可创建第一个会话。`);
-          return;
-        }
-        // Cold-start recency: never `listEvents()` the whole roster (that
-        // inspects every complete log). Live agents / projection cache /
-        // a newest-first tail read are enough to sort; only the 20 rows
-        // we render then pay for title+preset.
-        await Promise.all(
-          scoped.map(async (r) => {
-            if (this.lastActivityBySession.has(r.header.id)) return;
-            const t = await this.ops.lastUserMessageTime(r.header.id, r.header.cwd, r.header);
-            if (t !== undefined) this.lastActivityBySession.set(r.header.id, t);
-          }),
-        );
-        const recent = scoped
-          .sort((a, b) => this.sessionActivityTime(b) - this.sessionActivityTime(a))
-          .slice(0, 20);
         const lines = [cmd.scope === "current"
-          ? `💬 最近会话（${user.cwd}，/session switch <编号> 切换）`
+          ? `💬 最近会话（${user.cwd}，/session switch current <编号> 切换）`
           : "💬 最近会话（按最近活动排序，/session switch <编号> 切换）"];
         // One log fold per displayed row (title + live preset). A second
         // `/s list` is a stat: session-log.cjs caches by (path, size, mtime).
@@ -2706,23 +2752,29 @@ export class WeChatDSHBridge {
         return;
       }
       case "switch": {
-        const sessions = await this.ops.listSessions();
-        // Same cheap recency fill as `/s list`, so the number the user
-        // just saw still maps to the same row after a restart.
-        await Promise.all(
-          sessions.map(async (r) => {
-            if (this.lastActivityBySession.has(r.header.id)) return;
-            const t = await this.ops.lastUserMessageTime(r.header.id, r.header.cwd, r.header);
-            if (t !== undefined) this.lastActivityBySession.set(r.header.id, t);
-          }),
-        );
-        const recent = sessions.sort((a, b) => this.sessionActivityTime(b) - this.sessionActivityTime(a));
+        // An explicit scope is resolved afresh. For the shorthand form, first
+        // use the exact rows from the latest `/s list` (so `/s list current`
+        // followed by `/s switch <n>` keeps working), then fall back to the
+        // historical all-session list when no snapshot exists.
+        const recent = cmd.scope !== undefined
+          ? await this.listRecentSessions(user, cmd.scope)
+          : (await this.sessionsFromLastList(user)) ?? await this.listRecentSessions(user);
+        if (recent.length === 0) {
+          await this.sendReply(
+            userId,
+            cmd.scope === "current"
+              ? `⚠️ 当前工作目录（${user.cwd}）下暂无会话。`
+              : "⚠️ 暂无可切换的会话。",
+          );
+          return;
+        }
         const index = cmd.index;
         if (index < 1 || index > recent.length) {
           await this.sendReply(userId, `⚠️ 编号超出范围（1-${recent.length}）。`);
           return;
         }
         const record = recent[index - 1]!;
+        this.lastSessionListByUser.delete(user.userId);
         user.sessionId = record.header.id;
         if (record.header.cwd) {
           user.cwd = record.header.cwd;
@@ -2810,6 +2862,7 @@ export class WeChatDSHBridge {
     userId: string,
     wording?: { success: string },
   ): Promise<void> {
+    this.lastSessionListByUser.delete(user.userId);
     user.sessionId = "";
     this.state.update(user.userId, { sessionId: "" });
     const { agent } = await this.agents.ensure(user);

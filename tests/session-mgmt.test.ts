@@ -467,4 +467,37 @@ describe("/session switch reports the session name", () => {
     expect(body).toContain("已切换到会话 最新会话（session-new） — C:\\work");
     expect(body).toContain("Agent");
   });
+
+  it("keeps the current scope when switching after list current", async () => {
+    const anyBridge = bridge as unknown as {
+      state: {
+        ensureUser(u: string, c: string): { userId: string; cwd: string; sessionId: string; silent: boolean };
+        getUser(u: string): { userId: string; cwd: string; sessionId: string };
+      };
+      ops: {
+        listSessions(): Promise<Array<{ header: { id: string; createdAt: number; cwd?: string } }>>;
+        lastUserMessageTime(id: string, cwd?: string, header?: unknown): Promise<number | undefined>;
+        readSessionTitle(id: string): Promise<string | undefined>;
+      };
+      handleSessionCommand(
+        u: string,
+        cmd: { kind: "list"; scope?: "current" } | { kind: "switch"; index: number; scope?: "current" },
+      ): Promise<void>;
+    };
+    anyBridge.ops.listSessions = async () => [
+      { header: { id: "other-new", createdAt: 300, cwd: "D:\\other" } },
+      { header: { id: "current-new", createdAt: 200, cwd: "C:\\work" } },
+      { header: { id: "current-old", createdAt: 100, cwd: "C:\\work" } },
+    ];
+    anyBridge.ops.lastUserMessageTime = async () => undefined;
+    anyBridge.ops.readSessionTitle = async (id: string) => id;
+    const user = anyBridge.state.ensureUser("u1", "C:\\work");
+
+    await anyBridge.handleSessionCommand("u1", { kind: "list", scope: "current" });
+    await anyBridge.handleSessionCommand("u1", { kind: "switch", index: 1 });
+
+    expect(user.sessionId).toBe("current-new");
+    expect(user.cwd).toBe("C:\\work");
+    expect(String(sendTextMessage.mock.calls[1]?.[1])).toContain("current-new");
+  });
 });

@@ -99,6 +99,8 @@ describe("slash parsers", () => {
     expect(parseSessionCommand("/s new")).toEqual({ kind: "new" });
     expect(parseSessionCommand("/session status")).toEqual({ kind: "status" });
     expect(parseSessionCommand("/session switch 3")).toEqual({ kind: "switch", index: 3 });
+    expect(parseSessionCommand("/s switch current 3")).toEqual({ kind: "switch", index: 3, scope: "current" });
+    expect(parseSessionCommand("/s switch current")).toBeNull();
     expect(parseSessionCommand("/s switch abc")).toBeNull();
     expect(parseSessionCommand("/session")).toBeNull();
   });

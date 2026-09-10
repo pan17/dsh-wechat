@@ -226,7 +226,7 @@ export type WorkspaceCommand =
 
 export type SessionCommand =
   | { kind: "list"; scope?: "current" }
-  | { kind: "switch"; index: number }
+  | { kind: "switch"; index: number; scope?: "current" }
   | { kind: "new" }
   | { kind: "status" };
 
@@ -282,7 +282,11 @@ export function parseWorkspaceCommand(text: string): WorkspaceCommand | null {
 
 /**
  * Parse `/session` (alias `/s`):
- *   list [current] | switch <n> | new | status
+ *   list [current] | switch [current] <n> | new | status
+ *
+ * `switch current <n>` selects the same current-working-directory scope as
+ * `list current`; the explicit scope keeps the command deterministic instead
+ * of relying on a hidden "last list" state.
  */
 export function parseSessionCommand(text: string): SessionCommand | null {
   const trimmed = text.trim();
@@ -300,6 +304,10 @@ export function parseSessionCommand(text: string): SessionCommand | null {
     case "status":
       return { kind: sub };
     case "switch": {
+      const scoped = rest.match(/^current\s+(\d+)$/);
+      if (scoped) {
+        return { kind: "switch", index: parseInt(scoped[1]!, 10), scope: "current" };
+      }
       if (!/^\d+$/.test(rest)) return null;
       return { kind: "switch", index: parseInt(rest, 10) };
     }
@@ -599,7 +607,7 @@ export function formatHelp(
     "• /help (h, ?) — 显示帮助",
     "• /status — 当前会话、工作区、Agent、待处理卡、默认/当前会话 Preset、模型状态",
     "• /workspace (ws) — list | status | switch <路径|编号> | add <路径>",
-    "• /session (s) — list [current] | switch <编号> | new | status",
+    "• /session (s) — list [current] | switch [current] <编号> | new | status",
     "• /preset (p) — list | switch <名称|编号> | status（默认 preset，与 GUI 同步；status 看全局默认，不是当前会话）",
     "• /model — list [提供商] | switch <提供商/模型> | status",
     "• /perm (permission) — status | list | switch <名称|编号> | default [名称|编号]（会话权限实时切换；默认写入 DSH 设置，与 GUI 同步）",
