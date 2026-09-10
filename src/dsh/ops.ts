@@ -158,20 +158,21 @@ export interface AgentDefaultModelService {
   saveSelection(next: ModelSelection): Promise<void>;
 }
 
-/** One session event as consumed by the permission fold (structural shape). */
-export interface SessionEventLike {
-  readonly type: string;
-  readonly data?: unknown;
-}
-
 /** Minimal structural surface of the `permissionPresets` service (dsh-permission-presets). */
 export interface PermissionPresetsService {
   /** Advertised preset names, in table declaration order. */
   readonly names: readonly string[];
   /** Preset selected as the default for future sessions (settings-first). */
   readonly defaultPreset: string;
-  /** Effective preset for a session's event log, or `custom` when nothing matches. */
-  current(events: readonly SessionEventLike[]): string;
+  /**
+   * Effective preset for one session, or `custom` when nothing matches.
+   * The host folds `sessionProjections.stateOf(session, "permissions")`
+   * (host signature `current(session: Session): string`, since
+   * dsh 0.1.2-alpha.2), so this face takes the live Session — an event
+   * array makes the host throw `permission: permissions session
+   * projection is not registered`.
+   */
+  current(session: unknown): string;
   /** Switch one session's permission preset (records events + writes knobs). */
   set(session: unknown, name: string): void;
   /** Resolve a preset's knob bundle. */

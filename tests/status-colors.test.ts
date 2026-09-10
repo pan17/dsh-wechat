@@ -25,6 +25,9 @@ import fs from "node:fs";
 const sendTextMessage = vi.fn().mockResolvedValue(undefined);
 const sendMediaMessage = vi.fn().mockResolvedValue(undefined);
 
+/** Last argument `permissionPresets.current()` received (host contract: the Session). */
+let permissionCurrentArg: unknown;
+
 vi.mock("../src/weixin/send.js", () => ({
   sendTextMessage: (...args: unknown[]) => sendTextMessage(...args),
   sendMediaMessage: (...args: unknown[]) => sendMediaMessage(...args),
@@ -77,7 +80,18 @@ function makeBridge(opts: BridgeOpts = {}) {
   };
   const permissionService = agentOpts.permission
     ? {
-        current: (_events: unknown[]) => agentOpts.permission!,
+        // Mirror the host contract (`current(session: Session)`): the host
+        // folds `sessionProjections.stateOf(session, "permissions")`, so an
+        // event array throws there. Recording the argument lets a test also
+        // assert which shape the bridge passes.
+        current: (session: unknown) => {
+          permissionCurrentArg = session;
+          const shape = session as { header?: unknown } | null;
+          if (shape === null || typeof shape !== "object" || Array.isArray(shape) || shape.header === undefined) {
+            throw new Error("permission: permissions session projection is not registered");
+          }
+          return agentOpts.permission!;
+        },
         names: [agentOpts.permission!],
       }
     : undefined;
@@ -206,6 +220,17 @@ describe("/status — emoji color markers", () => {
     );
     expect(safe).toContain("• 权限: safe-read-only");
     expect(safe).not.toContain("🔴 safe-read-only");
+  });
+
+  it("权限 row passes the live Session to permissionPresets.current (not an event array)", async () => {
+    permissionCurrentArg = undefined;
+    const bridge = makeBridge({ agent: { agentStatus: "idle", permission: "workspace-write" } });
+
+    const text = await runStatus(bridge);
+
+    expect(text).toContain("• 权限: workspace-write");
+    expect(Array.isArray(permissionCurrentArg)).toBe(false);
+    expect(permissionCurrentArg).toMatchObject({ id: "wx-1", header: { agentPreset: "std" } });
   });
 
   it("pending cards row is prefixed with a red marker", async () => {
