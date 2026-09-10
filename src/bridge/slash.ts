@@ -482,30 +482,52 @@ export function parseEnterCommand(text: string): EnterCommand | null {
 export const HISTORY_DEFAULT = 5;
 export const HISTORY_MAX = 20;
 
-export type HistoryCommand = { kind: "history"; count: number };
+export type HistoryCommand = { kind: "history"; count: number; includeSystem: boolean };
 
 /**
- * Parse `/history [N]` — view recent conversation history.
- *   /history        → 5 (default)
- *   /history 10     → 10
- *   /history 30     → 20 (clamped to HISTORY_MAX)
+ * Parse `/history [all] [N]` — view recent conversation history.
+ *   /history            → 5 human+assistant turns (default)
+ *   /history 10         → 10
+ *   /history all        → 5, including synthesized system injections
+ *   /history all 10     → 10, including system
+ *   /history 10 all     → same as `all 10`
+ *   /history 30         → 20 (clamped to HISTORY_MAX)
  *
- * Returns null for: invalid number (non-integer, <=0, NaN), extra
- * trailing garbage that is not a number, or non-history prefix.
- * The caller detects a leading `/history` with an invalid arg and
- * replies with usage instead of forwarding to the agent.
+ * Returns null for: invalid tokens, non-integer / <=0 counts, extra
+ * trailing garbage, or a non-history prefix. The caller detects a
+ * leading `/history` with an invalid arg and replies with usage
+ * instead of forwarding to the agent.
  */
 export function parseHistoryCommand(text: string): HistoryCommand | null {
   const trimmed = text.trim();
   const m = trimmed.match(/^\/history(?:\s+(.*))?$/i);
   if (!m) return null;
   const rest = (m[1] ?? "").trim();
-  if (!rest) return { kind: "history", count: HISTORY_DEFAULT };
-  // Only a single integer token is allowed; anything else is invalid.
-  if (!/^\d+$/.test(rest)) return null;
-  const n = parseInt(rest, 10);
+  if (!rest) return { kind: "history", count: HISTORY_DEFAULT, includeSystem: false };
+
+  const tokens = rest.split(/\s+/);
+  let includeSystem = false;
+  let countToken: string | undefined;
+  for (const token of tokens) {
+    if (/^all$/i.test(token)) {
+      if (includeSystem) return null;
+      includeSystem = true;
+      continue;
+    }
+    if (/^\d+$/.test(token)) {
+      if (countToken !== undefined) return null;
+      countToken = token;
+      continue;
+    }
+    return null;
+  }
+
+  if (countToken === undefined) {
+    return { kind: "history", count: HISTORY_DEFAULT, includeSystem };
+  }
+  const n = parseInt(countToken, 10);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return { kind: "history", count: Math.min(n, HISTORY_MAX) };
+  return { kind: "history", count: Math.min(n, HISTORY_MAX), includeSystem };
 }
 
 /**
@@ -616,7 +638,7 @@ export function formatHelp(
     "• /silent on|off (sl) — 静默模式：只发送每轮最终回复",
     "• /surface on|off|status (wxprompt) — 微信渠道提示词注入开关（默认关；正文在设置页编辑）",
     "• /notify on|off|status (watch) — 跨会话决策推送：权限/提问卡整卡（默认关闭）；/notify tasks on|off 后台任务完成/报错提醒",
-    "• /history [数量] — 查看最近历史消息（默认 5 条，最多 20 条）；有待处理卡时会完整重发",
+    "• /history [all] [数量] — 查看最近历史（默认 5 条，最多 20 条；默认只看你和助手，all 含压缩/注入等系统消息）；有待处理卡时会完整重发",
     "• /stop — 中断当前任务",
     "• /next — 继续发送因微信限制被缓存的消息",
     "• /rq — 关闭当前会话的待处理卡；其它会话用 P1=/rq",

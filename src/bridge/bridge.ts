@@ -1313,7 +1313,10 @@ export class WeChatDSHBridge {
       }
       // Invalid /history attempt (e.g. /history abc) — show usage instead of forwarding.
       if (isHistoryCommandAttempt(text)) {
-        await this.sendReply(userId, `⚠️ 用法: /history [数量]（1-${HISTORY_MAX}，默认 5）例如 /history 10`);
+        await this.sendReply(
+          userId,
+          `⚠️ 用法: /history [all] [数量]（1-${HISTORY_MAX}，默认 5）例如 /history 10 或 /history all`,
+        );
         return;
       }
 
@@ -3098,10 +3101,12 @@ export class WeChatDSHBridge {
   // ─── History ──────────────────────────────────────────────────────────────
 
   /**
-   * `/history [N]` — show the most recent N conversation entries of the
-   * current session (default 5, max 20). Each entry is rendered as
-   * `序号 [时间] 角色: 文本摘要`, oldest→newest, with per-entry truncation
-   * at 300 chars to stay within WeChat limits.
+   * `/history [all] [N]` — show the most recent N conversation entries of
+   * the current session (default 5, max 20). Default lists only human and
+   * assistant turns; `all` also includes synthesized system injections
+   * (compaction checkpoints, plugin context, goal rounds). Each entry is
+   * Each entry is its own block (`角色 · 时间` then the original body),
+   * oldest→newest, so it reads closer to a live WeChat message than a dump.
    */
   private async handleHistoryCommand(userId: string, cmd: HistoryCommand, user: UserState): Promise<void> {
     if (!user.sessionId) {
@@ -3109,9 +3114,11 @@ export class WeChatDSHBridge {
       return;
     }
     const count = Math.max(1, Math.min(cmd.count, HISTORY_MAX));
-    let entries: Array<{ role: "user" | "assistant"; text: string; time: number }>;
+    let entries: Array<{ role: "user" | "assistant" | "system"; text: string; time: number }>;
     try {
-      entries = await this.ops.getSessionHistory(user.sessionId, count);
+      entries = await this.ops.getSessionHistory(user.sessionId, count, {
+        includeSystem: cmd.includeSystem,
+      });
     } catch (err) {
       console.warn(`[dsh-wechat] getSessionHistory failed: ${String(err)}`);
       await this.sendReply(userId, `⚠️ 读取历史失败：${String(err)}`);
@@ -3134,9 +3141,9 @@ export class WeChatDSHBridge {
         }
       }
       const lines: string[] = [`📜 最近 ${entries.length} 条历史${entries.length >= HISTORY_MAX && count >= HISTORY_MAX ? "（最多展示 20 条）" : ""}`];
-      lines.push("");
       entries.forEach((e, i) => {
-        const roleLabel = e.role === "user" ? "你" : "助手";
+        const roleLabel =
+          e.role === "user" ? "👤 你" : e.role === "system" ? "⚙️ 系统" : "🤖 助手";
         const when = e.time ? this.formatRelativeTime(e.time) : "未知时间";
         const keepFull = i === lastAssistantIdx;
         const body = keepFull
@@ -3144,11 +3151,10 @@ export class WeChatDSHBridge {
           : e.text.length > HISTORY_TEXT_LIMIT
             ? e.text.slice(0, HISTORY_TEXT_LIMIT - 1) + "…"
             : e.text;
-        const compact = body.replace(/\s*\n\s*/g, " ").replace(/\s{2,}/g, " ").trim();
-        lines.push(`${i + 1}. [${when}] ${roleLabel}: ${compact}`);
+        lines.push(`${roleLabel} · ${when}\n${body.trimEnd()}`);
       });
-      lines.push("", `提示: /history [1-${HISTORY_MAX}] 查看不同条数（默认 5）`);
-      await this.sendReply(userId, lines.join("\n"));
+      lines.push(`提示: /history all 含系统消息；/history [1-${HISTORY_MAX}] 换条数（默认 5）`);
+      await this.sendReply(userId, lines.join("\n\n"));
     }
     await this.resendPendingCardsForHistory(userId);
   }

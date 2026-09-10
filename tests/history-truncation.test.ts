@@ -109,6 +109,18 @@ describe("/history per-entry truncation", () => {
     expect(texts.join("\n")).not.toContain("…");
   });
 
+  it("renders each entry as a role header plus the original body", async () => {
+    const bridge = makeBridge([
+      userEventWithText("第一行\n第二行", 1000),
+      assistantEventWithText("助手第一行\n助手第二行", 2000),
+    ]);
+    const text = (await runHistory(bridge)).join("\n");
+    expect(text).toMatch(/👤 你 · .+\n第一行\n第二行/);
+    expect(text).toMatch(/🤖 助手 · .+\n助手第一行\n助手第二行/);
+    expect(text).not.toContain("你:");
+    expect(text).not.toContain("助手:");
+  });
+
   it("truncates non-last entries > 800 chars to 800 + …", async () => {
     // Two assistant events so the long one is NOT the latest — must truncate.
     const long = "x".repeat(1500);
@@ -120,19 +132,14 @@ describe("/history per-entry truncation", () => {
     const text = texts.join("\n");
     // The earlier (long) entry's body line ends at a newline.
     const lines = text.split("\n");
-    const truncatedLine = lines.find((l) => l.includes("助手: ") && l.includes("…"));
-    expect(truncatedLine).toBeDefined();
-    // body shape: "1. [时间] 助手: <truncated>"
-    const m = truncatedLine!.match(/助手: ([^\n]*)/);
-    expect(m).not.toBeNull();
-    const body = m![1]!;
+    const truncatedBody = lines.find((l) => l.includes("…") && l.startsWith("x"));
+    expect(truncatedBody).toBeDefined();
     // slice(0, LIMIT - 1) + "…" = 799 + 1 = 800 chars.
-    expect(body.length).toBe(800);
-    expect(body.endsWith("…")).toBe(true);
-    expect(body.startsWith("x".repeat(50))).toBe(true);
-    expect(body.length).toBeGreaterThan(500);
-    // The latest assistant line is untruncated.
-    expect(text).toContain("助手: 最新回复，简短。");
+    expect(truncatedBody!.length).toBe(800);
+    expect(truncatedBody!.endsWith("…")).toBe(true);
+    expect(truncatedBody!.startsWith("x".repeat(50))).toBe(true);
+    expect(text).toContain("🤖 助手");
+    expect(text).toContain("最新回复，简短。");
   });
 
   it("the latest assistant message is exempt from truncation even when long", async () => {
@@ -141,11 +148,9 @@ describe("/history per-entry truncation", () => {
     const texts = await runHistory(bridge);
     const text = texts.join("\n");
     // The single assistant is the latest → body must NOT carry "…".
-    const lineMatch = text.match(/助手: ([^\n]*)/);
-    expect(lineMatch).not.toBeNull();
-    const body = lineMatch![1]!;
-    expect(body).not.toContain("…");
-    expect(body.length).toBeGreaterThanOrEqual(1500);
+    expect(text).toContain("🤖 助手");
+    expect(text).toContain("x".repeat(1500));
+    expect(text).not.toContain("…");
   });
 
   it("the latest assistant is untruncated even when followed by a user message", async () => {
@@ -156,14 +161,11 @@ describe("/history per-entry truncation", () => {
     ]);
     const texts = await runHistory(bridge);
     const text = texts.join("\n");
-    // Find the assistant line — it must be untruncated.
-    const lineMatch = text.match(/助手: ([^\n]*)/);
-    expect(lineMatch).not.toBeNull();
-    const assistantBody = lineMatch![1]!;
-    expect(assistantBody).not.toContain("…");
-    expect(assistantBody.length).toBeGreaterThanOrEqual(1500);
-    // The user line is short → passes through.
-    expect(text).toContain("你: 用户的追问");
+    expect(text).toContain("🤖 助手");
+    expect(text).toContain("y".repeat(1500));
+    expect(text).not.toContain("…");
+    expect(text).toContain("👤 你");
+    expect(text).toContain("用户的追问");
   });
 
   it("history-with-cards still runs alongside the truncation exemption", async () => {
@@ -183,7 +185,7 @@ describe("/history per-entry truncation", () => {
     const texts = await runHistory(bridge);
     expect(texts.some((t) => t.includes("Continue?"))).toBe(true);
     // The untruncated latest assistant reply still flows through (no "…").
-    expect(texts.some((t) => /助手: x{1500}/.test(t))).toBe(true);
+    expect(texts.some((t) => t.includes("🤖 助手") && /x{1500}/.test(t))).toBe(true);
   });
 
   it("reads live history from snapshotEvents when the events array is absent (DSH 0.1.5)", async () => {

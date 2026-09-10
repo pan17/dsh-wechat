@@ -134,7 +134,8 @@ export type SessionLogActivity =
   | { ok: false; error: string };
 
 export interface HistoryEntry {
-  role: "user" | "assistant";
+  /** `system` is a synthesized user-role message (compact / plugin / goal / recall). */
+  role: "user" | "assistant" | "system";
   text: string;
   time: number;
 }
@@ -591,42 +592,83 @@ export class DshOps {
   }
 
   /**
-   * Retrieve the most recent `limit` conversation entries (user + assistant)
-   * for `sessionId`, ordered oldest→newest.
+   * Classify one `user/message` payload as a genuine human turn or a
+   * synthesized system injection.
+   *
+   * The host attributes synthesized user-role messages through
+   * `source.kind` — `plugin` (context injections / compaction
+   * checkpoints), `goal` (goal rounds), `session-reference` (recalls),
+   * `agent-message` (relays). The GUI sidebar lists only `kind === "user"`
+   * (session-turn-outline). Legacy payloads without a source stay human
+   * so nothing real is hidden. Nested `data.message.source` is accepted
+   * alongside the host's flat `data.source`.
+   */
+  private userMessageRole(data: unknown): "user" | "system" {
+    if (!data || typeof data !== "object") return "user";
+    const d = data as Record<string, unknown>;
+    const direct = (d.source as { kind?: unknown } | undefined)?.kind;
+    const nested = ((d.message as Record<string, unknown> | undefined)?.source as { kind?: unknown } | undefined)?.kind;
+    const kind = direct ?? nested;
+    return kind === undefined || kind === "user" ? "user" : "system";
+  }
+
+  /** Fold chronological history entries out of surface or raw-log events. */
+  private historyEntries(
+    events: readonly { type: string; time?: number; data?: unknown }[],
+  ): HistoryEntry[] {
+    const entries: HistoryEntry[] = [];
+    for (const ev of events) {
+      if (ev.type !== "user/message" && ev.type !== "assistant/message") continue;
+      const text = this.extractHistoryText(ev.data);
+      if (!text) continue;
+      const role = ev.type === "user/message" ? this.userMessageRole(ev.data) : "assistant" as const;
+      entries.push({ role, text, time: typeof ev.time === "number" ? ev.time : Date.now() });
+    }
+    return entries;
+  }
+
+  private takeHistoryWindow(entries: HistoryEntry[], cap: number, includeSystem: boolean): HistoryEntry[] {
+    const visible = includeSystem ? entries : entries.filter((e) => e.role !== "system");
+    return visible.slice(-cap);
+  }
+
+  /**
+   * Retrieve the most recent `limit` conversation entries for `sessionId`,
+   * ordered oldest→newest.
    *
    * Strategy:
    *  1. Try in-memory `session.snapshotEvents()` (0.1.5) or the legacy
    *     `session.events` array via `ctx.get("agents")` — fast, no I/O,
    *     survives even when `sessionQuery` is unavailable.
-   *  2. Fall back to persisted `sessionQuery.listEvents(sessionId)` — works
-   *     after restart or when agent is not live.
+   *  2. Fall back to persisted `sessionQuery.readSession(sessionId)` (full
+   *     raw log with `data`). `listEvents` is metadata-only since 0.1.2
+   *     and cannot reconstruct text.
    *
-   * Filters to `user/message` (role=user) and `assistant/message`
-   * (role=assistant). Other event types (tool results, system, etc.) are
-   * ignored to keep the WeChat view concise.
+   * Folds `user/message` and `assistant/message`. Synthesized user-role
+   * messages (see {@link userMessageRole}) are tagged `system` and omitted
+   * unless `includeSystem` is set. Other event types (tool results, true
+   * `system/message`, etc.) stay out of the WeChat view.
    *
    * Returns `[]` on any error or when no history exists — caller renders
    * a friendly empty-state message.
    */
-  async getSessionHistory(sessionId: string, limit: number): Promise<HistoryEntry[]> {
+  async getSessionHistory(
+    sessionId: string,
+    limit: number,
+    opts?: { includeSystem?: boolean },
+  ): Promise<HistoryEntry[]> {
     const cap = Math.max(1, Math.min(limit, 20));
+    const includeSystem = opts?.includeSystem === true;
     // 1) In-memory fast path
     try {
       const agents = this.get<{ get(id: string): { session?: AgentSession } | undefined }>("agents");
       const agent = agents?.get(sessionId);
       const events = sessionEvents(agent?.session);
       if (events.length > 0) {
-        const entries: HistoryEntry[] = [];
-        for (const ev of events) {
-          if (ev.type !== "user/message" && ev.type !== "assistant/message") continue;
-          const text = this.extractHistoryText(ev.data);
-          if (!text) continue;
-          const role = ev.type === "user/message" ? "user" as const : "assistant" as const;
-          entries.push({ role, text, time: typeof ev.time === "number" ? ev.time : Date.now() });
-        }
+        const entries = this.takeHistoryWindow(this.historyEntries(events), cap, includeSystem);
         if (entries.length > 0) {
           // events are already in chronological order (ascending seq)
-          return entries.slice(-cap);
+          return entries;
         }
       }
     } catch {
@@ -645,15 +687,7 @@ export class DshOps {
       } else {
         records = await query.listEvents(sessionId);
       }
-      const entries: HistoryEntry[] = [];
-      for (const r of records) {
-        if (r.type !== "user/message" && r.type !== "assistant/message") continue;
-        const text = this.extractHistoryText(r.data);
-        if (!text) continue;
-        const role = r.type === "user/message" ? "user" as const : "assistant" as const;
-        entries.push({ role, text, time: typeof r.time === "number" ? r.time : Date.now() });
-      }
-      return entries.slice(-cap);
+      return this.takeHistoryWindow(this.historyEntries(records), cap, includeSystem);
     } catch {
       return [];
     }
