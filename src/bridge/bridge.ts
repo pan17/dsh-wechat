@@ -3385,14 +3385,17 @@ export class WeChatDSHBridge {
     }
   }
 
-  /** `current()` with a guard: session events may be absent on some shapes. */
+  /**
+   * `current()` with a guard. The host reads the Session's `permissions`
+   * projection (`current(session: Session)`), so the live Session must be
+   * passed; a session without that projection still degrades to `undefined`.
+   */
   private safeCurrent(
-    service: { current(events: readonly { type: string; data?: unknown }[]): string },
+    service: { current(session: unknown): string },
     agent: Agent,
   ): string | undefined {
     try {
-      const events = sessionEvents(agent.session);
-      return service.current(events);
+      return service.current(agent.session);
     } catch {
       return undefined;
     }
