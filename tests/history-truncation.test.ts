@@ -34,12 +34,20 @@ import { WeChatDSHBridge } from "../src/bridge/bridge.js";
 import { defaultConfig } from "../src/config.js";
 
 interface AgentLike {
-  session?: { events?: Array<{ type: string; time?: number; data?: unknown }> };
+  session?: {
+    events?: Array<{ type: string; time?: number; data?: unknown }>;
+    snapshotEvents?: () => Array<{ type: string; time?: number; data?: unknown }>;
+  };
 }
 
-function makeBridge(events: Array<{ type: string; time?: number; data?: unknown }>) {
+function makeBridge(
+  events: Array<{ type: string; time?: number; data?: unknown }>,
+  mode: "events" | "snapshot" = "events",
+) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-hist-"));
-  const agent: AgentLike = { session: { events } };
+  const agent: AgentLike = mode === "snapshot"
+    ? { session: { snapshotEvents: () => events } }
+    : { session: { events } };
   const agentsService = {
     create: async () => undefined,
     resume: async () => undefined,
@@ -176,6 +184,12 @@ describe("/history per-entry truncation", () => {
     expect(texts.some((t) => t.includes("Continue?"))).toBe(true);
     // The untruncated latest assistant reply still flows through (no "…").
     expect(texts.some((t) => /助手: x{1500}/.test(t))).toBe(true);
+  });
+
+  it("reads live history from snapshotEvents when the events array is absent (DSH 0.1.5)", async () => {
+    const bridge = makeBridge([assistantEventWithText("来自 snapshotEvents 的回复")], "snapshot");
+    const texts = await runHistory(bridge);
+    expect(texts.join("\n")).toContain("来自 snapshotEvents 的回复");
   });
 
   it("cold history prefers sessionQuery.readSession when the agent is not live", async () => {

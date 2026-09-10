@@ -37,6 +37,8 @@ async function zstdCompressBuffer(buf: Buffer): Promise<Buffer> {
 const require = createRequire(import.meta.url);
 const log = require("../src/dsh/session-log.cjs") as {
   clearSessionLogCache: () => void;
+  locateSessionLog: (cwd: string, sessionId: string, root?: string) => string | undefined;
+  parseGenerationLogFilename: (filename: string) => number | undefined;
   projectKey: (cwd: string) => string;
   readSessionRuntimePreset: (cwd: string, sessionId: string, root?: string) => string | undefined;
   readSessionRecency: (cwd: string, sessionId: string, root?: string) => number | undefined;
@@ -58,13 +60,15 @@ async function writeLog(opts: {
   sessionId: string;
   headerAgentPreset?: string;
   events?: Array<{ type: string; data?: unknown; time?: number }>;
+  filename?: string;
+  version?: number;
 }) {
-  const { dshHome, cwd, sessionId, headerAgentPreset, events = [] } = opts;
+  const { dshHome, cwd, sessionId, headerAgentPreset, events = [], filename = "session.jsonl.zstd", version = 0 } = opts;
   const dir = path.join(dshHome, "sessions", log.projectKey(cwd), encodeURIComponent(sessionId));
   fs.mkdirSync(dir, { recursive: true });
   const header = JSON.stringify({
     type: "session",
-    version: 0,
+    version,
     id: sessionId,
     createdAt: Date.now(),
     cwd,
@@ -74,7 +78,7 @@ async function writeLog(opts: {
   for (const ev of events) {
     frames.push(await zstdCompressBuffer(Buffer.from(JSON.stringify(ev) + "\n")));
   }
-  fs.writeFileSync(path.join(dir, "session.jsonl.zstd"), Buffer.concat(frames));
+  fs.writeFileSync(path.join(dir, filename), Buffer.concat(frames));
 }
 
 async function appendFrame(opts: {
@@ -247,5 +251,77 @@ describe("session-log runtime preset cache", () => {
       event: { type: "agent-preset/selected", data: { agentPreset: "minimal" } },
     });
     expect(log.readSessionRuntimePreset(cwd, "s-flip", dshHome)).toBe("minimal");
+  });
+});
+
+describe("session-log generation filenames (DSH 0.1.5 V3)", () => {
+  it("parseGenerationLogFilename accepts canonical names only", () => {
+    expect(log.parseGenerationLogFilename("session.jsonl")).toBe(0);
+    expect(log.parseGenerationLogFilename("session.jsonl.zstd")).toBe(0);
+    expect(log.parseGenerationLogFilename("session.v2.jsonl.zstd")).toBe(2);
+    expect(log.parseGenerationLogFilename("session.v3.jsonl")).toBe(3);
+    expect(log.parseGenerationLogFilename("session.v0.jsonl.zstd")).toBeUndefined();
+    expect(log.parseGenerationLogFilename("session.v03.jsonl.zstd")).toBeUndefined();
+    expect(log.parseGenerationLogFilename("session.tmp.jsonl.zstd")).toBeUndefined();
+  });
+
+  let dshHome: string;
+  let originalEnv: string | undefined;
+
+  beforeEach(() => {
+    log.clearSessionLogCache();
+    dshHome = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-home-slog-v3-"));
+    originalEnv = process.env.DSH_HOME;
+    process.env.DSH_HOME = dshHome;
+  });
+
+  afterEach(() => {
+    log.clearSessionLogCache();
+    if (originalEnv === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = originalEnv;
+  });
+
+  it("reads a v3 artifact when that is the only generation", async () => {
+    const cwd = "C:\\work";
+    await writeLog({
+      dshHome, cwd, sessionId: "s-v3",
+      headerAgentPreset: "cordis",
+      filename: "session.v3.jsonl.zstd",
+      version: 3,
+      events: [{ type: "user/message", data: { source: { kind: "user" } }, time: 77 }],
+    });
+    expect(log.locateSessionLog(cwd, "s-v3", dshHome)?.endsWith("session.v3.jsonl.zstd")).toBe(true);
+    expect(log.readSessionListFacts(cwd, "s-v3", dshHome)).toEqual({
+      preset: "cordis",
+      title: undefined,
+      lastUserMessageTime: 77,
+    });
+  });
+
+  it("prefers the highest generation when v0 and v3 coexist after migration", async () => {
+    const cwd = "C:\\work";
+    await writeLog({
+      dshHome, cwd, sessionId: "s-mig",
+      headerAgentPreset: "standard",
+      filename: "session.jsonl.zstd",
+      version: 0,
+      events: [{ type: "user/message", data: {}, time: 1 }],
+    });
+    await writeLog({
+      dshHome, cwd, sessionId: "s-mig",
+      headerAgentPreset: "cordis",
+      filename: "session.v3.jsonl.zstd",
+      version: 3,
+      events: [
+        { type: "user/message", data: {}, time: 99 },
+        { type: "session/title", data: { title: "迁移后的会话" } },
+      ],
+    });
+    expect(path.basename(log.locateSessionLog(cwd, "s-mig", dshHome)!)).toBe("session.v3.jsonl.zstd");
+    expect(log.readSessionListFacts(cwd, "s-mig", dshHome)).toEqual({
+      preset: "cordis",
+      title: "迁移后的会话",
+      lastUserMessageTime: 99,
+    });
   });
 });

@@ -4,7 +4,8 @@
  * checks — no runtime imports of `@deepseek-ai/*` packages.
  */
 
-import type { Agent } from "./types.js";
+import type { Agent, AgentSession } from "./types.js";
+import { sessionEvents } from "./types.js";
 import type { SessionProjectionService } from "./types.js";
 import type { BridgeContext } from "./sessions.js";
 
@@ -359,15 +360,18 @@ export class DshOps {
     try {
       const agents = this.get<{
         get(id: string): {
-          session?: {
-            header?: { agentPreset?: string };
-            events?: readonly { type?: string; time?: number; data?: unknown }[];
-          };
+          session?: AgentSession;
         } | undefined;
       }>("agents");
       const session = agents?.get(sessionId)?.session;
-      const events = session?.events;
-      if (!Array.isArray(events)) return { found: false, facts: {} };
+      if (!session) return { found: false, facts: {} };
+      // A live Session object is not enough: 0.1.5 always has one, but
+      // the log is only readable via snapshotEvents() (or the legacy
+      // `events` array). Without either, fall through to disk.
+      if (typeof session.snapshotEvents !== "function" && !Array.isArray(session.events)) {
+        return { found: false, facts: {} };
+      }
+      const events = sessionEvents(session);
       const facts: SessionListFacts = {};
       if (typeof session?.header?.agentPreset === "string" && session.header.agentPreset.length > 0) {
         facts.preset = session.header.agentPreset;
@@ -590,8 +594,9 @@ export class DshOps {
    * for `sessionId`, ordered oldest→newest.
    *
    * Strategy:
-   *  1. Try in-memory `agent.session.events` via `ctx.get("agents")` — fast,
-   *     no I/O, survives even when `sessionQuery` is unavailable.
+   *  1. Try in-memory `session.snapshotEvents()` (0.1.5) or the legacy
+   *     `session.events` array via `ctx.get("agents")` — fast, no I/O,
+   *     survives even when `sessionQuery` is unavailable.
    *  2. Fall back to persisted `sessionQuery.listEvents(sessionId)` — works
    *     after restart or when agent is not live.
    *
@@ -606,10 +611,10 @@ export class DshOps {
     const cap = Math.max(1, Math.min(limit, 20));
     // 1) In-memory fast path
     try {
-      const agents = this.get<{ get(id: string): { session?: { events?: readonly { type: string; time?: number; data?: unknown }[] } } | undefined }>("agents");
+      const agents = this.get<{ get(id: string): { session?: AgentSession } | undefined }>("agents");
       const agent = agents?.get(sessionId);
-      const events = agent?.session?.events;
-      if (Array.isArray(events) && events.length > 0) {
+      const events = sessionEvents(agent?.session);
+      if (events.length > 0) {
         const entries: HistoryEntry[] = [];
         for (const ev of events) {
           if (ev.type !== "user/message" && ev.type !== "assistant/message") continue;

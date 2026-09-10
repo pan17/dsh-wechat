@@ -36,6 +36,7 @@ import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
 import type { ModelSelection } from "../dsh/ops.js";
 import type { Agent, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
+import { sessionEvents } from "../dsh/types.js";
 import {
   MAX_OUTBOUND_QUEUE,
   StateStore,
@@ -2882,7 +2883,7 @@ export class WeChatDSHBridge {
         const saved = await this.ops.saveDefaultPreset(preset.id);
         // Apply to the live session only while it has produced nothing.
         const agent = this.agents.get(user);
-        const empty = agent ? (agent as { session?: { events?: unknown[] } }).session?.events?.length === 0 : true;
+        const empty = agent ? sessionEvents(agent.session).length === 0 : true;
         let applied = "";
         if (agent && empty) {
           const ok = await this.ops.recomposeAgent(
@@ -3337,7 +3338,7 @@ export class WeChatDSHBridge {
     agent: Agent,
   ): string | undefined {
     try {
-      const events = agent.session?.events ?? [];
+      const events = sessionEvents(agent.session);
       return service.current(events);
     } catch {
       return undefined;

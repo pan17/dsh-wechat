@@ -181,7 +181,7 @@ logout`），客户端零 `@deepseek-ai` 依赖。
 ```bash
 npm install
 npm run build    # tsc → dist/
-npm test         # vitest（399 个用例：splitText/格式化/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词）
+npm test         # vitest（splitText/格式化/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词/DSH 0.1.5 适配）
 ```
 
 ## 已知边界

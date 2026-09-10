@@ -218,25 +218,22 @@ export class AgentStore {
  * GUI- or WeChat-created — gets the WeChat prompt exactly while WeChat
  * messages drive it, and never while GUI messages drive it.
  */
-async function agentSetup(agentCtx: unknown): Promise<void> {
+/**
+ * DSH 0.1.5 removed `ctx.agent`; `setup` now receives `(agentCtx, agent)`.
+ * Fall back to the legacy context property so a 0.1.2 host still works.
+ */
+function setupAgent(agentCtx: unknown, agent?: Agent): Agent | undefined {
+  if (agent) return agent;
+  const legacy = (agentCtx as { agent?: Agent } | undefined)?.agent;
+  return legacy;
+}
+
+export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void> {
   const ctx = agentCtx as {
-    agent?: {
-      session?: {
-        header?: { id?: string; agentPreset?: string };
-        requestHeader?: () =>
-          | {
-              config?: {
-                provider?: string;
-                model?: string;
-                reasoningEffort?: string;
-              };
-            }
-          | undefined;
-      };
-    };
     get?: <T = unknown>(name: string) => T | undefined;
     on?: (event: string, listener: (...args: unknown[]) => unknown) => void;
   };
+  const live = setupAgent(agentCtx, agent);
 
   // Preset mount — the GUI's composeAgent equivalent. The session's recorded
   // preset (header.agentPreset, written at creation) decides its tools and
@@ -248,7 +245,7 @@ async function agentSetup(agentCtx: unknown): Promise<void> {
   }>("agentPresets");
   if (presets) {
     try {
-      await presets.mount(agentCtx, ctx.agent?.session?.header?.agentPreset);
+      await presets.mount(agentCtx, live?.session?.header?.agentPreset);
     } catch (err) {
       console.error(`[dsh-wechat] preset mount failed: ${String(err)}`);
     }
@@ -263,7 +260,7 @@ async function agentSetup(agentCtx: unknown): Promise<void> {
   // at runtime, so the two waterfalls replicate `installModelSelection`'s
   // cooperative pattern exactly: snapshot the selection into prompt assembly
   // and apply it to every request config.
-  const logged = ctx.agent?.session?.requestHeader?.()?.config;
+  const logged = live?.session?.requestHeader?.()?.config;
   const defaults = ctx.get?.<{ currentSelection(): ModelSelection }>(
     "agentDefaultModel",
   )?.currentSelection();

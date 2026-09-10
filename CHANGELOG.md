@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-09-10
+
+### Changed
+
+- 适配 DSH **0.1.5-rc.1**：`setup(agentCtx, agent)` 使用显式 Agent（`ctx.agent` 已移除）；仍兼容旧 host 把 Agent 挂在 context 上的单参数调用。
+- 会话 raw-log 读取按代选择最高 `session.vN.jsonl[.zstd]`（当前为 v3）。迁移后 v0 源文件会留在目录里，不再误读旧代。
+- 热路径日志优先 `session.snapshotEvents()`（0.1.5 公开 API），没有时再回落到旧的 `session.events` 数组。`/history`、`/s list`、`/preset switch` 空白判断、权限 `current()` 共用这一层。
+- `engines.dsh` 提高到 `>=0.1.5-rc.1`。低于此版本的 DSH 安装时会被 `dsh plugin add` 拒绝。
+
 ## [0.9.2] - 2026-09-09
 
 ### Fixed

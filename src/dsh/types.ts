@@ -30,23 +30,61 @@ export interface UserMessage {
   readonly source: UserMessageSource;
 }
 
+/** One durable session-log record the bridge folds (permission / history / blank). */
+export interface SessionEventRecord {
+  type: string;
+  time?: number;
+  data?: unknown;
+}
+
+/**
+ * Live session surface used by the bridge.
+ *
+ * DSH 0.1.5 publishes `snapshotEvents()` as the public log read. Older
+ * hosts still expose `events`; both are accepted.
+ */
+export interface AgentSession {
+  /** Durable creation metadata: the recorded agent preset, if any. */
+  header?: { id?: string; agentPreset?: string };
+  /** Legacy in-memory log (pre-0.1.5). Prefer {@link snapshotEvents}. */
+  events?: readonly SessionEventRecord[];
+  /**
+   * Public 0.1.5+ snapshot of a half-open event range. Omitted bounds
+   * return the full current log.
+   */
+  snapshotEvents?(fromSeq?: number, toSeqExclusive?: number): readonly SessionEventRecord[];
+  requestHeader?: () =>
+    | {
+        config?: { provider?: string; model?: string; reasoningEffort?: string };
+      }
+    | undefined;
+}
+
+/**
+ * Read the live session log. Prefers `snapshotEvents()` (DSH 0.1.5);
+ * falls back to the legacy `events` array when that is all the host
+ * exposes.
+ */
+export function sessionEvents(session: AgentSession | undefined): readonly SessionEventRecord[] {
+  if (!session) return [];
+  if (typeof session.snapshotEvents === "function") {
+    try {
+      const snap = session.snapshotEvents();
+      if (Array.isArray(snap)) return snap;
+    } catch {
+      // fall through to the legacy array
+    }
+  }
+  return Array.isArray(session.events) ? session.events : [];
+}
+
 /** Minimal live-agent surface used by the bridge. */
 export interface Agent {
   readonly id: string;
   readonly status: "idle" | "running";
   readonly options: { provider?: string; model?: string };
   /** Session header access: the latest logged request config (dsh-session). */
-  session?: {
-    /** Durable creation metadata: the recorded agent preset, if any. */
-    header?: { id?: string; agentPreset?: string };
-    /** The session's durable event log (permission fold / blank check). */
-    events?: readonly { type: string; data?: unknown }[];
-    requestHeader?: () =>
-      | {
-          config?: { provider?: string; model?: string; reasoningEffort?: string };
-        }
-      | undefined;
-  };
+  session?: AgentSession;
   followup(message: UserMessage): void;
   steer(message: UserMessage): void;
   cancel(cause: string, options?: { keepInbox?: boolean }): void;
@@ -75,7 +113,12 @@ export interface CreateAgentOptions {
     provider?: string;
     model?: string;
   };
-  readonly setup?: (agentCtx: unknown) => void;
+  /**
+   * DSH 0.1.5+ calls `setup(agentCtx, agent)`. The explicit Agent is
+   * required because `ctx.agent` was removed; older hosts still invoke
+   * with only the context.
+   */
+  readonly setup?: (agentCtx: unknown, agent?: Agent) => void | Promise<void>;
 }
 
 /** ResumeAgentOptions (dsh-agent). */
@@ -85,7 +128,7 @@ export interface ResumeAgentOptions {
     provider?: string;
     model?: string;
   };
-  readonly setup?: (agentCtx: unknown) => void;
+  readonly setup?: (agentCtx: unknown, agent?: Agent) => void | Promise<void>;
 }
 
 /** ApprovalRequest (dsh-user-approval). */

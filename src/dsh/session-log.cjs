@@ -7,7 +7,10 @@
  * `session/title`) and must not scale with session count × log size.
  *
  * The persistence layer keeps each session as a multi-frame Zstandard
- * file at `$DSH_HOME/sessions/${projectKey(cwd)}/${encodeSegment(id)}/session.jsonl.zstd`.
+ * file at `$DSH_HOME/sessions/${projectKey(cwd)}/${encodeSegment(id)}/`.
+ * Format v0 is `session.jsonl.zstd`; later generations are
+ * `session.vN.jsonl.zstd` (DSH 0.1.5 writes v3). Host `open()` picks the
+ * highest generation; this reader does the same.
  *
  * This module therefore:
  *   - caches folded facts against (path, size, mtime)
@@ -31,6 +34,14 @@ const ZSTD_MAGIC = 4247762216; // 0xFD2FB528 little-endian
 
 /** The Zstandard-compressed suffix DSH uses for session artifacts. */
 const COMPRESSED_SUFFIX = ".jsonl.zstd";
+
+/**
+ * Canonical generation filenames (dsh-session-format):
+ *   v0 → session.jsonl[.zstd]
+ *   vN → session.vN.jsonl[.zstd]  (N ≥ 1, no leading zeros)
+ * Temporary / uppercase / `.v0` names are not canonical.
+ */
+const GENERATION_LOG_NAME = /^session(?:\.v([1-9][0-9]*))?\.jsonl(?:\.zstd)?$/u;
 
 /** Bound the in-process cache so a long-lived bridge cannot grow without limit. */
 const CACHE_LIMIT = 256;
@@ -121,18 +132,45 @@ function sessionLogPath(cwd, sessionId, root) {
 }
 
 /**
- * Locate the session log file. Returns the absolute path of the
- * compressed artifact if it exists; otherwise the plaintext JSONL;
- * otherwise undefined. We do not synthesise or write — read-only
- * helper.
+ * Parse a canonical generation filename. Returns the format version
+ * (0 for the untagged `session.jsonl`) or undefined when the name is
+ * not a committed generation.
+ */
+function parseGenerationLogFilename(filename) {
+  const match = GENERATION_LOG_NAME.exec(filename);
+  if (!match) return undefined;
+  if (match[1] === undefined) return 0;
+  const version = Number(match[1]);
+  return Number.isSafeInteger(version) ? version : undefined;
+}
+
+/**
+ * Locate the current session log. Mirrors host `open()`: scan the
+ * session directory and pick the highest canonical generation. A
+ * migrated 0.1.5 session is `session.v3.jsonl.zstd` with the older
+ * `session.jsonl.zstd` left in place as an immutable predecessor —
+ * reading the v0 file would miss later events.
+ *
+ * Returns undefined when the directory is missing or contains no
+ * canonical generation. We do not synthesise or write — read-only.
  */
 function locateSessionLog(cwd, sessionId, root) {
   const dir = path.dirname(sessionLogPath(cwd, sessionId, root));
-  const compressedCandidate = path.join(dir, "session.jsonl.zstd");
-  const plainCandidate = path.join(dir, "session.jsonl");
-  if (fs.existsSync(compressedCandidate)) return compressedCandidate;
-  if (fs.existsSync(plainCandidate)) return plainCandidate;
-  return undefined;
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  let bestVersion = -1;
+  let bestName;
+  for (const name of names) {
+    const version = parseGenerationLogFilename(name);
+    if (version === undefined || version < bestVersion) continue;
+    bestVersion = version;
+    bestName = name;
+  }
+  return bestName === undefined ? undefined : path.join(dir, bestName);
 }
 
 /**
@@ -637,6 +675,7 @@ module.exports = {
   COMPRESSED_SUFFIX,
   clearSessionLogCache,
   locateSessionLog,
+  parseGenerationLogFilename,
   projectKey,
   readSessionEvents,
   readSessionListFacts,

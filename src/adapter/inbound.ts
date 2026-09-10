@@ -96,8 +96,8 @@ function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
 /**
  * Convert a WeChat message to prompt content blocks for a DSH session.
  *
- * The WeChat surface context is NOT injected here — it lives in an
- * agent-scoped system-prompt section (dsh/sessions.ts agentSetup) so
+ * The WeChat surface context is NOT injected here — it lives in a
+ * global runtime context (index.ts `dsh-wechat-surface`) so
  * user-message content stays clean: the session-title generator reads the
  * user message verbatim, and a hint block would pollute session titles.
  */
