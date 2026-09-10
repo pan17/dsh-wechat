@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-09-10
+
+### Fixed
+
+- `/status` 的「权限」行和 `/perm list` 的「当前会话」标记在 DSH 0.1.5 上不再静默消失。`permissionPresets.current()` 改为传入活 Session（宿主自 0.1.2-alpha.2 起走 `sessionProjections.stateOf(session, "permissions")`），不再传事件数组。
+
 ## [0.9.4] - 2026-09-10
 
 ### Fixed
