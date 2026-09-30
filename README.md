@@ -33,29 +33,61 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 
 ## 安装（部署到 DSH profile）
 
+### 方式一：设置页内直接安装（推荐）
+
+打开 **设置 → 插件 → 添加插件**，在输入框填包名：
+
+```text
+dsh-wechat
+```
+
+点「安装」即可。插件声明了 `dsh.bundle`，安装时会被自动注册成 bundle 层，
+不需要再手动改 profile 配置。国内网络下载慢时，把「安装源」切到
+**中国大陆镜像源**。
+
+安装完成后若提示「已安装，下次启动后加载」，重启 DSH 即可；若出现
+「立即启用」按钮，也可以直接点它免重启。
+
+然后浏览器打开 **设置 → WeChat**：扫码登录、查看状态、改配置，或直接访问
+`http://127.0.0.1:3080/wechat/qr` 扫码。
+
+### 方式二：命令行
+
 DSH 自带插件管理命令 `dsh plugin`（在 profile 目录转发 pnpm，并自动把
 声明了 `dsh.bundle` 的依赖加入 bundle 层）：
 
 > ⚠️ **别用** `npx dsh plugin`——npm 上 `dsh` 这个名字早在 2016 年就被一个不相关的 JS shell 包占了（`dsh@1.0.1`，作者 `infusion`），它没暴露 CLI bin，会报 `could not determine executable to run`。DSH 的 CLI 在 scoped 包 `@deepseek-ai/dsh` 下，必须用完整名。
 
+桌面版（Electron）用户请直接用应用自带的 `dsh` 命令（安装桌面版时会加入 PATH），
+它支持 `--profile desktop`：
+
 ```bash
 # 安装（自动添加依赖 + 注册 bundle 层）
-npx @deepseek-ai/dsh plugin --profile <profile> add dsh-wechat
+dsh plugin --profile desktop add dsh-wechat
 
-# 验证组合配置
-npx @deepseek-ai/dsh --profile <profile> --dump-config   # 应看到 "- id: dsh-wechat" 行
+# 查看已装版本
+dsh plugin --profile desktop list --depth 0
 
-# 重启 DSH（必须），然后：
-#   - 浏览器打开 设置 → WeChat：扫码登录、查看状态、改配置
-#   - 或直接打开 http://127.0.0.1:3080/wechat/qr 扫码
+# 重启 DSH
 ```
 
 其他管理命令（同样自动维护 bundle 层）：
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile <profile> update dsh-wechat   # 升级
-npx @deepseek-ai/dsh plugin --profile <profile> remove dsh-wechat   # 卸载（从 bundles 移除）
+dsh plugin --profile desktop update dsh-wechat   # 升级
+dsh plugin --profile desktop remove dsh-wechat   # 卸载（从 bundles 移除）
 ```
+
+> `--dump-config` 在 `desktop` profile 上会被拒绝（该 profile 由 Electron 应用
+> 独占管理），要验证组合配置请改用 `dsh plugin --profile desktop list`，
+> 或在设置页查看。
+>
+> 非桌面版（`web` / `tui` / `headless` 等自建 profile）用 scoped CLI：
+>
+> ```bash
+> npx @deepseek-ai/dsh plugin --profile web add dsh-wechat
+> npx @deepseek-ai/dsh --profile web --dump-config   # 应看到 "- id: dsh-wechat" 行
+> ```
 
 > 插件从 npm 官方源安装（`dsh plugin add` 即 `pnpm add dsh-wechat`）。
 > 修改代码后需**重启 DSH** 才能让改动生效。
