@@ -290,6 +290,7 @@ export async function getUpdates(params: {
   token?: string;
   get_updates_buf: string;
   timeoutMs?: number;
+  abortSignal?: AbortSignal;
 }): Promise<GetUpdatesResp> {
   // Long-poll: do NOT retry on transient network errors here — the
   // monitor loop already has its own retry/backoff.
@@ -299,7 +300,7 @@ export async function getUpdates(params: {
     { get_updates_buf: params.get_updates_buf },
     params.token,
     params.timeoutMs ?? 38_000,
-    { retries: 0 },
+    { retries: 0, abortSignal: params.abortSignal },
   );
 }
 

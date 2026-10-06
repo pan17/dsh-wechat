@@ -89,6 +89,9 @@ import {
 /** WeChat gateway continuous-message limit per user interaction window. */
 const MSG_LIMIT_MAX = 10;
 const MSG_LIMIT_WARN = 7;
+/** Bound memory for service-identified inbound replays; equal text is never a key. */
+const INBOUND_TTL_MS = 30 * 60_000;
+const INBOUND_MAX_SEEN = 4096;
 /** How long a session's message-source marker stays valid without a touch. */
 const SURFACE_TTL_MS = 7 * 24 * 60 * 60_000;
 /** typing_ticket cache TTL — re-fetch via getconfig after expiry. */
@@ -278,6 +281,8 @@ export class WeChatDSHBridge {
   /** Per-run monitor cancellation; recreated on every reconnect. */
   private monitorAbort: AbortController | null = null;
   private monitorRunning = false;
+  private monitorTask: Promise<void> | null = null;
+  private readonly seenInbound = new Map<string, number>();
   private loginState: LoginState = { phase: "idle" };
   /** Pending question cards per user (rpcId-keyed, first = active). */
   private readonly pendingQuestions = new Map<string, PendingQuestion[]>();
@@ -851,12 +856,14 @@ export class WeChatDSHBridge {
   async stop(): Promise<void> {
     this.stopIlink("plugin-stop");
     this.stopInteraction();
+    await this.monitorTask;
   }
 
   /** Stop the WeChat long-poll and typing indicators; leave Host answerers running. */
   private stopIlink(typingReason: string): void {
     this.monitorAbort?.abort();
     this.monitorAbort = null;
+    this.monitorRunning = false;
     for (const userId of [...this.typingActive.keys()]) {
       this.endTyping(userId, typingReason);
     }
@@ -921,6 +928,7 @@ export class WeChatDSHBridge {
   private resetPeerBinding(reason: string): void {
     const previous = this.peerUserId ?? this.state.all()[0]?.userId;
     this.peerUserId = null;
+    this.seenInbound.clear();
     this.wireContextToken = null;
     this.typingTickets.clear();
     this.pendingQuestions.clear();
@@ -995,17 +1003,22 @@ export class WeChatDSHBridge {
   }
 
   private async startMonitor(): Promise<void> {
-    if (this.monitorRunning || !this.token) return;
+    if (this.monitorRunning || !this.token || this.interactionStopped) return;
+    // Reconnect must wait for the cancelled run to finish. Check again after
+    // awaiting: another caller may already have started the replacement.
+    await this.monitorTask;
+    if (this.monitorRunning || !this.token || this.interactionStopped) return;
     this.monitorRunning = true;
     const abort = new AbortController();
     this.monitorAbort = abort;
-    void startMonitor({
+    const task = startMonitor({
       baseUrl: this.token.baseUrl,
       token: this.token.token,
       storageDir: this.config.storageDir,
       abortSignal: abort.signal,
       log: (msg) => console.log(`[dsh-wechat] ${msg}`),
       onMessage: (msg) => {
+        if (abort.signal.aborted || this.monitorAbort !== abort || this.interactionStopped) return;
         this.handleMessage(msg).catch((err) => {
           console.error(`[dsh-wechat] handleMessage error: ${String(err)}`);
         });
@@ -1018,9 +1031,13 @@ export class WeChatDSHBridge {
         console.error(`[dsh-wechat] monitor stopped: ${String(err)}`);
       })
       .finally(() => {
-        this.monitorRunning = false;
-        if (this.monitorAbort === abort) this.monitorAbort = null;
+        if (this.monitorAbort === abort) {
+          this.monitorRunning = false;
+          this.monitorAbort = null;
+        }
+        if (this.monitorTask === task) this.monitorTask = null;
       });
+    this.monitorTask = task;
   }
 
   // ─── Config updates (from the settings page) ───
@@ -1111,7 +1128,40 @@ export class WeChatDSHBridge {
 
   // ─── Inbound: WeChat → DSH ───
 
+  private inboundKey(msg: WeixinMessage): string | undefined {
+    const identity = typeof msg.message_id === "number" && Number.isSafeInteger(msg.message_id) && msg.message_id > 0
+      ? `m:${msg.message_id}`
+      : typeof msg.seq === "number" && Number.isSafeInteger(msg.seq) && msg.seq > 0 ? `s:${msg.seq}` : undefined;
+    return identity ? JSON.stringify([msg.from_user_id, identity]) : undefined;
+  }
+
   private async handleMessage(msg: WeixinMessage): Promise<void> {
+    if (this.interactionStopped || msg.message_type !== MessageType.USER || msg.group_id || !msg.from_user_id) return;
+    if (this.peerUserId && this.peerUserId !== msg.from_user_id) return;
+    const key = this.inboundKey(msg);
+    const now = Date.now();
+    for (const [seenKey, at] of this.seenInbound) {
+      if (now - at < INBOUND_TTL_MS) break;
+      this.seenInbound.delete(seenKey);
+    }
+    if (key) {
+      if (this.seenInbound.has(key)) return;
+      // Reserve synchronously, before the first await, so concurrent replays
+      // cannot execute commands, reset the send budget, or create agents twice.
+      this.seenInbound.set(key, now);
+      if (this.seenInbound.size > INBOUND_MAX_SEEN) {
+        this.seenInbound.delete(this.seenInbound.keys().next().value!);
+      }
+    }
+    try {
+      await this.processMessage(msg);
+    } catch (err) {
+      if (key && this.seenInbound.get(key) === now) this.seenInbound.delete(key);
+      throw err;
+    }
+  }
+
+  private async processMessage(msg: WeixinMessage): Promise<void> {
     if (msg.message_type !== MessageType.USER) return;
     if (msg.group_id) return;
 
@@ -1338,6 +1388,7 @@ export class WeChatDSHBridge {
   private async forwardToAgent(user: UserState, msg: WeixinMessage): Promise<void> {
     const previousSessionId = user.sessionId;
     const { agent, replacedSessionId } = await this.agents.ensure(user, { replaceOnResumeFailure: true });
+    if (this.interactionStopped) return;
     this.persistSessionBinding(user);
     if (!agent) {
       const hint = previousSessionId
@@ -1355,6 +1406,7 @@ export class WeChatDSHBridge {
 
     const tempDir = path.join(this.config.storageDir, "tempfile");
     const blocks = await weixinMessageToPrompt(msg, this.config.cdnBaseUrl, (m) => this.log(m), tempDir);
+    if (this.interactionStopped) return;
     this.markSessionSource(user.sessionId, "wechat");
     // Busy-time delivery follows the DSH `ui-conversation.busyEnter` setting
     // (the GUI's 「繁忙时 Enter 键行为」 row): while the agent is running,

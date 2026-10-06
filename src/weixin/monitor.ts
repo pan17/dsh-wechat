@@ -195,7 +195,11 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
         token,
         get_updates_buf: getUpdatesBuf,
         timeoutMs: nextTimeoutMs,
+        abortSignal,
       });
+      // An old poll may resolve while stop/reload is cancelling it. Do not
+      // advance the cursor or dispatch its messages after ownership ended.
+      if (abortSignal?.aborted) return;
 
       if (resp.longpolling_timeout_ms != null && resp.longpolling_timeout_ms > 0) {
         nextTimeoutMs = resp.longpolling_timeout_ms;
@@ -241,6 +245,7 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
       }
 
       for (const msg of resp.msgs ?? []) {
+        if (abortSignal?.aborted) return;
         onMessage(msg);
       }
     } catch (err) {

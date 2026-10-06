@@ -33,6 +33,8 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 
 ## 安装（部署到 DSH profile）
 
+当前版本仅支持 **DSH `0.2.0-rc.2`**，`engines.dsh` 使用精确版本约束。
+
 ### 方式一：设置页内直接安装（推荐）
 
 打开 **设置 → 插件 → 添加插件**，在输入框填包名：
@@ -213,10 +215,10 @@ logout`），客户端零 `@deepseek-ai` 依赖。
 ```bash
 npm install
 npm run build    # tsc → dist/
-npm test         # vitest（splitText/格式化/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词/DSH 0.1.7-alpha.1 适配）
+npm test         # vitest（splitText/格式化/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词/DSH 0.2.0-rc.2 适配）
 ```
 
-本插件已在 **DeepSeek Harness `dsh-v0.1.7-alpha.1`** 上验证；仓库本身不依赖任何 `@deepseek-ai/dsh-*` 包，此处指的是适配所针对的宿主 API 线。
+当前版本针对 **DeepSeek Harness `0.2.0-rc.2`** 的宿主 API，兼容性精确限定为此版本；仓库本身不依赖任何 `@deepseek-ai/dsh-*` 运行时包。
 
 ## 已知边界
 
@@ -228,6 +230,8 @@ npm test         # vitest（splitText/格式化/解析/帧处理/waterfall 竞�
   `recompose`；已有内容的会话会提示 Preset 应用于下一个新会话。默认
   Preset 本身写入 DSH 设置文档（`agent-presets` namespace），GUI 设置
   页与微信双端读写同一事实源。
+- 入站重投按微信用户 + 服务端 `message_id`（缺失时用有效 `seq`）去重，缓存保留 30 分钟、最多 4096 条，作用于当前插件实例；重连保留缓存，退出登录/重新扫码清空。无有效身份的消息放行，相同文本但不同身份的消息正常处理。去重缓存不跨进程重启持久化，也不协调同时配置的多个插件实例。
+- 同一用户的会话检查与创建串行执行，避免首次收消息或工作区无绑定时并发创建多个会话。停止/重连会取消正在进行的长轮询，丢弃旧轮询迟到的消息；重连等待旧轮询退出后启动新轮询。
 - iLink 通道是腾讯官方 bot 协议，接口可能随官方调整；跟随 wechat-opencode
   上游的 `src/weixin/` 修复即可。
 

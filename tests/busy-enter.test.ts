@@ -89,7 +89,7 @@ function makeMockAgent(id: string, status: "idle" | "running") {
 
 function makeBridge(
   agent: ReturnType<typeof makeMockAgent>,
-  settings?: { value?: unknown; update: ReturnType<typeof vi.fn> },
+  settings?: { value?: unknown; describe?: () => readonly { ns: string; value?: unknown }[]; update: ReturnType<typeof vi.fn> },
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-enter-"));
   const agentsService = {
@@ -101,7 +101,7 @@ function makeBridge(
   const services: Record<string, unknown> = { agents: agentsService };
   if (settings) {
     services.settings = {
-      get: (_ns: string) => settings.value,
+      ...(settings.describe ? { describe: settings.describe } : { get: (_ns: string) => settings.value }),
       update: settings.update,
     };
   }
@@ -145,6 +145,40 @@ describe("busy-time delivery follows ui-conversation.busyEnter", () => {
     expect(mock.steers.length).toBe(1);
     expect(mock.followups.length).toBe(0);
     expect(mock.steers[0]!.id).toBeTruthy();
+  });
+
+  it("DSH 0.2 describe-only settings steer busy messages and update /status live", async () => {
+    const mock = makeMockAgent("wx-s1", "running");
+    let busyEnter = "steer";
+    const bridge = makeBridge(mock, {
+      describe: () => [{ ns: "ui-conversation", value: { busyEnter } }],
+      update: vi.fn(),
+    });
+    const harness = bridge as unknown as { handleMessage(m: unknown): Promise<void> };
+    await harness.handleMessage(wechatTextMessage("插话一下"));
+    expect(mock.steers).toHaveLength(1);
+    expect(mock.followups).toHaveLength(0);
+    await harness.handleMessage(wechatTextMessage("/status"));
+    expect(sendTextMessage.mock.calls.some((call) => /繁忙投递:.*steer/.test(String(call[1])))).toBe(true);
+
+    busyEnter = "queue";
+    sendTextMessage.mockClear();
+    await harness.handleMessage(wechatTextMessage("排队一下"));
+    await harness.handleMessage(wechatTextMessage("/status"));
+    expect(mock.followups).toHaveLength(1);
+    expect(mock.steers).toHaveLength(1);
+    expect(sendTextMessage.mock.calls.some((call) => /繁忙投递:.*queue/.test(String(call[1])))).toBe(true);
+  });
+
+  it("DSH 0.2 steer still queues ordinary messages while the agent is idle", async () => {
+    const mock = makeMockAgent("wx-s1", "idle");
+    const bridge = makeBridge(mock, {
+      describe: () => [{ ns: "ui-conversation", value: { busyEnter: "steer" } }],
+      update: vi.fn(),
+    });
+    await (bridge as unknown as { handleMessage(m: unknown): Promise<void> }).handleMessage(wechatTextMessage("正常消息"));
+    expect(mock.followups).toHaveLength(1);
+    expect(mock.steers).toHaveLength(0);
   });
 
   it("running + queue keeps the ordinary follow-up turn", async () => {

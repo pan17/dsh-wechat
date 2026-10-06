@@ -70,6 +70,8 @@ export function mintSessionId(): string {
 }
 
 export class AgentStore {
+  private readonly ensuring = new Map<string, Promise<EnsureAgentResult>>();
+
   constructor(private readonly ctx: BridgeContext) {}
 
   private agents(): AgentsService | undefined {
@@ -89,7 +91,23 @@ export class AgentStore {
    * unavailable or create/resume failed). With `replaceOnResumeFailure`,
    * a corrupt or unreadable bound session is unbound and replaced.
    */
-  async ensure(user: UserState, options?: EnsureAgentOptions): Promise<EnsureAgentResult> {
+  ensure(user: UserState, options?: EnsureAgentOptions): Promise<EnsureAgentResult> {
+    // Serialize check/create for this user. Re-read the mutable binding after
+    // the previous call finishes, including its resume-failure replacement.
+    const previous = this.ensuring.get(user.userId);
+    const run = (previous ?? Promise.resolve()).then(
+      () => this.ensureNow(user, options),
+      () => this.ensureNow(user, options),
+    );
+    this.ensuring.set(user.userId, run);
+    const clear = (): void => {
+      if (this.ensuring.get(user.userId) === run) this.ensuring.delete(user.userId);
+    };
+    void run.then(clear, clear);
+    return run;
+  }
+
+  private async ensureNow(user: UserState, options?: EnsureAgentOptions): Promise<EnsureAgentResult> {
     const agents = this.agents();
     if (!agents) return { agent: undefined };
 
