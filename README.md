@@ -17,7 +17,6 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 - **发送** — 微信文本/图片/文件/语音消息 → DSH agent（媒体自动下载解密到
   `~/.dsh-wechat/tempfile/`，本地路径作为附件注入）
 - **接收** — agent 正文独立发送；正文之间的思考与工具调用/结果合并成一条「执行过程」，按桌面端的分组方式阅读。过程在收到下一段正文的第一个有效流式片段时立即推送，正文接收完成后独立发送；提问/审批卡或轮次结束也会发送待发过程；`send_wechat` 工具可主动推送文本/文件到微信
-- **出站 Markdown（与官方微信渠道一致）** — 按 [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin) 的 `StreamingMarkdownFilter` 保留微信能渲染的语法（粗体、链接、H1–H4、代码块、行内代码、引用、分隔线、表格），只移除图片与微信不渲染的标记
 - **微信 slash 命令** — `/workspace`、`/session`、`/preset`、`/model`、
   `/perm`、`/silent`、`/notify`、`/next`、`/status`、`/stop`、`/rq` 等
   由 bridge 直接处理（见下方命令表）
