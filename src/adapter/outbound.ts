@@ -1,31 +1,32 @@
 /**
- * Outbound adapter: format agent output for WeChat delivery.
- * Ported from wechat-opencode (MIT) — https://github.com/pan17/wechat-opencode
+ * Outbound adapter: prepare agent output for WeChat delivery.
+ *
+ * WeChat renders text sent by a bot differently from text typed by an
+ * ordinary user, and it supports a subset of markdown. The reference
+ * implementation is the official Tencent/openclaw-weixin channel, whose
+ * `sendWeixinOutbound` runs every outbound body through
+ * `StreamingMarkdownFilter`:
+ *
+ *   const f = new StreamingMarkdownFilter();
+ *   const filteredText = f.feed(rawText) + f.flush();
+ *
+ * This module applies exactly that filter (see `./markdown-filter.js`), so the
+ * bridge matches the official channel's rendering rather than guessing at it.
+ * It is deliberately *not* a blanket markdown stripper: bold, links, H1-H4
+ * headings, code fences, inline code and tables are rendered by WeChat and
+ * therefore pass through untouched.
  */
+
+import { filterMarkdown } from "./markdown-filter.js";
+
+export { StreamingMarkdownFilter, filterMarkdown, containsCJK } from "./markdown-filter.js";
 
 /**
- * Strip markdown formatting for cleaner WeChat display.
- * Preserves code blocks (as they're useful even in plain text).
+ * Prepare one outbound message body for WeChat.
+ *
+ * Mirrors the official channel's `feed(...) + flush()` pair, then trims the
+ * result.
  */
 export function formatForWeChat(text: string): string {
-  // Remove image references ![alt](url)
-  let out = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, "[$1]");
-
-  // Convert links [text](url) → text (url)
-  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)");
-
-  // Remove bold/italic markers but keep text
-  out = out.replace(/\*\*\*(.+?)\*\*\*/g, "$1");
-  out = out.replace(/\*\*(.+?)\*\*/g, "$1");
-  out = out.replace(/\*(.+?)\*/g, "$1");
-  out = out.replace(/__(.+?)__/g, "$1");
-  out = out.replace(/_(.+?)_/g, "$1");
-
-  // Remove heading markers
-  out = out.replace(/^#{1,6}\s+/gm, "");
-
-  // Clean up excessive blank lines
-  out = out.replace(/\n{3,}/g, "\n\n");
-
-  return out.trim();
+  return filterMarkdown(text).trim();
 }

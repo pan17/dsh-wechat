@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import { ConfigStore } from "../src/config-store.js";
-import { defaultConfig } from "../src/config.js";
+import { DEFAULT_SURFACE_PROMPT, defaultConfig, LEGACY_SURFACE_PROMPTS } from "../src/config.js";
 
 describe("ConfigStore", () => {
   it("resolves defaults when nothing is stored", () => {
@@ -119,8 +119,44 @@ describe("ConfigStore", () => {
     }
   });
 
-  it("ignores non-boolean surfacePromptEnabled and non-string surfacePrompt", () => {
+  it("drops a stored superseded default prompt so the new default applies", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      const legacy = LEGACY_SURFACE_PROMPTS[0]!;
+      fs.writeFileSync(
+        path.join(dir, "config.json"),
+        JSON.stringify({ surfacePromptEnabled: true, surfacePrompt: legacy }),
+        "utf-8",
+      );
+
+      const store = new ConfigStore(dir);
+      expect(store.stored().surfacePrompt).toBeUndefined();
+      expect(store.resolve(defaultConfig()).surfacePrompt).toBe(DEFAULT_SURFACE_PROMPT);
+      // The enable flag is a real user choice and must survive.
+      expect(store.resolve(defaultConfig()).surfacePromptEnabled).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a genuinely edited prompt that merely resembles the default", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      const edited = DEFAULT_SURFACE_PROMPT + " 另外请用简体中文。";
+      fs.writeFileSync(
+        path.join(dir, "config.json"),
+        JSON.stringify({ surfacePrompt: edited }),
+        "utf-8",
+      );
+
+      const store = new ConfigStore(dir);
+      expect(store.resolve(defaultConfig()).surfacePrompt).toBe(edited);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores non-boolean surfacePromptEnabled and non-string surfacePrompt", () => {    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
     try {
       const store = new ConfigStore(dir);
       store.update({

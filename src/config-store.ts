@@ -7,7 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { defaultConfig, type WeChatDSHConfig } from "./config.js";
+import { defaultConfig, LEGACY_SURFACE_PROMPTS, type WeChatDSHConfig } from "./config.js";
 
 export type EditableConfig = Pick<
   WeChatDSHConfig,
@@ -51,7 +51,17 @@ export class ConfigStore {
     try {
       if (fs.existsSync(this.filePath)) {
         const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf-8")) as Partial<EditableConfig>;
-        if (parsed && typeof parsed === "object") return parsed;
+        if (parsed && typeof parsed === "object") {
+          // A stored prompt equal to a superseded built-in default was never
+          // edited by the user: drop it so the current default applies.
+          if (
+            typeof parsed.surfacePrompt === "string"
+            && LEGACY_SURFACE_PROMPTS.includes(parsed.surfacePrompt)
+          ) {
+            delete parsed.surfacePrompt;
+          }
+          return parsed;
+        }
       }
     } catch {
       // fall through to defaults

@@ -15,6 +15,38 @@ export interface TextBlock {
 
 export type ContentBlock = TextBlock;
 
+/** Read-only output shapes; unknown content types are ignored by the bridge. */
+export interface OutputContentBlock {
+  type: string;
+  text?: string;
+}
+
+/** Process-local stream contract, projected to the fields used for the prose boundary. */
+export type AssistantStreamFrame = {
+  type: "start"; attemptId: string; revision: number; turn: number; step: number;
+} | {
+  type: "chunk"; attemptId: string; revision: number; index: number; time: number;
+  chunk: { type: string; index?: number; text?: string; blockType?: string; block?: OutputContentBlock };
+} | {
+  type: "end"; attemptId: string; revision: number; index: number;
+  outcome: { kind: "committed"; eventType: "assistant/message" | "assistant/attempt"; seq: number } | { kind: "abandoned" };
+};
+
+export interface ToolCallData {
+  callId?: string;
+  name?: string;
+  arguments?: string;
+}
+
+export interface ToolResultData {
+  message?: {
+    toolCallId?: string;
+    isError?: boolean;
+    content?: OutputContentBlock[];
+  };
+  error?: { name?: string; code?: string; reason?: string };
+}
+
 /**
  * Message source: `{ kind: 'user' }` (identical to GUI chat-box messages)
  * or `{ kind: 'plugin', plugin }` for synthetic context. WeChat user

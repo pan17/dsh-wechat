@@ -315,7 +315,7 @@ describe("/notify command", () => {
     });
     const statusText = sendTextMessage.mock.calls.map((c: any) => c[1] as string).join("\n");
     expect(statusText).toContain("跨会话决策推送: on");
-    expect(statusText).toContain("后台任务完成/报错提醒: on");
+    expect(statusText).toContain("跨会话任务完成提醒: on");
   });
 
   it("/notify on flushes unseen background cards", async () => {

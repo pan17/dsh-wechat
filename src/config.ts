@@ -41,7 +41,18 @@ export interface WeChatDSHConfig {
 
 /** Default WeChat surface prompt — injected as a runtime-context snapshot. */
 export const DEFAULT_SURFACE_PROMPT =
-  "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（纯文本、适度使用 emoji、避免过长的表格）。";
+  "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（支持简单的 Markdown、适度使用 emoji、避免过长的表格）。";
+
+/**
+ * Superseded built-in prompts. `surfacePrompt` is persisted verbatim once the
+ * settings page is saved, so a stored value equal to one of these is an
+ * untouched default rather than a user customization: it is dropped on load so
+ * the current {@link DEFAULT_SURFACE_PROMPT} applies. Genuinely edited prompts
+ * never match and are always preserved.
+ */
+export const LEGACY_SURFACE_PROMPTS: readonly string[] = [
+  "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（纯文本、适度使用 emoji、避免过长的表格）。",
+];
 
 export function defaultStorageDir(): string {
   return path.join(os.homedir(), ".dsh-wechat");

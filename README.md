@@ -16,7 +16,8 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 
 - **发送** — 微信文本/图片/文件/语音消息 → DSH agent（媒体自动下载解密到
   `~/.dsh-wechat/tempfile/`，本地路径作为附件注入）
-- **接收** — agent 回复文本回微信；`send_wechat` 工具可主动推送文本/文件到微信
+- **接收** — agent 正文独立发送；正文之间的思考与工具调用/结果合并成一条「执行过程」，按桌面端的分组方式阅读。过程在收到下一段正文的第一个有效流式片段时立即推送，正文接收完成后独立发送；提问/审批卡或轮次结束也会发送待发过程；`send_wechat` 工具可主动推送文本/文件到微信
+- **出站 Markdown（与官方微信渠道一致）** — 按 [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin) 的 `StreamingMarkdownFilter` 保留微信能渲染的语法（粗体、链接、H1–H4、代码块、行内代码、引用、分隔线、表格），只移除图片与微信不渲染的标记
 - **微信 slash 命令** — `/workspace`、`/session`、`/preset`、`/model`、
   `/perm`、`/silent`、`/notify`、`/next`、`/status`、`/stop`、`/rq` 等
   由 bridge 直接处理（见下方命令表）
@@ -25,7 +26,7 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 - **微信渠道提示词（动态注入）** — 微信消息注入可配置提示词；GUI 消息时自动消失。设置页可开关/编辑正文，微信 `/surface on|off` 切换
 - **静默模式** — `/silent on` 后每轮只发送最终回复，设置页可切换（全局配置，重新扫码后仍保留）
 - **繁忙时投递（与 DSH 同源）** — 按 `busyEnter` 排队/插话；微信 `/enter` 同步
-- **跨会话决策推送** — `/notify on` 后，任意会话的权限/提问卡整卡推送到微信。当前会话可直接回；其它会话必须 `P{n}=…`（`P1=/rq` 关闭该卡）。默认关。后台任务完成/报错走 `/notify tasks on|off`
+- **跨会话决策推送** — `/notify on` 后，任意会话的权限/提问卡整卡推送到微信。当前会话可直接回；其它会话必须 `P{n}=…`（`P1=/rq` 关闭该卡）。默认关。跨会话任务完成/报错走 `/notify tasks on|off`
 - **二维码登录** — `http://127.0.0.1:3080/wechat/qr` 扫码登录，设置页内嵌
 - **设置页 UI** — DSH 设置 → **WeChat**：单卡展示状态、扫码、退出登录、连接配置与通知/静默开关（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
 - **断点续传** — `sync-buf` 与微信会话映射持久化，重启 DSH 后自动恢复会话
@@ -33,7 +34,7 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 
 ## 安装（部署到 DSH profile）
 
-当前版本仅支持 **DSH `0.2.0-rc.2`**，`engines.dsh` 使用精确版本约束。
+当前版本要求 **DSH `>=0.2.0-rc.2`**，`engines.dsh` 使用大于等于约束；低于该版本的 DSH 安装时会被拒绝。
 
 ### 方式一：设置页内直接安装（推荐）
 
@@ -129,7 +130,7 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 | 命令 | 说明 |
 |---|---|
 | `/help`（`/h`、`/?`） | 帮助 |
-| `/status` | 当前状态：工作区、会话、Agent、待处理(当前)/待处理(跨会话)、当前会话 Preset、模型、上下文、权限、默认 Preset、静默、繁忙投递、跨会话决策推送、任务完成提醒；末尾追加 DSH 通过 `ctx.sessionProjections` 注册的所有会话级状态，分四段显示——`[模式]`（plan / goal / subagent / todos）、`[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类）；DSH 加新 plugin 自动出现 |
+| `/status` | 当前状态：工作区、会话、Agent、待处理(当前)/待处理(跨会话)、当前会话 Preset、模型、上下文、权限、默认 Preset、静默、繁忙投递、跨会话决策推送、跨会话任务完成提醒；末尾追加 DSH 通过 `ctx.sessionProjections` 注册的所有会话级状态，分四段显示——`[模式]`（plan / goal / subagent / todos）、`[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类）；DSH 加新 plugin 自动出现 |
 | `/workspace (ws) — list \| status \| switch <编号\|路径> \| add <路径>` | 工作区管理（list 显示各工作区会话数，不含已归档；switch/add 回复会写明恢复的会话名字和完整 id，跳过已归档；该目录无可见会话时提示发送消息将创建） |
 | `/session (s) — list [current] \| switch [current] <编号> \| new \| status` | 会话管理（list 最近 20 个，标记当前，不显示 GUI 已归档会话；`list current` 只看当前工作目录，推荐用 `switch current <编号>` 按同一列表切换；紧接着直接 `switch <编号>` 也会复用最近一次列表编号；普通无列表上下文时 `switch <编号>` 对应全量列表；switch 回复同时带会话名字和完整 id；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建） |
 | `/preset (p) — list \| switch <名称\|编号> \| status` | 默认 Preset（写入 DSH 设置，与 GUI 同步；`status` 看全局默认，不是当前会话；当前会话无内容时 `switch` 立即应用） |
@@ -137,9 +138,9 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 | `/perm — status \| list \| switch <名称\|编号> \| default [名称\|编号]` | 权限管理（switch 实时切当前会话；default 写 DSH 设置，新会话生效） |
 | `/reasoning — [list \| default \| switch <等级>]` | 推理等级：查看当前/默认与模型支持的等级；`switch <等级>` 切换（实时 + 写默认）；`default` 恢复模型默认 |
 | `/enter queue\|steer\|status`（`/busy`） | 繁忙时投递：agent 运行中收到微信消息时排队（`queue`）还是插话进当前轮次（`steer`）；读写 DSH 设置 `ui-conversation.busyEnter`，与 GUI「繁忙时 Enter 键行为」同源同步；空闲会话始终新开一轮 |
-| `/silent on\|off`（`/sl`） | 静默模式：开启后 agent 每轮的中间过程输出（工具调用、思考等）不再逐条推送，只在轮次结束时发送最终回复，避免刷屏；写入 `config.json`，重新扫码后仍保留，设置页可切换 |
+| `/silent on\|off`（`/sl`） | 静默模式：开启后仅在轮次结束发送最后一条助手正文；关闭后思考与工具合并为「执行过程」，正文独立发送；写入 `config.json`，重新扫码后仍保留，设置页可切换 |
 | `/surface on\|off\|status`（`/wxprompt`） | 微信渠道提示词注入开关（默认关）；正文在设置页编辑，不在微信改 |
-| `/notify on\|off\|status`（`/watch`） | 跨会话决策推送总闸（开：任意会话权限/提问卡整卡推送并可直接回复；关：只答当前会话），默认关闭；`/notify tasks on\|off` 单独开关后台任务完成/报错提醒（设置页可切换） |
+| `/notify on\|off\|status`（`/watch`） | 跨会话决策推送总闸（开：任意会话权限/提问卡整卡推送并可直接回复；关：只答当前会话），默认关闭；`/notify tasks on\|off` 单独开关跨会话任务完成/报错提醒（设置页可切换） |
 | `/history [all] [数量]` | 查看最近历史（默认 5 条，最多 20 条；默认只看你和助手，`all` 含压缩检查点/插件注入等系统消息）；当前可回答的提问/权限卡会完整重发（决策推送开启时含其它会话） |
 | `/stop` | 中断当前任务 |
 | `/next` | 继续发送因微信限制被缓存的消息 |
@@ -174,10 +175,10 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 同款交付），挂载到 `settings.section` slot（nav 顺序 40）：
 
 - **状态卡** — 登录阶段（未登录/等待扫码/已扫码，待确认/已登录/登录失败）、Bot ID、
-  监控运行状态、已绑定用户数，与 `跨会话决策推送` / `任务完成提醒` / `静默` 开关同卡展示
+  监控运行状态、已绑定用户数，与 `跨会话决策推送` / `跨会话任务完成提醒` / `静默` 开关同卡展示
 - **扫码** — 未登录时页面内直接显示二维码，扫码确认后自动进入已登录
 - **操作按钮** — `重新扫码`（清除 token 重新登录）、`退出登录`，与保存配置同行
-- **连接配置** — 设置页只展示 `cwd` / `cardTimeoutMs`，以及 `跨会话决策推送` / `任务完成提醒` / `静默` / 微信渠道提示词（开关 + 正文）；保存即生效。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` 仍可写 `~/.dsh-wechat/config.json` 或插件行 `config:`，设置页保存不会覆盖它们。网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
+- **连接配置** — 设置页只展示 `cwd` / `cardTimeoutMs`，以及 `跨会话决策推送` / `跨会话任务完成提醒` / `静默` / 微信渠道提示词（开关 + 正文）；保存即生效。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` 仍可写 `~/.dsh-wechat/config.json` 或插件行 `config:`，设置页保存不会覆盖它们。网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
 - **帮助** — 卡片标题行的 **帮助** 按钮展开本地命令表（与微信 `/help` 同源）；DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出
 
 与宿主通信走插件自己的 HTTP API（`/wechat/api/status|help|config|relogin|
@@ -205,7 +206,7 @@ logout`），客户端零 `@deepseek-ai` 依赖。
 | `textChunkLimit` | `4000` | 微信单条消息长度上限 |
 | `cardTimeoutMs` | `1800000` | 提问/权限卡软超时（30 分钟） |
 | `crossSessionNotify` | `false` | 跨会话决策推送总闸（任意会话的权限/提问卡整卡推送，微信直接回复） |
-| `notifyTaskEvents` | `false` | 后台任务完成/报错提醒（独立于决策推送，默认关） |
+| `notifyTaskEvents` | `false` | 跨会话任务完成/报错提醒（独立于决策推送，默认关） |
 | `silent` | `false` | 静默模式总闸（只发每轮最终回复；重新扫码后仍保留） |
 | `surfacePromptEnabled` | `false` | 微信渠道提示词总闸（微信消息驱动时注入，GUI 消息时仍隐藏） |
 | `surfacePrompt` | 见默认中文 | 注入正文（设置页编辑；含 `{{` 会被打散以免打断 DSH interpolate） |
@@ -215,13 +216,15 @@ logout`），客户端零 `@deepseek-ai` 依赖。
 ```bash
 npm install
 npm run build    # tsc → dist/
-npm test         # vitest（splitText/格式化/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词/DSH 0.2.0-rc.2 适配）
+npm test         # vitest（splitText/出站 Markdown 过滤/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词/DSH >=0.2.0-rc.2 适配）
 ```
 
-当前版本针对 **DeepSeek Harness `0.2.0-rc.2`** 的宿主 API，兼容性精确限定为此版本；仓库本身不依赖任何 `@deepseek-ai/dsh-*` 运行时包。
+当前版本针对 **DeepSeek Harness `>=0.2.0-rc.2`** 的宿主 API；仓库本身不依赖任何 `@deepseek-ai/dsh-*` 运行时包。
 
 ## 已知边界
 
+- 出站文本按官方微信渠道（[Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin)）的 `StreamingMarkdownFilter` 处理，而不是一律剥掉 Markdown：`**粗体**`、链接、H1–H4 标题、代码块（```）、行内代码、引用（`>`）、分隔线（`---`）与表格都原样发送；只去掉微信不渲染的部分——图片（`![alt](url)` 整段移除）、H5/H6 标题标记，以及包裹中文的单个 `*`/`_`/`***`/`___` 强调标记（内容保留）。
+- 微信「执行过程」是单条普通文本消息，没有桌面端的折叠交互。内容采用桌面端收起条目的规则：思考首行、中文工具标题与路径/描述，成功输出隐藏、失败仅一行错误、任务清单显示完成计数与变更；长分组标明省略数量，可在 DSH 查看完整记录。过程仅覆盖当前绑定会话，静默时隐藏；已推送过程与正文共享发送额度，超限走 `/next`。未推送的过程分组不跨进程重启保存。
 - 审批/提问卡挂在 Host 的 `approval/request` 与 `user-questions/request`
   waterfall 上，与 GUI 竞速；无微信 peer 时立即 `next()`，软超时只撤微信卡、不替用户决策。微信先答时会 abort 传给 GUI 的 `request.signal`（不碰 turn 的 `exec.signal`），Web composer 卡随 Gateway `cancel` 帧收起。DSH 重启后未决卡片随 turn 消失（上游已知限制）。
 - `send_wechat` 工具对所有 agent 可见；任何会话的 agent 都能调用——绑定会话发送到绑定用户，未绑定会话回退到首个已知微信用户（单用户部署默认行为）。

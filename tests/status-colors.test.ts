@@ -177,7 +177,7 @@ describe("/status — emoji color markers", () => {
     const bridge = makeBridge({ crossNotify: false });
     const text = await runStatus(bridge);
     expect(text).toContain("• 跨会话决策推送: ⚪ off");
-    expect(text).toContain("• 任务完成提醒: ⚪ off");
+    expect(text).toContain("• 跨会话任务完成提醒: ⚪ off");
   });
 
   it("微信提示词 on is good green, off is neutral", async () => {

@@ -30,6 +30,8 @@ import { MessageType, TypingStatus, UploadMediaType } from "../weixin/types.js";
 import type { WeixinMessage } from "../weixin/types.js";
 import { extractText, weixinMessageToPrompt } from "../adapter/inbound.js";
 import { formatForWeChat } from "../adapter/outbound.js";
+import { ExecutionProcess } from "../adapter/process-format.js";
+import type { AssistantStreamFrame, OutputContentBlock, ToolCallData, ToolResultData } from "../dsh/types.js";
 import { formatQuestionForWeChat, parseQuestionReply, buildAnswer } from "../adapter/question-format.js";
 import { formatApprovalCard, parseApprovalReply } from "../adapter/approval-format.js";
 import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
@@ -295,6 +297,17 @@ export class WeChatDSHBridge {
    */
   private readonly pushedCardRpcIds = new Map<string, Set<string>>();
   private readonly silentBuffers = new Map<string, string[]>();
+  /** Desktop-style process group for the currently bound conversation. */
+  private readonly processes = new Map<string, ExecutionProcess>();
+  private readonly assistantStreams = new Map<string, {
+    attemptId: string; revision: number; turn: number; step: number; lastIndex: number;
+    proseStarted: boolean; reasoning: Map<number, string>; handledReasoning: Set<number>;
+  }>();
+  private readonly streamedReasoning = new Map<string, Set<number>>();
+  /** Bounded dedup of committed output records (not transient stream chunks). */
+  private readonly seenOutputEvents = new Set<string>();
+  /** Invalidates queued sends across logout / re-login, even for the same peer. */
+  private outboundGeneration = 0;
   /** One global queue and budget: dsh-wechat intentionally serves one peer. */
   private outboundCache: CachedMessage[] = [];
   private wechatMsgCount = 0;
@@ -856,6 +869,12 @@ export class WeChatDSHBridge {
   async stop(): Promise<void> {
     this.stopIlink("plugin-stop");
     this.stopInteraction();
+    this.processes.clear();
+    this.assistantStreams.clear();
+    this.streamedReasoning.clear();
+    this.silentBuffers.clear();
+    this.seenOutputEvents.clear();
+    this.outboundGeneration++;
     await this.monitorTask;
   }
 
@@ -956,6 +975,11 @@ export class WeChatDSHBridge {
    * the next inbound ping.
    */
   private discardQueuedOutbound(reason: string): void {
+    this.outboundGeneration++;
+    this.processes.clear();
+    this.assistantStreams.clear();
+    this.streamedReasoning.clear();
+    this.seenOutputEvents.clear();
     const parked = this.outboundCache.length;
     this.outboundCache = [];
     this.cacheNoticeSent = false;
@@ -1072,6 +1096,12 @@ export class WeChatDSHBridge {
     }
 
     if (typeof patch.silent === "boolean") {
+      if (patch.silent !== before.silent) {
+        this.processes.clear();
+        this.assistantStreams.clear();
+        this.streamedReasoning.clear();
+        if (!patch.silent) this.silentBuffers.clear();
+      }
       for (const user of this.state.all()) {
         this.state.update(user.userId, { silent: patch.silent });
       }
@@ -1424,8 +1454,9 @@ export class WeChatDSHBridge {
 
   /**
    * Handle one session event for a WeChat-bound session.
-   * `assistant/message` → send (or buffer in silent mode);
-   * `turn/end` → flush the silent buffer.
+   * Assistant prose stays separate; reasoning and tool events accumulate in
+   * one process group until prose, a decision card, or turn/end.
+   * Silent mode buffers only the last assistant prose.
    * (Approval/question cards are frame-driven via handleMuxFrame, not
    * session events — this listener only carries agent output.)
    *
@@ -1433,6 +1464,14 @@ export class WeChatDSHBridge {
    * the message lives in `event.data.message`, NOT at the top level.
    */
   handleSessionEvent(sessionId: string, event: { type: string; [k: string]: unknown }): void {
+    if (this.interactionStopped) return;
+    if (["assistant/message", "tool/call", "tool/result", "turn/start", "turn/end"].includes(event.type)
+      && typeof event.seq === "number" && Number.isSafeInteger(event.seq) && event.seq >= 0) {
+      const key = JSON.stringify([sessionId, event.seq]);
+      if (this.seenOutputEvents.has(key)) return;
+      this.seenOutputEvents.add(key);
+      if (this.seenOutputEvents.size > 256) this.seenOutputEvents.delete(this.seenOutputEvents.values().next().value!);
+    }
     // Mark the message source BEFORE the agent assembles its prompt.
     // Agent followups (WeChat AND GUI) go through `inbox.append` →
     // `session.append('agent/inbox/spliced')` — this event is emitted at
@@ -1504,6 +1543,7 @@ export class WeChatDSHBridge {
 
     const user = this.userForAgent(sessionId);
     if (!user) {
+      this.clearSessionOutput(sessionId);
       if (event.type === "turn/end") {
         void this.notifyCrossSessionTurnEnd(sessionId);
       }
@@ -1534,37 +1574,60 @@ export class WeChatDSHBridge {
       })();
     }
 
+    if (this.isSilent() || !this.token || this.tokenGiveUp) this.processes.delete(sessionId);
     switch (event.type) {
+      case "turn/start":
+        this.clearSessionOutput(sessionId);
+        break;
       case "assistant/message": {
-        const data = event.data as { message?: { content?: Array<{ type: string; text?: string }> } };
-        const text = (data?.message?.content ?? [])
-          .filter((b) => b.type === "text" && b.text)
-          .map((b) => b.text)
-          .join("\n");
-        if (!text) return;
-        // Typing indicator stays on through the whole turn — we do NOT
-        // cancel here. agent.status is still "running" while text is being
-        // produced; the indicator mirrors that status and is only removed
-        // on turn/end / agent/error / plugin stop.
+        const data = event.data as { turn?: number; step?: number; message?: { content?: OutputContentBlock[] } };
+        const blocks = data?.message?.content ?? [];
+        const activeStream = this.assistantStreams.get(sessionId);
+        const stream = activeStream?.turn === data?.turn && activeStream?.step === data?.step ? activeStream : undefined;
+        const streamKey = JSON.stringify([sessionId, event.seq]);
+        const handledReasoning = this.streamedReasoning.get(streamKey) ?? stream?.handledReasoning;
+        this.streamedReasoning.delete(streamKey);
         if (this.isSilent()) {
-          const buffer = this.silentBuffers.get(sessionId) ?? [];
-          buffer.push(text);
-          this.silentBuffers.set(sessionId, buffer);
-        } else {
-          void this.sendReply(user.userId, text);
+          const text = blocks.filter((b) => b.type === "text" && typeof b.text === "string")
+            .map((b) => b.text).join("\n");
+          if (text.trim()) this.silentBuffers.set(sessionId, [text]);
+          break;
         }
+        // Keep adjacent prose blocks together, flushing the process group BEFORE prose.
+        let prose: string[] = [];
+        const sendProse = () => {
+          if (!prose.length) return;
+          this.flushProcess(sessionId, user.userId);
+          this.pushOutput(user.userId, prose.join("\n"));
+          prose = [];
+        };
+        for (const [blockIndex, block] of blocks.entries()) {
+          if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+            prose.push(block.text);
+          } else if (block.type === "reasoning") {
+            sendProse();
+            if (!handledReasoning?.has(blockIndex)) this.processFor(sessionId)?.addReasoning(block);
+          }
+          // Calls are handled only by tool/call, never by assistant tool blocks.
+        }
+        sendProse();
+        break;
+      }
+      case "tool/call": {
+        const data = event.data as ToolCallData;
+        if (data?.callId && data.name) this.processFor(sessionId)?.addCall(data.callId, data.name, data.arguments ?? "");
+        break;
+      }
+      case "tool/result": {
+        const data = event.data as ToolResultData;
+        if (data?.message) this.processFor(sessionId)?.addResult(data);
         break;
       }
       case "turn/end": {
+        this.flushProcess(sessionId, user.userId);
         const buffer = this.silentBuffers.get(sessionId);
-        if (buffer && buffer.length > 0) {
-          this.silentBuffers.delete(sessionId);
-          // Silent mode: only the last text of the turn reaches WeChat.
-          void this.sendReply(user.userId, buffer[buffer.length - 1]!);
-        }
-        // Turn finished → agent.status flips back to "idle". Always clear
-        // the typing indicator here, regardless of whether any text was
-        // produced.
+        if (this.isSilent() && buffer?.length) this.pushOutput(user.userId, buffer[buffer.length - 1]!);
+        this.clearSessionOutput(sessionId);
         this.endTyping(user.userId, "turn-end");
         this.clearCrossSessionTurnNotified(user.userId, sessionId);
         break;
@@ -1572,9 +1635,99 @@ export class WeChatDSHBridge {
     }
   }
 
+  /** Flush accumulated process on the FIRST prose chunk, before the response commits. */
+  handleAssistantStream(sessionId: string, frame: AssistantStreamFrame): void {
+    const user = this.userForAgent(sessionId);
+    if (this.interactionStopped || !user || this.isSilent() || !this.token || this.tokenGiveUp) {
+      this.assistantStreams.delete(sessionId);
+      return;
+    }
+    if (frame.type === "start") {
+      this.assistantStreams.set(sessionId, {
+        attemptId: frame.attemptId, revision: frame.revision, turn: frame.turn, step: frame.step,
+        lastIndex: -1, proseStarted: false, reasoning: new Map(), handledReasoning: new Set(),
+      });
+      return;
+    }
+    const stream = this.assistantStreams.get(sessionId);
+    // The runtime allocates a fresh `revision` for EVERY emitted frame (start,
+    // each chunk, end), so a strictly newer value — never an equal one —
+    // identifies a frame of the live attempt. Requiring equality here dropped
+    // every chunk and silently pushed the process back to the durable commit.
+    if (!stream || stream.attemptId !== frame.attemptId || frame.revision <= stream.revision) return;
+    stream.revision = frame.revision;
+    if (frame.type === "end") {
+      if (frame.outcome.kind === "committed" && frame.outcome.eventType === "assistant/message" && stream.handledReasoning.size) {
+        this.streamedReasoning.set(JSON.stringify([sessionId, frame.outcome.seq]), new Set(stream.handledReasoning));
+        if (this.streamedReasoning.size > 256) this.streamedReasoning.delete(this.streamedReasoning.keys().next().value!);
+      }
+      this.assistantStreams.delete(sessionId);
+      return;
+    }
+    if (frame.index <= stream.lastIndex) return;
+    stream.lastIndex = frame.index;
+    const chunk = frame.chunk;
+    const index = chunk.index;
+    if (chunk.type === "reasoning-delta" && typeof index === "number" && typeof chunk.text === "string") {
+      // Only the first line is visible in the desktop collapsed row.
+      const prior = stream.reasoning.get(index) ?? "";
+      if (!prior.includes("\n")) stream.reasoning.set(index, (prior + chunk.text).slice(0, 1000));
+    } else if (chunk.type === "block-end" && chunk.block?.type === "reasoning" && typeof index === "number") {
+      stream.reasoning.set(index, chunk.block.text ?? "");
+    }
+    const prose = chunk.type === "text-delta" ? chunk.text
+      : chunk.type === "block-end" && chunk.block?.type === "text" ? chunk.block.text : undefined;
+    if (!stream.proseStarted && typeof prose === "string" && prose.trim()) {
+      stream.proseStarted = true;
+      for (const [blockIndex, text] of stream.reasoning) {
+        if (!stream.handledReasoning.has(blockIndex) && text.trim()) {
+          this.processFor(sessionId)?.addReasoning({ type: "reasoning", text });
+          stream.handledReasoning.add(blockIndex);
+        }
+      }
+      this.flushProcess(sessionId, user.userId);
+    }
+  }
+
+  private processFor(sessionId: string): ExecutionProcess | undefined {
+    if (this.isSilent() || !this.token || this.tokenGiveUp) return undefined;
+    let process = this.processes.get(sessionId);
+    if (!process) {
+      process = new ExecutionProcess(this.userForAgent(sessionId)?.cwd);
+      this.processes.set(sessionId, process);
+    }
+    return process;
+  }
+
+  private flushProcess(sessionId: string, userId: string): void {
+    const process = this.processes.get(sessionId);
+    if (this.isSilent() || !this.token || this.tokenGiveUp || this.userForAgent(sessionId)?.userId !== userId) {
+      this.processes.delete(sessionId);
+      return;
+    }
+    const text = process?.take(this.config.textChunkLimit);
+    if (text) this.pushOutput(userId, text, true);
+  }
+
+  private pushOutput(userId: string, text: string, plainText = false): void {
+    void this.sendReply(userId, text, { plainText }).catch((err) => this.log(`output send failed: ${String(err)}`));
+  }
+
+  /** Drop unfinished process / silent prose when its conversation leaves the live feed. */
+  clearSessionOutput(sessionId: string): void {
+    this.assistantStreams.delete(sessionId);
+    for (const key of this.streamedReasoning.keys()) {
+      if ((JSON.parse(key) as [string, number])[0] === sessionId) this.streamedReasoning.delete(key);
+    }
+    this.processes.delete(sessionId);
+    this.silentBuffers.delete(sessionId);
+  }
+
   /** Notify the bound user of an agent error. */
   handleAgentError(agentId: string, error: unknown): void {
     const user = this.userForAgent(agentId);
+    if (user) this.flushProcess(agentId, user.userId);
+    this.clearSessionOutput(agentId);
     if (!user) {
       void this.notifyCrossSessionError(agentId, error);
       return;
@@ -1942,6 +2095,7 @@ export class WeChatDSHBridge {
    * (current session, plus other sessions while the decision gate is on).
    */
   private async sendApprovalCard(userId: string, card: PendingApproval): Promise<void> {
+    this.flushProcess(card.sessionId, userId);
     const context = await this.sessionContextLabel(card.sessionId);
     const { index, total } = this.pnOfCard(userId, "approval", card.rpcId);
     const currentId = this.state.getUser(userId)?.sessionId;
@@ -1961,6 +2115,7 @@ export class WeChatDSHBridge {
     card: PendingQuestion,
     questions: AskUserQuestionItem[],
   ): Promise<void> {
+    this.flushProcess(card.sessionId, userId);
     const context = await this.sessionContextLabel(card.sessionId);
     const { index, total } = this.pnOfCard(userId, "question", card.rpcId);
     const header = total > 1 ? `❓ 提问卡 ${index}/${total}` : "❓ 提问";
@@ -2473,7 +2628,7 @@ export class WeChatDSHBridge {
       const task = this.notifyTaskEventsEnabled() ? "on" : "off";
       await this.sendReply(
         userId,
-        `🔔 跨会话决策推送: ${on}（任意会话的权限/提问卡整卡推送，微信直接回复）\n后台任务完成/报错提醒: ${task}\n切换决策推送: /notify on|off\n切换任务提醒: /notify tasks on|off`,
+        `🔔 跨会话决策推送: ${on}（任意会话的权限/提问卡整卡推送，微信直接回复）\n跨会话任务完成提醒: ${task}\n切换决策推送: /notify on|off\n切换任务提醒: /notify tasks on|off`,
       );
       return;
     }
@@ -2490,12 +2645,12 @@ export class WeChatDSHBridge {
     }
     if (cmd.kind === "tasks-on") {
       this.persistEditable({ notifyTaskEvents: true });
-      await this.sendReply(userId, "✅ 后台任务完成/报错提醒已开启。");
+      await this.sendReply(userId, "✅ 跨会话任务完成提醒已开启。");
       return;
     }
     if (cmd.kind === "tasks-off") {
       this.persistEditable({ notifyTaskEvents: false });
-      await this.sendReply(userId, "🔕 后台任务完成/报错提醒已关闭。");
+      await this.sendReply(userId, "🔕 跨会话任务完成提醒已关闭。");
       return;
     }
   }
@@ -2506,6 +2661,12 @@ export class WeChatDSHBridge {
    * store still see the in-memory change for the rest of the process.
    */
   private persistEditable(patch: Partial<EditableConfig>): void {
+    if (typeof patch.silent === "boolean" && patch.silent !== this.config.silent) {
+      this.processes.clear();
+      this.assistantStreams.clear();
+      this.streamedReasoning.clear();
+      if (!patch.silent) this.silentBuffers.clear();
+    }
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) continue;
       (this.config as unknown as Record<string, unknown>)[key] = value;
@@ -2542,7 +2703,7 @@ export class WeChatDSHBridge {
       await this.sendReply(userId, "🔇 静默模式已开启：每轮只发送最终回复。");
     } else if (mode === "off") {
       this.setSilent(false, user.userId);
-      await this.sendReply(userId, "🔊 静默模式已关闭。");
+      await this.sendReply(userId, "🔊 静默模式已关闭：思考与工具合并为执行过程，正文独立发送。");
     } else {
       await this.sendReply(userId, `静默模式: ${this.isSilent() ? "on" : "off"}（/silent on|off 切换）`);
     }
@@ -2672,6 +2833,7 @@ export class WeChatDSHBridge {
    */
   private async switchUserWorkspace(user: UserState, workspacePath: string): Promise<string> {
     this.lastSessionListByUser.delete(user.userId);
+    this.clearSessionOutput(user.sessionId);
     user.cwd = workspacePath;
     user.cwdExplicit = true;
     user.sessionId = "";
@@ -2830,6 +2992,7 @@ export class WeChatDSHBridge {
         }
         const record = recent[index - 1]!;
         this.lastSessionListByUser.delete(user.userId);
+        this.clearSessionOutput(user.sessionId);
         user.sessionId = record.header.id;
         if (record.header.cwd) {
           user.cwd = record.header.cwd;
@@ -2877,6 +3040,7 @@ export class WeChatDSHBridge {
         }
         const blank = await this.findBlankSession(user.cwd, user.sessionId);
         if (blank) {
+          this.clearSessionOutput(user.sessionId);
           user.sessionId = blank;
           this.state.update(user.userId, { sessionId: user.sessionId });
           this.trackWatchedSession(user.userId, blank);
@@ -2918,6 +3082,7 @@ export class WeChatDSHBridge {
     wording?: { success: string },
   ): Promise<void> {
     this.lastSessionListByUser.delete(user.userId);
+    this.clearSessionOutput(user.sessionId);
     user.sessionId = "";
     this.state.update(user.userId, { sessionId: "" });
     const { agent } = await this.agents.ensure(user);
@@ -3594,7 +3759,7 @@ export class WeChatDSHBridge {
       `• 繁忙投递: ${this.ops.busyEnter() === "steer" ? this.paintBadge("steer（插话）", "positive") : this.paintBadge("queue（排队）", "neutral")}`,
       // 跨会话决策推送 on = extra delivery enabled (good); off = quiet (neutral).
       `• 跨会话决策推送: ${this.paintBadge(crossEffective, crossEffective === "on" ? "positive" : "neutral")}`,
-      `• 任务完成提醒: ${this.paintBadge(this.notifyTaskEventsEnabled() ? "on" : "off", this.notifyTaskEventsEnabled() ? "positive" : "neutral")}`,
+      `• 跨会话任务完成提醒: ${this.paintBadge(this.notifyTaskEventsEnabled() ? "on" : "off", this.notifyTaskEventsEnabled() ? "positive" : "neutral")}`,
     ];
 
     // Session-level projection registry (`ctx.sessionProjections`). One
@@ -3837,7 +4002,10 @@ export class WeChatDSHBridge {
     item: CachedMessage,
     opts?: { parkOnError?: boolean },
   ): Promise<"sent" | "cached" | "failed"> {
-    return this.serializeOutbound(() => this.deliverOutboundLocked(userId, item, opts));
+    const generation = this.outboundGeneration;
+    return this.serializeOutbound(() => generation !== this.outboundGeneration
+      ? Promise.resolve("failed" as const)
+      : this.deliverOutboundLocked(userId, item, opts));
   }
 
   private async deliverOutboundLocked(
@@ -3847,6 +4015,7 @@ export class WeChatDSHBridge {
   ): Promise<"sent" | "cached" | "failed"> {
     const parkOnError = opts?.parkOnError !== false;
     const token = this.token;
+    const generation = this.outboundGeneration;
     if (!token || this.tokenGiveUp) {
       this.logDropOutbound(item.kind === "text" ? item.text.slice(0, 60) : item.fileName);
       return "failed";
@@ -3869,6 +4038,12 @@ export class WeChatDSHBridge {
       }
     }
 
+    if (generation !== this.outboundGeneration) return "failed";
+    // Payloads behind a failed / rate-limited item must not overtake it.
+    if (parkOnError && this.outboundCache.length > 0) {
+      this.parkOutbound(userId, item);
+      return "cached";
+    }
     const count = this.wechatMsgCount;
     if (count >= MSG_LIMIT_MAX) {
       if (!parkOnError) return "failed";
@@ -3903,6 +4078,7 @@ export class WeChatDSHBridge {
       return "sent";
     } catch (err) {
       this.log(`outbound send error (${item.kind}): ${String(err)}`);
+      if (generation !== this.outboundGeneration) return "failed";
       if (isMessageLimitError(err)) {
         this.wechatMsgCount = MSG_LIMIT_MAX;
         if (!parkOnError) return "failed";
@@ -3970,25 +4146,22 @@ export class WeChatDSHBridge {
     }
   }
 
-  private async sendReply(userId: string, text: string, opts?: { parkOnError?: boolean }): Promise<void> {
-    const parkOnError = opts?.parkOnError !== false;
+  private async sendReply(userId: string, text: string, opts?: { parkOnError?: boolean; plainText?: boolean }): Promise<void> {
     if (!this.token || this.tokenGiveUp) {
       this.logDropOutbound(text.slice(0, 60));
       return;
     }
-    const formatted = formatForWeChat(text);
+    const formatted = opts?.plainText ? text.trim() : formatForWeChat(text);
+    if (!formatted) return;
     const segments = splitText(formatted, this.config.textChunkLimit);
-    if (this.tokenInvalid) {
-      this.logDropOutbound(text.slice(0, 60));
-      if (!parkOnError) return;
-      await this.serializeOutbound(async () => {
-        for (const segment of segments) this.parkOutbound(userId, { kind: "text", text: segment });
-      });
-      return;
-    }
-    for (const segment of segments) {
-      await this.deliverOutbound(userId, { kind: "text", text: segment }, opts);
-    }
+    const generation = this.outboundGeneration;
+    // One batch reserves all segments in order before a later reply can enter.
+    await this.serializeOutbound(async () => {
+      for (const segment of segments) {
+        if (generation !== this.outboundGeneration) return;
+        await this.deliverOutboundLocked(userId, { kind: "text", text: segment }, opts);
+      }
+    });
   }
 
   /** After -14 recovery, silently flush the one peer's parked outbound. */
