@@ -3154,6 +3154,10 @@ export class WeChatDSHBridge {
         // Write the DSH settings document — the same default the GUI settings
         // page edits, so both sides see the same selection.
         const saved = await this.ops.saveDefaultPreset(preset.id);
+        if (!saved) {
+          await this.sendReply(userId, `⚠️ 默认 Preset 切换失败: ${preset.name ?? preset.id}（无法写入 DSH 设置，默认 Preset 未更改）。`);
+          return;
+        }
         // Apply to the live session only while it has produced nothing.
         const agent = this.agents.get(user);
         const empty = agent ? sessionEvents(agent.session).length === 0 : true;
@@ -3167,8 +3171,7 @@ export class WeChatDSHBridge {
         } else if (agent) {
           applied = "（当前会话已有内容，Preset 将应用于下一个新会话）";
         }
-        const synced = saved ? "" : "⚠️ 无法写入 DSH 设置（仅本次进程内生效）";
-        await this.sendReply(userId, `✅ 默认 Preset 已切换: ${preset.name ?? preset.id}${applied}${synced}。`);
+        await this.sendReply(userId, `✅ 默认 Preset 已切换: ${preset.name ?? preset.id}${applied}。`);
         return;
       }
       case "status": {

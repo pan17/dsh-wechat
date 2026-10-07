@@ -758,18 +758,29 @@ export class DshOps {
   }
 
   /**
-   * Persist the deployment-wide default preset into the DSH settings document
-   * (`agent-presets` namespace) — the exact document the GUI settings page
-   * edits, so a change from WeChat shows up there and vice versa. Returns
-   * false when no settings provider is mounted or the write is refused.
+   * Persist the same default selection the GUI edits. DSH 0.2 exposes
+   * `agent-preset-registry.selectedDefault` as a live settings field; the
+   * ordinary `default` config is only the deployment fallback. Older hosts
+   * use `agent-presets.default` instead.
    */
   async saveDefaultPreset(presetId: string): Promise<boolean> {
     const settings = this.get<{
+      describe?(): readonly { ns: string }[];
       update(ns: SettingsNamespace, patch: object): Promise<void>;
     }>("settings");
     if (!settings) return false;
     try {
-      await settings.update("agent-presets" as SettingsNamespace, { default: presetId });
+      const descriptors = settings.describe?.();
+      const registry = descriptors?.find((row) => row.ns === "agent-preset-registry")
+        ?? descriptors?.find((row) => row.ns.endsWith(":agent-preset-registry"));
+      if (registry) {
+        await settings.update(registry.ns as SettingsNamespace, { selectedDefault: presetId });
+      } else {
+        const legacy = descriptors?.find((row) => row.ns === "agent-presets");
+        // A describe-capable host must advertise the entry before we write.
+        if (descriptors && !legacy) return false;
+        await settings.update((legacy?.ns ?? "agent-presets") as SettingsNamespace, { default: presetId });
+      }
       return true;
     } catch (err) {
       console.error(`[dsh-wechat] save default preset failed: ${String(err)}`);
