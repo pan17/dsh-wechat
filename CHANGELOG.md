@@ -71,6 +71,10 @@
 - `tests/session-log.test.ts` 增加一例平台原生绝对根目录的 `sessionLogPath` 断言（25 例），并修正原断言对 `resolveDshHome` 返回值的比较——原写法只在 Windows 成立。
 - 新增 `tests/redact.test.ts`、`tests/push-governance.test.ts`、`tests/plugin-dispose.test.ts`：脱敏规则（含误伤边界的两条显式断言）、限流与白名单、dispose 与换绑的相反语义。
 - `tests/config-store.test.ts` 增加新配置键的持久化、非法值拒绝与默认值断言；`tests/split-text.test.ts` 按新分段契约重写（含唯一允许的超长例外：最小合法形式本身就超过预算的表格/围栏）；`tests/cold-start.test.ts` 改为断言溢出时**不丢**任何一条。
+- 新增 `tests/temp-cleanup.setup.ts`（vitest `globalSetup`）：回收测试用 `fs.mkdtempSync` 建出的临时目录。`mkdtempSync` **只创建、从不删除**，而 33 个使用它的测试文件里只有 10 个记得 `rmSync`，其余 23 个（`session-mgmt` 9 处、`cross-session-notify` 8 处，`corrupt-session` / `final-only` / `frames` / `history-truncation` / `preset-display` 各 2 处，另 16 个文件各 1 处）每次运行都往外漏——单次 `npm test` 实测产生 **364 个**孤儿目录。长期反复跑测试的后果是可量化的：截至本次修复，本机 OS 临时目录里已堆积 **21294 个**此类残留（`dsh-wx-sess` 2304、`dsh-wx-cross` 2266、`dsh-wx-frame` 2143、`dsh-wx-type` 1415 居前），其中 10-12 / 10-13 两天占 82.6%，正对应 0.10.0 / 0.11.0 的密集开发。
+  - 清理放在 `globalSetup` 而非逐个测试文件补 `finally`：后者改动面大，且**以后新增的测试仍会漏**；前者一次性收口，对现有与将来的用例都生效。
+  - 两条安全约束，缺一不可：**① 只删「本次新增」的条目**——`setup` 先对临时目录做快照，`teardown` 只删除快照之外的，因此并发运行的另一个测试进程正在用的目录不会被误删；**② 只删前缀白名单内的条目**（`dsh-wx-` / `dsh-home-` / `dsh-wechat-` / `wx-process-` / `send-wechat-`）——宿主自身的 `dsh-spill-*`、`dsh-subprocess-*`、`dsh-workspace-changes-*`、`dsh-acl-*`、`dsh-mcp-probe-cwd` 不匹配任何前缀，**永不被触碰**，所以「一边跑测试、一边有 DSH 会话在跑」不会互相破坏。`setup` 未执行时 `teardown` 直接返回（`preexisting` 为 `null`），避免任何「快照缺失 ⇒ 全删」的退化路径。
+  - 该残留**不涉及凭据泄漏**：抽查 `dsh-wx-relogin-*/auth/token.json` 内容为 `{"token":"t","baseUrl":"https://gw","accountId":"b1","userId":"u"}`，是测试夹具而非真实微信凭据。占用亦极小（21294 个目录合计仅 6.47 MB，多数为空目录或数百字节的 `state.json`）——**真正的问题是条目数量**，而非体积。
 
 ## [0.10.0] - 2026-10-13
 

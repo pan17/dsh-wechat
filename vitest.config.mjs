@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts", "tests/**/*.test.ts"],
     environment: "node",
+    // Reclaims the temp dirs the suite creates with `mkdtempSync`, which
+    // creates but never deletes. Without this each run orphans ~360 dirs.
+    globalSetup: ["./tests/temp-cleanup.setup.ts"],
     // Vitest v4 on Ubuntu CI can tear the worker RPC down while a
     // console.log is still in flight (EnvironmentTeardownError:
     // Closing rpc while "onUserConsoleLog" was pending). All tests
