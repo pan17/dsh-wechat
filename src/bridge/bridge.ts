@@ -1306,6 +1306,8 @@ export class WeChatDSHBridge {
     // broken gateway cannot turn dispose into a rejection.
     await this.flushAllPendingFinal("dispose");
     await this.monitorTask;
+    // Release the audit descriptor last: everything above can still record.
+    this.audit.close();
   }
 
   /** Stop the WeChat long-poll and typing indicators; leave Host answerers running. */
