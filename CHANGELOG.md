@@ -1,15 +1,15 @@
 # Changelog
 
-## [0.11.1] - 2026-10-19
-
-### Compatibility
-
-- **DSH 0.2.1-rc.2 adaptation.** The enforced host range is now `>=0.2.1-0 <0.3.0` in both `engines.dsh` and the `@deepseek-ai/dsh` peer; 0.2.1-rc.2 is explicitly in the admission matrix. The 0.2.0 line is no longer claimed. No runtime API change was required: `dsh-wechat@0.11.0` passes a real rc.2 host smoke (HTTP 200 + boot marker).
-
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
 ## [Unreleased]
+
+## [0.12.0] - 2026-10-19
+
+### Compatibility
+
+- **DSH 0.2.1-rc.2 adaptation.** The enforced host range is now `>=0.2.1-0 <0.3.0` in both `engines.dsh` and the `@deepseek-ai/dsh` peer; 0.2.1-rc.2 is explicitly in the admission matrix. The 0.2.0 line is no longer claimed. No runtime API change was required: `dsh-wechat@0.11.0` passes a real rc.2 host smoke (HTTP 200 + boot marker).
 
 ### Changed
 
@@ -25,6 +25,11 @@
 ### Added
 
 - **`scripts/ci-local.sh` + README 开发须知：Windows 上"全绿"不等于 CI 绿。** CI 是 `ubuntu-latest`，而 PR #11 里一条断言把 Windows 形状的字面量 `C:\home\.dsh` 同时当输入和期望前缀——实现会先对该根目录做 `path.resolve`，在 POSIX 上它是**相对路径**、会解析到 cwd 之下，于是 `startsWith("C:\home\.dsh/sessions")` 恒为 false：本地必绿、CI 必红（该 PR 恰好从未跑过 CI，直到下一次推送才暴露，并因此让 `ci-green` 门禁拦住了 0.11.0 的发布）。脚本在与 CI 完全一致的环境里（复制到本机临时目录后 `npm ci && tsc --noEmit && vitest run`）复现整个流程，且不会用 Linux 版 esbuild/rollup 覆盖工作副本的 `node_modules`。
+
+- **测试临时目录回收（`tests/temp-cleanup.setup.ts`，vitest `globalSetup`）** —— `mkdtempSync` **只创建、从不删除**，而 33 个使用它的测试文件里只有 10 个记得 `rmSync`，其余 23 个（`session-mgmt` 9 处、`cross-session-notify` 8 处，`corrupt-session` / `final-only` / `frames` / `history-truncation` / `preset-display` 各 2 处，另 16 个文件各 1 处）每次运行都往外漏——单次 `npm test` 实测产生 **364 个**孤儿目录。长期反复跑测试的后果是可量化的：截至本次修复，本机 OS 临时目录里已堆积 **21294 个**此类残留（`dsh-wx-sess` 2304、`dsh-wx-cross` 2266、`dsh-wx-frame` 2143、`dsh-wx-type` 1415 居前），其中 10-12 / 10-13 两天占 82.6%，正对应 0.10.0 / 0.11.0 的密集开发。
+  - 清理放在 `globalSetup` 而非逐个测试文件补 `finally`：后者改动面大，且**以后新增的测试仍会漏**；前者一次性收口，对现有与将来的用例都生效。
+  - 两条安全约束，缺一不可：**① 只删「本次新增」的条目**——`setup` 先对临时目录做快照，`teardown` 只删除快照之外的，因此并发运行的另一个测试进程正在用的目录不会被误删；**② 只删前缀白名单内的条目**（`dsh-wx-` / `dsh-home-` / `dsh-wechat-` / `wx-process-` / `send-wechat-`）——宿主自身的 `dsh-spill-*`、`dsh-subprocess-*`、`dsh-workspace-changes-*`、`dsh-acl-*`、`dsh-mcp-probe-cwd` 不匹配任何前缀，**永不被触碰**，所以「一边跑测试、一边有 DSH 会话在跑」不会互相破坏。`setup` 未执行时 `teardown` 直接返回（`preexisting` 为 `null`），避免任何「快照缺失 ⇒ 全删」的退化路径。
+  - 该残留**不涉及凭据泄漏**：抽查 `dsh-wx-relogin-*/auth/token.json` 内容为 `{"token":"t","baseUrl":"https://gw","accountId":"b1","userId":"u"}`，是测试夹具而非真实微信凭据。占用亦极小（21294 个目录合计仅 6.47 MB，多数为空目录或数百字节的 `state.json`）——**真正的问题是条目数量**，而非体积。
 
 - **打字合并 / inbound merge window（`mergeEnabled`，默认关闭 = 需显式开启）** —— 此前每条微信消息都是一次独立 turn，一句话分五段发就要烧掉五轮。开启后同一聊天的裸文本进入缓冲区，静默窗口（`mergeSilenceMs`，默认 3000ms）到点或条数上限（`mergeMaxMsgs`，默认 10）到达时**合并成一条 prompt** 投递。**默认关闭**：合并改变「一轮」的含义（一轮里可能有多条用户消息），且每条消息要多等一个静默窗口，对「把 x 改成 y」这类短指令是净损失，因此按 opt-in 处理——升级后行为与旧版完全一致，需要时用 `/merge on` 或设置页开启。安全规则是这次实现的重点，因为它们决定了这个功能是「省轮次」还是「卡住通道」：
   - **乱序的旧消息不延长计时器**——消息自带的 `create_time_ms` 早于已缓冲的最新时间戳时只追加、不重置静默窗口，否则一条迟到重放就能把批次一直挂住；更新的消息才会顺延。
@@ -48,6 +53,14 @@
 - **出站串行槽既不会报错也不会超时（R1）** —— `serializeOutbound` 没有重入断言、也没有上界：锁内再调用公共入口会把该操作排到**自己**后面，永久卡死整条出站链路（这一类缺陷已经真实发生过一次，且是致命的）。现在：① 用 `AsyncLocalStorage` **精确**识别「同一条调用链内重入」（只是恰好同时到达的并发调用仍属正常排队，不会被误判），命中即**立刻抛错并记日志**，修复方式唯一——改调 `*Locked` 版本；② 等待上一个操作**有上界**（30s），超时记日志后照常发出，牺牲极端情况下的严格顺序换取活性。空闲路径仍然零定时器、零额外跳转。
 - **四个只涨不降的内存表（R2）** —— `lastAssistantTextBySession`（存整条助手正文，上限 64 会话）、`lastActivityBySession`（上限 512 会话）、`wechatMessageIds`（一次性标记，10 分钟 TTL **加** 512 条硬上限；此前只有 echo 到达才会删，echo 永不到达就永久驻留）、`modelOverrides`（上限 128 会话）现在都有确定性淘汰（插入序 FIFO，淘汰即记日志）。它们都是**缓存**：淘汰只会让显示退回默认值，不会丢队列里的任何消息。
 - **重启静默丢弃排队出站（R3）** —— 运行时队列硬上限是 400 条，而 `state.json` 重新加载只保留最后 100 条：一次重启就会**静默丢掉第 101–400 条**（正好是通知、结论、工具推送这些最不该丢的内容）。加载上限现与运行时硬上限对齐（400），重启完整恢复持久化的有界集合。
+
+### Tests
+
+- 新增 `tests/merge-window.test.ts`（24 例）：窗口内五条消息合成**一条** prompt 且顺序不乱、批次投递后缓冲区确实排空（不留只写不读的状态）、`..` / `!!` 后缀语义与「整条消息只有后缀」的退化情形、强制放行在 `..` 暂挂期间仍会发出、非文本项不参与合并、`/merge` 与 `/silent` 同款接线（解析矩阵、`/help`、bypass、持久化、`LOCAL_COMMAND_NAMES` 去重）。
+- 新增 `tests/security-hardening.test.ts`（27 例）：S1 提权闸门的放行/拒绝矩阵（含自定义只降审批的预设）、S2 `send_wechat` 的 `..` 与符号链接逃逸、按**调用会话**而非收件人求值、`stat` 阶段拒超大文件、S3 播种三条分支（升级播种 / 全新安装不播种 / 显式 `[]` 永不覆盖）、S4 目录与文件的 `0700`/`0600`、入站日志无原始 id 无正文、审计 sink 的轮转与「写失败不影响消息路径」。
+- 新增 `tests/delivery-hardening.test.ts`（12 例）：S5 卡片先确认可达再占用一次性标记、投递抛错时回滚、R1 串行槽的重入立即抛错与 30s 等待上界、R2 四张缓存表的淘汰、R3 重启恢复 150 条而不是截到 100 条。
+- `tests/client-panel-wiring.test.ts` 增加「settings panel grouping」分组（现共 57 例）：五个分组的 id 必须同时出现在 `Group({id})` 与 CSS 里、**打字合并的开关与其全部参数必须落在同一个分组切片内**（断言参数控件不出现在 `id: "merge"` 之前）、总开关关闭时四个输入确实 `disabled`、`localStorage` 键与降级路径、未保存标记比对的是 `payloadOf(form)`、以及「面板渲染的每个 `wx_*` 类名都在样式表里有规则」。
+- `tests/host-line.test.ts` 扩到 29 例：准入矩阵改为 `0.2.1-0` 起（`0.2.0` 线不再被声称）、rc.2 目标必须被接受，并新增三条 `PUBLISH.md` 文档回归——正文引用的区间必须与 `package.json` 逐字相同、必须继续提醒 peer 要标 `optional`、必须继续写明上界要带 `-0`。
 
 ## [0.11.0] - 2026-10-13
 
@@ -115,10 +128,6 @@
 - `tests/session-log.test.ts` 增加一例平台原生绝对根目录的 `sessionLogPath` 断言（25 例），并修正原断言对 `resolveDshHome` 返回值的比较——原写法只在 Windows 成立。
 - 新增 `tests/redact.test.ts`、`tests/push-governance.test.ts`、`tests/plugin-dispose.test.ts`：脱敏规则（含误伤边界的两条显式断言）、限流与白名单、dispose 与换绑的相反语义。
 - `tests/config-store.test.ts` 增加新配置键的持久化、非法值拒绝与默认值断言；`tests/split-text.test.ts` 按新分段契约重写（含唯一允许的超长例外：最小合法形式本身就超过预算的表格/围栏）；`tests/cold-start.test.ts` 改为断言溢出时**不丢**任何一条。
-- 新增 `tests/temp-cleanup.setup.ts`（vitest `globalSetup`）：回收测试用 `fs.mkdtempSync` 建出的临时目录。`mkdtempSync` **只创建、从不删除**，而 33 个使用它的测试文件里只有 10 个记得 `rmSync`，其余 23 个（`session-mgmt` 9 处、`cross-session-notify` 8 处，`corrupt-session` / `final-only` / `frames` / `history-truncation` / `preset-display` 各 2 处，另 16 个文件各 1 处）每次运行都往外漏——单次 `npm test` 实测产生 **364 个**孤儿目录。长期反复跑测试的后果是可量化的：截至本次修复，本机 OS 临时目录里已堆积 **21294 个**此类残留（`dsh-wx-sess` 2304、`dsh-wx-cross` 2266、`dsh-wx-frame` 2143、`dsh-wx-type` 1415 居前），其中 10-12 / 10-13 两天占 82.6%，正对应 0.10.0 / 0.11.0 的密集开发。
-  - 清理放在 `globalSetup` 而非逐个测试文件补 `finally`：后者改动面大，且**以后新增的测试仍会漏**；前者一次性收口，对现有与将来的用例都生效。
-  - 两条安全约束，缺一不可：**① 只删「本次新增」的条目**——`setup` 先对临时目录做快照，`teardown` 只删除快照之外的，因此并发运行的另一个测试进程正在用的目录不会被误删；**② 只删前缀白名单内的条目**（`dsh-wx-` / `dsh-home-` / `dsh-wechat-` / `wx-process-` / `send-wechat-`）——宿主自身的 `dsh-spill-*`、`dsh-subprocess-*`、`dsh-workspace-changes-*`、`dsh-acl-*`、`dsh-mcp-probe-cwd` 不匹配任何前缀，**永不被触碰**，所以「一边跑测试、一边有 DSH 会话在跑」不会互相破坏。`setup` 未执行时 `teardown` 直接返回（`preexisting` 为 `null`），避免任何「快照缺失 ⇒ 全删」的退化路径。
-  - 该残留**不涉及凭据泄漏**：抽查 `dsh-wx-relogin-*/auth/token.json` 内容为 `{"token":"t","baseUrl":"https://gw","accountId":"b1","userId":"u"}`，是测试夹具而非真实微信凭据。占用亦极小（21294 个目录合计仅 6.47 MB，多数为空目录或数百字节的 `state.json`）——**真正的问题是条目数量**，而非体积。
 
 ## [0.10.0] - 2026-10-13
 
