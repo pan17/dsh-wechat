@@ -11,6 +11,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **设置页改为分组折叠，默认全部收起。** 此前是**一张卡片平铺 15 个控件**：8 个裸键名输入框（`cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers` / `mergeSilenceMs` / `mergeMaxMsgs` / `mergeForcedReleaseMs` / `maxOutgoingFileBytes`）、8 个复选框、提示词正文和两个登录按钮挤在同一列，608px 宽的内容区要滚 995px，而**同一个功能的控件被拆散在不同块里**——「打字合并」开关在复选框区，「静默窗口 / 条数上限 / 强制放行」却在上面几行的网格中，中间还隔着 `maxOutgoingFileBytes`。
+  - 现按用途分为 5 组：**连接与默认行为**（`cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers`）、**消息推送**（决策推送 / 任务提醒 / 静默 / 结论模式）、**打字合并**（总开关 + 三个窗口参数 + 后缀开关）、**微信渠道提示词**（开关 + 正文）、**安全边界**（两个放宽开关 + 外发文件上限）。「已知限制」告警盒同样可折叠。
+  - 收起时标题行右侧显示**由当前配置实时算出**的摘要（如「已关闭 · 每条消息各自一轮」「静默 开 · 结论 关 · 决策推送 开 · 任务提醒 开」），而不是静态文案——折叠不能以看不见配置为代价。
+  - 字段标签从裸键名改为中文名 + 键名小字（`工作目录 cwd`），帮助气泡文案原样保留。
+  - **打字合并总开关关闭时，其三个窗口参数与后缀开关置灰**（`disabled`）并提示「开启后这些参数才生效」；值仍随保存提交，因此关掉再开不会丢调好的窗口。
+  - `重新扫码` / `退出登录` 移到状态区（登录动作属于状态），底部行只留 `保存配置`，并新增 `● 有未保存的修改` 标记——它比对的是 `payloadOf(form)` 与上次保存成功的快照，因此只改空格或改回原值不会被误报。
+  - 展开状态记在浏览器 `localStorage`（键 `dsh-wechat/settings-open`），不进 `config.json`；`localStorage` 不可用（隐私模式 / 配额）时退化为「能展开但不记忆」，不抛错。
+  - 无新配置键、无 API 变更、无保存语义变更：仍然一次 POST 全量 payload。
+
 ### Added
 
 - **`scripts/ci-local.sh` + README 开发须知：Windows 上"全绿"不等于 CI 绿。** CI 是 `ubuntu-latest`，而 PR #11 里一条断言把 Windows 形状的字面量 `C:\home\.dsh` 同时当输入和期望前缀——实现会先对该根目录做 `path.resolve`，在 POSIX 上它是**相对路径**、会解析到 cwd 之下，于是 `startsWith("C:\home\.dsh/sessions")` 恒为 false：本地必绿、CI 必红（该 PR 恰好从未跑过 CI，直到下一次推送才暴露，并因此让 `ci-green` 门禁拦住了 0.11.0 的发布）。脚本在与 CI 完全一致的环境里（复制到本机临时目录后 `npm ci && tsc --noEmit && vitest run`）复现整个流程，且不会用 Linux 版 esbuild/rollup 覆盖工作副本的 `node_modules`。

@@ -35,7 +35,7 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 - **繁忙时投递（与 DSH 同源）** — 按 `busyEnter` 排队/插话；微信 `/enter` 同步
 - **跨会话决策推送** — `/notify on` 后，任意会话的权限/提问卡整卡推送到微信。当前会话可直接回；其它会话必须 `P{n}=…`（`P1=/rq` 关闭该卡）。默认关。跨会话任务完成/报错走 `/notify tasks on|off`
 - **二维码登录** — `http://127.0.0.1:3080/wechat/qr` 扫码登录，设置页内嵌
-- **设置页 UI** — DSH 设置 → **WeChat**：单卡展示状态、扫码、退出登录、连接配置与通知/静默开关（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
+- **设置页 UI** — DSH 设置 → **WeChat**：状态区 + 5 个可折叠分组（连接与默认行为 / 消息推送 / 打字合并 / 微信渠道提示词 / 安全边界），默认收起并显示当前值摘要（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
 - **断点续传** — `sync-buf` 与微信会话映射持久化，重启 DSH 后自动恢复会话
 - **单用户** — 只服务第一个微信用户；bot token 缺失/失效时不向微信推送，日志会写明原因（需重新扫码或等会话恢复）
 
@@ -187,12 +187,31 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 客户端半部通过 `dsh.client` + `exports["./client"]` 声明（与 dsh-mcp-manager
 同款交付），挂载到 `settings.section` slot（nav 顺序 40）：
 
-- **状态卡** — 登录阶段（未登录/等待扫码/已扫码，待确认/已登录/登录失败）、Bot ID、
-  监控运行状态、已绑定用户数，与 `跨会话决策推送` / `跨会话任务完成提醒` / `静默` / `结论模式` / `打字合并` 开关同卡展示
-- **扫码** — 未登录时页面内直接显示二维码，扫码确认后自动进入已登录
-- **操作按钮** — `重新扫码`（清除 token 重新登录）、`退出登录`，与保存配置同行
-- **连接配置** — 设置页展示 `cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers` / `mergeSilenceMs` / `mergeMaxMsgs` / `mergeForcedReleaseMs` / `maxOutgoingFileBytes`，以及 `跨会话决策推送` / `跨会话任务完成提醒` / `静默` / `结论模式` / `微信渠道提示词` / `打字合并` / `合并后缀 .. 与 !!` / `允许微信放宽全局默认权限` / `允许 send_wechat 发送任意路径`（开关 + 正文）；保存即生效。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` / `finalOnlyIdleMs` / `finalOnlyCeilingMs` 仍可写 `~/.dsh-wechat/config.json` 或插件行 `config:`，设置页保存不会覆盖它们。网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
-- **帮助** — 卡片标题行的 **帮助** 按钮展开本地命令表（与微信 `/help` 同源）；DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出
+- **状态区** — 登录阶段（未登录/等待扫码/已扫码，待确认/已登录/登录失败）、Bot ID、
+  监控运行状态、已绑定用户数；未登录时直接显示二维码，扫码确认后自动进入已登录；
+  同一区放 `重新扫码`（清除 token 重新登录）与 `退出登录`
+- **可折叠分组** — 设置按用途分成 5 组，**默认全部收起**，收起时右侧显示由当前配置
+  实时算出的摘要（例如「打字合并：已关闭 · 每条消息各自一轮」），展开才编辑：
+
+  | 分组 | 包含 |
+  |---|---|
+  | 连接与默认行为 | `cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers` |
+  | 消息推送 | `跨会话决策推送` / `跨会话任务完成提醒` / `静默` / `结论模式` |
+  | 打字合并 | `打字合并` 总开关 + `mergeSilenceMs` / `mergeMaxMsgs` / `mergeForcedReleaseMs` / `合并后缀 .. 与 !!`（总开关关闭时参数置灰，但值仍随保存提交，不会丢配置） |
+  | 微信渠道提示词 | `surfacePromptEnabled` + 提示词正文 |
+  | 安全边界 | `allowRemotePermissionEscalation` / `allowAnyFilePath` / `maxOutgoingFileBytes` |
+
+  展开状态记在浏览器 localStorage（`dsh-wechat/settings-open`），不进 `config.json`；
+  存储不可用时退化为「能展开但不记忆」，不会报错。
+- **保存** — 底部 `保存配置` 一次提交全部字段；有改动未保存时按钮旁显示
+  `● 有未保存的修改`。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` /
+  `finalOnlyIdleMs` / `finalOnlyCeilingMs` 仍可写 `~/.dsh-wechat/config.json` 或插件行
+  `config:`，设置页保存不会覆盖它们。网关参数变更会自动重启长轮询；存储于
+  `~/.dsh-wechat/config.json` 与 `state.json`
+- **帮助** — 卡片标题行的 **指令帮助** 按钮展开本地命令表（与微信 `/help` 同源）；
+  DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出
+- **已知限制** — 页面底部的告警盒，同样可折叠（默认收起），列出 iLink 的 10 条窗口
+  与 24 小时互动窗口
 
 与宿主通信走插件自己的 HTTP API（`/wechat/api/status|help|config|relogin|
 logout`），客户端零 `@deepseek-ai` 依赖。
