@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getBotQrcode, getQrcodeStatus } from "./api.js";
+import { ensurePrivateDir, writePrivateFile } from "../utils/secure-fs.js";
 
 export interface TokenData {
   token: string;
@@ -35,9 +36,12 @@ export function loadToken(storageDir: string): TokenData | null {
 
 export function saveToken(storageDir: string, data: TokenData): void {
   const authDir = getAuthDir(storageDir);
-  fs.mkdirSync(authDir, { recursive: true });
+  ensurePrivateDir(authDir);
   const tokenPath = getTokenPath(storageDir);
-  fs.writeFileSync(tokenPath, JSON.stringify(data, null, 2), "utf-8");
+  // 0o600 (dir 0o700): this file IS the bot credential — anyone who can read
+  // it can send messages as the bot. On Windows Node ignores the mode and the
+  // inherited `%USERPROFILE%` ACLs apply (see src/utils/secure-fs.ts).
+  writePrivateFile(tokenPath, JSON.stringify(data, null, 2));
 }
 
 export async function login(params: {

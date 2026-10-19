@@ -106,11 +106,14 @@ describe("send_wechat: bound session", () => {
   it("sends a file via sendMediaMessage when file_path is provided", async () => {
     const bridge = makeBridge();
     setLoggedIn(bridge);
-    bridge.state.ensureUser("u1", "C:\\work");
+    // The file must live inside the CALLING session's workspace: a path
+    // outside it is refused by the S2 bound (covered by the refusal cases).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-send-file-"));
+    bridge.state.ensureUser("u1", dir);
     bridge.state.update("u1", { sessionId: "wx-s1" });
     bridge.wireContextToken = "ctx-1";
 
-    const tmpFile = path.join(os.tmpdir(), `send-wechat-${Date.now()}.txt`);
+    const tmpFile = path.join(dir, `send-wechat-${Date.now()}.txt`);
     fs.writeFileSync(tmpFile, "payload");
 
     try {
@@ -122,7 +125,7 @@ describe("send_wechat: bound session", () => {
       expect(opts.fileName).toContain(".txt");
       expect(sendTextMessage).not.toHaveBeenCalled();
     } finally {
-      fs.unlinkSync(tmpFile);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });
@@ -429,7 +432,10 @@ describe("send_wechat: shared gateway budget & cache", () => {
   it("a cached image file re-flushes with its native IMAGE media type", async () => {
     const bridge = setup();
     const b = asBudget(bridge);
-    const tmpPng = path.join(os.tmpdir(), `send-wechat-${Date.now()}.png`);
+    // The file must sit inside the sending session's workspace (S2 bound).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-send-img-"));
+    bridge.state.update("u1", { cwd: dir });
+    const tmpPng = path.join(dir, `send-wechat-${Date.now()}.png`);
     fs.writeFileSync(tmpPng, "png-bytes");
     try {
       b.wechatMsgCount = 10;
@@ -447,7 +453,7 @@ describe("send_wechat: shared gateway budget & cache", () => {
       // Inline image on flush — not degraded to FILE(3).
       expect(mediaType).toBe(UploadMediaType.IMAGE);
     } finally {
-      fs.unlinkSync(tmpPng);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

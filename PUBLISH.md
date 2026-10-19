@@ -38,14 +38,14 @@ CHANGELOG.md 是 GitHub Release Notes 的数据源，以下情况**需要更新*
 当前值（两处一致）：
 
 ```json
-"engines": { "dsh": ">=0.2.0-rc.2 <0.3.0-0" },
-"peerDependencies": { "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.3.0-0" },
+"engines": { "dsh": ">=0.2.1-0 <0.3.0-0" },
+"peerDependencies": { "@deepseek-ai/dsh": ">=0.2.1-0 <0.3.0-0" },
 "peerDependenciesMeta": { "@deepseek-ai/dsh": { "optional": true } }
 ```
 
 改这个范围时必须遵守四条，每条都有实测依据：
 
-1. **必须带上界。** 只写 `>=0.2.0-rc.2` 会把 `0.3.0`、`1.0.0` 判为兼容（这正是旧值的缺陷）。
+1. **必须带上界。** 只写 `>=0.2.1-0` 会把 `0.3.0`、`1.0.0` 判为兼容（这正是旧值的缺陷）。
 2. **上界必须是 `<0.3.0-0`，不能写 `<0.3.0`。** 宿主与市场都以 `{ includePrerelease: true }` 求值，`<0.3.0` 会放行 `0.3.0-rc.1`。
 3. **peer 必须同时标 `peerDependenciesMeta.optional`。** 不加会**安装失败**：peer 被当成真实依赖解析，`@deepseek-ai/dsh` 是带 82 条 dependencies 的元包，会拉进 530 个包并撞上未发布包 `@deepseek-ai/dsh-type-meta` 的 npm 404。宿主门禁**不读** `peerDependenciesMeta`，所以标 `optional` 不影响强制力。
 4. **不要改用前发布元组枚举。** 唯一消费者在 `includePrerelease` 语义下求值，单段 arm 已覆盖全部 0.2.x 前发布版；枚举永远补不全（每出现一个新的 0.2.x 元组都要再加一段）。

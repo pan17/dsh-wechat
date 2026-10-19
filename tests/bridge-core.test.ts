@@ -30,6 +30,7 @@ import {
   isBypassSlashCommand,
 } from "../src/bridge/slash.js";
 import { StateStore } from "../src/state.js";
+import { MAX_OUTBOUND_QUEUE_HARD } from "../src/state.js";
 import { createUserMessage } from "../src/dsh/messages.js";
 
 describe("slash parsers", () => {
@@ -388,7 +389,7 @@ describe("StateStore", () => {
     }
   });
 
-  it("normalizes malformed outbound state and caps the one FIFO", () => {
+  it("normalizes malformed outbound state and keeps the whole bounded queue", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
     try {
       const queue = Array.from({ length: 105 }, (_, i) => ({ kind: "text", text: `m${i}` }));
@@ -399,9 +400,30 @@ describe("StateStore", () => {
       }), "utf-8");
       const outbound = new StateStore(dir).outbound();
       expect(outbound?.messageCount).toBe(10);
-      expect(outbound?.queue).toHaveLength(100);
-      expect(outbound?.queue[0]).toEqual({ kind: "text", text: "m5" });
+      // R3: the reload cap is the runtime HARD ceiling (400), not the 100-entry
+      // soft cap. Keeping only the last 100 silently discarded items 101–400
+      // of a legitimately full queue on every restart. The malformed entry is
+      // still dropped, so all 105 valid items survive.
+      expect(outbound?.queue).toHaveLength(MAX_OUTBOUND_QUEUE_HARD > 105 ? 105 : MAX_OUTBOUND_QUEUE_HARD);
+      expect(outbound?.queue[0]).toEqual({ kind: "text", text: "m0" });
       expect(outbound?.queue.at(-1)).toEqual({ kind: "text", text: "m104" });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still truncates a queue larger than the runtime hard ceiling", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-state-"));
+    try {
+      const queue = Array.from({ length: MAX_OUTBOUND_QUEUE_HARD + 25 }, (_, i) => ({ kind: "text", text: `m${i}` }));
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({
+        users: {},
+        outbound: { version: 1, peerUserId: "u1", messageCount: 1, queue },
+      }), "utf-8");
+      const outbound = new StateStore(dir).outbound();
+      expect(outbound?.queue).toHaveLength(MAX_OUTBOUND_QUEUE_HARD);
+      expect(outbound?.queue[0]).toEqual({ kind: "text", text: "m25" });
+      expect(outbound?.queue.at(-1)).toEqual({ kind: "text", text: `m${MAX_OUTBOUND_QUEUE_HARD + 24}` });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

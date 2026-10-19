@@ -42,7 +42,9 @@ const texts = () => sendTextMessage.mock.calls.map((c) => String(c[1]));
 beforeEach(() => {
   vi.clearAllMocks(); sendTextMessage.mockReset().mockResolvedValue(undefined);
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "wx-process-"));
-  bridge = new WeChatDSHBridge({ get: () => undefined, on: () => () => {} }, { ...defaultConfig(), storageDir: dir });
+  // Merge window off (0ms): this suite drives logout/relogin transitions and
+  // needs every message to dispatch immediately.
+  bridge = new WeChatDSHBridge({ get: () => undefined, on: () => () => {} }, { ...defaultConfig(), storageDir: dir, mergeSilenceMs: 0 });
   b().state.ensureUser("u1", "C:\\work"); b().state.update("u1", { sessionId: "s1" });
   b().token = { baseUrl: "https://gw", token: "t" }; seq = 0; rev = 0;
 });

@@ -12,6 +12,7 @@ export type HelpCommand = { kind: "help" };
 export type StatusCommand = { kind: "status" };
 export type SilentCommand = { kind: "silent"; mode: "on" | "off" | "status" };
 export type FinalCommand = { kind: "final"; mode: "on" | "off" | "status" };
+export type MergeCommand = { kind: "merge"; mode: "on" | "off" | "status" };
 export type SurfaceCommand = { kind: "surface"; mode: "on" | "off" | "status" };
 export type StopCommand = { kind: "stop" };
 export type RejectQuestionCommand = { kind: "reject-question" };
@@ -28,6 +29,7 @@ export type SlashCommand =
   | StatusCommand
   | SilentCommand
   | FinalCommand
+  | MergeCommand
   | StopCommand
   | RejectQuestionCommand
   | RejectPermissionCommand;
@@ -78,11 +80,28 @@ export function parseFinalCommand(text: string): FinalCommand | null {
 }
 
 /**
+ * Parse `/merge` (alias `/mg`) — query or toggle the inbound merge window
+ * (打字合并). Bare command defaults to status.
+ *
+ * The alias must not collide with an existing name: `/m` is NOT used (it
+ * would be the shortest but is not obviously "merge"), and `/mg` is free —
+ * `tests/merge-window.test.ts` asserts the whole alias table for collisions.
+ */
+export function parseMergeCommand(text: string): MergeCommand | null {
+  const trimmed = text.trim().toLowerCase();
+  if (trimmed === "/merge" || trimmed === "/mg") {
+    return { kind: "merge", mode: "status" };
+  }
+  const m = trimmed.match(/^\/(?:merge|mg)\s+(on|off|status)\s*$/);
+  if (!m) return null;
+  return { kind: "merge", mode: m[1] as "on" | "off" | "status" };
+}
+
+/**
  * Parse `/surface` (alias `/wxprompt`) — query or toggle the WeChat
  * surface-prompt injection. Bare command defaults to status. The prompt
  * text itself is edited from the settings page, not this command.
- */
-export function parseSurfaceCommand(text: string): SurfaceCommand | null {
+ */export function parseSurfaceCommand(text: string): SurfaceCommand | null {
   const trimmed = text.trim().toLowerCase();
   if (trimmed === "/surface" || trimmed === "/wxprompt") {
     return { kind: "surface", mode: "status" };
@@ -668,6 +687,7 @@ export function isBypassSlashCommand(text: string): boolean {
     parseFlushCommand(text) ||
     parseSilentCommand(text) !== null ||
     parseFinalCommand(text) !== null ||
+    parseMergeCommand(text) !== null ||
     parseSurfaceCommand(text) !== null ||
     parseStatusCommand(text) !== null ||
     parseWorkspaceCommand(text) !== null ||
@@ -712,6 +732,8 @@ export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "sl",
   "final",
   "fo",
+  "merge",
+  "mg",
   "surface",
   "wxprompt",
   "stop",
@@ -746,6 +768,7 @@ export function formatHelp(
     "• /enter (busy) — queue|steer|status 繁忙时消息投递（排队/插话，与 DSH 设置「繁忙时 Enter 键行为」同步）",
     "• /silent on|off (sl) — 开启仅每轮最终回复；关闭显示合并的思考与工具执行过程",
     "• /final on|off (fo) — 结论模式：跨轮次暂存，整条任务停下后只发一条最终结论（优先于 /silent）",
+    "• /merge on|off|status (mg) — 打字合并：连续多条微信消息合成一轮；末尾 `..` 继续追加、`!!` 立即提交",
     "• /flush (f) — 立即取回结论模式暂存的最终结论，不必等静默期",
     "• /surface on|off|status (wxprompt) — 微信渠道提示词注入开关（默认关；正文在设置页编辑）",
     "• /notify on|off|status (watch) — 跨会话决策推送：权限/提问卡整卡（默认关闭）；/notify tasks on|off 跨会话任务完成提醒",

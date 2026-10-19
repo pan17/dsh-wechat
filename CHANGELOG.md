@@ -1,9 +1,53 @@
 # Changelog
 
+## [0.11.1] - 2026-10-19
+
+### Compatibility
+
+- **DSH 0.2.1-rc.2 adaptation.** The enforced host range is now `>=0.2.1-0 <0.3.0` in both `engines.dsh` and the `@deepseek-ai/dsh` peer; 0.2.1-rc.2 is explicitly in the admission matrix. The 0.2.0 line is no longer claimed. No runtime API change was required: `dsh-wechat@0.11.0` passes a real rc.2 host smoke (HTTP 200 + boot marker).
+
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
 ## [Unreleased]
+
+### Changed
+
+- **设置页改为分组折叠，默认全部收起。** 此前是**一张卡片平铺 15 个控件**：8 个裸键名输入框（`cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers` / `mergeSilenceMs` / `mergeMaxMsgs` / `mergeForcedReleaseMs` / `maxOutgoingFileBytes`）、8 个复选框、提示词正文和两个登录按钮挤在同一列，608px 宽的内容区要滚 995px，而**同一个功能的控件被拆散在不同块里**——「打字合并」开关在复选框区，「静默窗口 / 条数上限 / 强制放行」却在上面几行的网格中，中间还隔着 `maxOutgoingFileBytes`。
+  - 现按用途分为 5 组：**连接与默认行为**（`cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers`）、**消息推送**（决策推送 / 任务提醒 / 静默 / 结论模式）、**打字合并**（总开关 + 三个窗口参数 + 后缀开关）、**微信渠道提示词**（开关 + 正文）、**安全边界**（两个放宽开关 + 外发文件上限）。「已知限制」告警盒同样可折叠。
+  - 收起时标题行右侧显示**由当前配置实时算出**的摘要（如「已关闭 · 每条消息各自一轮」「静默 开 · 结论 关 · 决策推送 开 · 任务提醒 开」），而不是静态文案——折叠不能以看不见配置为代价。
+  - 字段标签从裸键名改为中文名 + 键名小字（`工作目录 cwd`），帮助气泡文案原样保留。
+  - **打字合并总开关关闭时，其三个窗口参数与后缀开关置灰**（`disabled`）并提示「开启后这些参数才生效」；值仍随保存提交，因此关掉再开不会丢调好的窗口。
+  - `重新扫码` / `退出登录` 移到状态区（登录动作属于状态），底部行只留 `保存配置`，并新增 `● 有未保存的修改` 标记——它比对的是 `payloadOf(form)` 与上次保存成功的快照，因此只改空格或改回原值不会被误报。
+  - 展开状态记在浏览器 `localStorage`（键 `dsh-wechat/settings-open`），不进 `config.json`；`localStorage` 不可用（隐私模式 / 配额）时退化为「能展开但不记忆」，不抛错。
+  - 无新配置键、无 API 变更、无保存语义变更：仍然一次 POST 全量 payload。
+
+### Added
+
+- **`scripts/ci-local.sh` + README 开发须知：Windows 上"全绿"不等于 CI 绿。** CI 是 `ubuntu-latest`，而 PR #11 里一条断言把 Windows 形状的字面量 `C:\home\.dsh` 同时当输入和期望前缀——实现会先对该根目录做 `path.resolve`，在 POSIX 上它是**相对路径**、会解析到 cwd 之下，于是 `startsWith("C:\home\.dsh/sessions")` 恒为 false：本地必绿、CI 必红（该 PR 恰好从未跑过 CI，直到下一次推送才暴露，并因此让 `ci-green` 门禁拦住了 0.11.0 的发布）。脚本在与 CI 完全一致的环境里（复制到本机临时目录后 `npm ci && tsc --noEmit && vitest run`）复现整个流程，且不会用 Linux 版 esbuild/rollup 覆盖工作副本的 `node_modules`。
+
+- **打字合并 / inbound merge window（`mergeEnabled`，默认关闭 = 需显式开启）** —— 此前每条微信消息都是一次独立 turn，一句话分五段发就要烧掉五轮。开启后同一聊天的裸文本进入缓冲区，静默窗口（`mergeSilenceMs`，默认 3000ms）到点或条数上限（`mergeMaxMsgs`，默认 10）到达时**合并成一条 prompt** 投递。**默认关闭**：合并改变「一轮」的含义（一轮里可能有多条用户消息），且每条消息要多等一个静默窗口，对「把 x 改成 y」这类短指令是净损失，因此按 opt-in 处理——升级后行为与旧版完全一致，需要时用 `/merge on` 或设置页开启。安全规则是这次实现的重点，因为它们决定了这个功能是「省轮次」还是「卡住通道」：
+  - **乱序的旧消息不延长计时器**——消息自带的 `create_time_ms` 早于已缓冲的最新时间戳时只追加、不重置静默窗口，否则一条迟到重放就能把批次一直挂住；更新的消息才会顺延。
+  - **条数硬上限**（默认 10）作为防御性边界，缓冲区永远不会超过它。
+  - **强制放行**（`mergeForcedReleaseMs`，默认 180000 = 3 分钟）：无论静默窗口、`..` 暂挂、还是上一批仍在投递，到点一定发出并记日志——「宁可两句话一轮，也不让通道卡死」。
+  - **在途批次不吞消息**：上一批还没投递完时到达的消息进入**新**批次，只为保序等待上一批，且等待上限同样是强制放行时间；超过就记日志后照发。
+  - **非文本不合并**：图片/文件/视频/语音（无转写）到达时先把已输入的文字作为**一轮**发出去，再把自己作为**一轮**交给 agent，顺序与用户输入一致。
+  - 后缀开关 `mergeSuffixTokens`（默认开）：正文末尾 `..` = 还要接着说（暂不发出），`!!` = 立刻提交；两者会从正文里去掉，且「整条消息只有后缀、又没有待合并内容」时按普通文本处理（不会让消息消失）。裸 `!!` 在有待合并内容时是纯控制符，不会污染正文。
+  - 开关：微信 `/merge on|off|status`（别名 `/mg`，与 `/silent` 同款接线：parser、dispatcher、卡片 bypass、`LOCAL_COMMAND_NAMES`、`/help`、`config.json` 持久化），设置页「打字合并」同一个值；`/merge off` 会先把暂存的消息发出去再关闭（那是用户自己说的话）。`/status` 显示窗口/上限/暂存条数。
+- **权限提权闸门（S1）** —— 微信 `/perm default <预设>` 此前直接 `settings.update("permission", {defaultPreset})`：这是**全局且持久**的写入，对所有新会话生效（与微信无关），一条聊天消息就能把整机默认权限放宽到 `danger-full-access`。现在默认拒绝**提权**写入：解析出的 `permissionPresets.resolve(name)` 沙箱为 `danger-full-access` **或**审批策略为 `never`（含只降审批的自定义预设）即视为提权，回复里明确要求在 DSH 界面「设置 → 权限」操作。不放宽的写入照旧；**会话级 `/perm switch` 不受影响**（不持久）。新开关 `allowRemotePermissionEscalation`（默认 `false`）可显式恢复旧行为。无法解析的预设按提权处理。
+- **`send_wechat` 文件边界（S2）** —— 此前 `file_path` 是任意绝对路径：这个工具因此是一个**任意文件读取原语**（任何 agent、以及任何能说服 agent 的东西都能把 `~/.ssh/id_rsa` 发到微信）。现在只允许**调用会话**工作目录或已注册工作区内的文件（两侧都按 `fs.realpath` 归一后比较，`..` 与符号链接都逃不出去），并有字节上限 `maxOutgoingFileBytes`（默认 20 MiB，`stat` 阶段即拒绝，不会读进内存）。边界按**实际发起调用的会话**求值，而不是按「未绑定会话回退到首个微信用户」解析出的收件人——否则任意会话都能借回退读取别人的工作区。新开关 `allowAnyFilePath`（默认 `false`）恢复旧行为；工具描述同步写明边界。缓存队列里的文件在冲刷时也会重新校验大小。
+- **入站白名单升级播种（S3）** —— `allowedUsers` 默认 `[]` 意味着「首个入站者成为绑定对端」，于是**老部署升级后第一个给 bot 发消息的陌生人就能接管它**。现在：`config.json` 里从未写过该键、且 `state.json` 已有绑定用户时，启动把该绑定用户写进 `allowedUsers` 并持久化，同时在微信里**提示一次**、并在 `/status` 增加「入站白名单」行（**显示你自己的 user id**，不必再去别处找）。全新安装（没有绑定用户）**不播种**，保持 first-contact 行为，绝不会把新用户锁在门外；显式存过 `[]`（= 决定开放）也永不覆盖。
+- **文件系统与日志卫生 + 审计（S4）** ——
+  - `~/.dsh-wechat` 与其下所有文件（`auth/token.json`、`state.json`、`config.json`、`sync-buf.json`、`audit.jsonl`）显式以 `0700` / `0600` 创建（创建时给 mode **并且** `chmod` 一次，否则已存在的文件会保留旧权限）。⚠️ Windows 忽略 mode 参数，实际依赖 `%USERPROFILE%` 继承的 ACL —— 这一点写进了 README。
+  - 入站日志行此前打印**完整**发送者 id 与明文正文预览；现在 id 走 `maskUserId`（保留头 2 + 尾 2 便于关联），预览过一次 `maskSecrets`。允许名单拒绝日志同样只记脱敏 id。
+  - 新增追加式审计 `~/.dsh-wechat/audit.jsonl`（JSONL，`0600`）：入站（脱敏 id + 字符数，**不含正文**）、slash 命令名、审批/提问决定、`send_wechat` 文件路径、每次出站发送的 kind/结果/窗口计数。按 1 MiB 上限轮转为 `audit.jsonl.1`（只留一份历史）并记日志；写失败**绝不影响**消息路径。
+
+### Fixed
+
+- **卡片被标记为「已推送」但从未发出（S5）** —— 六处 `markCardPushed` 都在 `sendReply` **之前**调用，而机器人登出/`-14` 放弃时 `sendReply` 是**丢弃**（不排队）的：卡片因此被标记成已推送、`isCardPushed` 又挡住重推，直到 30 分钟卡片超时才解封——用户根本看不到卡。现在先确认可达（`botReady()` 且未 give-up）再占用一次性标记，投递抛错时**回滚标记**（与 `notifyCachePendingLocked` 同款），并把「未标记、稍后可重推」记进日志。
+- **出站串行槽既不会报错也不会超时（R1）** —— `serializeOutbound` 没有重入断言、也没有上界：锁内再调用公共入口会把该操作排到**自己**后面，永久卡死整条出站链路（这一类缺陷已经真实发生过一次，且是致命的）。现在：① 用 `AsyncLocalStorage` **精确**识别「同一条调用链内重入」（只是恰好同时到达的并发调用仍属正常排队，不会被误判），命中即**立刻抛错并记日志**，修复方式唯一——改调 `*Locked` 版本；② 等待上一个操作**有上界**（30s），超时记日志后照常发出，牺牲极端情况下的严格顺序换取活性。空闲路径仍然零定时器、零额外跳转。
+- **四个只涨不降的内存表（R2）** —— `lastAssistantTextBySession`（存整条助手正文，上限 64 会话）、`lastActivityBySession`（上限 512 会话）、`wechatMessageIds`（一次性标记，10 分钟 TTL **加** 512 条硬上限；此前只有 echo 到达才会删，echo 永不到达就永久驻留）、`modelOverrides`（上限 128 会话）现在都有确定性淘汰（插入序 FIFO，淘汰即记日志）。它们都是**缓存**：淘汰只会让显示退回默认值，不会丢队列里的任何消息。
+- **重启静默丢弃排队出站（R3）** —— 运行时队列硬上限是 400 条，而 `state.json` 重新加载只保留最后 100 条：一次重启就会**静默丢掉第 101–400 条**（正好是通知、结论、工具推送这些最不该丢的内容）。加载上限现与运行时硬上限对齐（400），重启完整恢复持久化的有界集合。
 
 ## [0.11.0] - 2026-10-13
 

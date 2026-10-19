@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { defaultConfig, LEGACY_SURFACE_PROMPTS, type WeChatDSHConfig } from "./config.js";
+import { ensurePrivateDir, writePrivateFile } from "./utils/secure-fs.js";
 
 export type EditableConfig = Pick<
   WeChatDSHConfig,
@@ -27,6 +28,14 @@ export type EditableConfig = Pick<
   | "surfacePrompt"
   | "sendWechatRateLimitPerMinute"
   | "allowedUsers"
+  | "allowRemotePermissionEscalation"
+  | "allowAnyFilePath"
+  | "maxOutgoingFileBytes"
+  | "mergeEnabled"
+  | "mergeSilenceMs"
+  | "mergeMaxMsgs"
+  | "mergeSuffixTokens"
+  | "mergeForcedReleaseMs"
 >;
 
 export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
@@ -46,7 +55,48 @@ export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "surfacePrompt",
   "sendWechatRateLimitPerMinute",
   "allowedUsers",
+  "allowRemotePermissionEscalation",
+  "allowAnyFilePath",
+  "maxOutgoingFileBytes",
+  "mergeEnabled",
+  "mergeSilenceMs",
+  "mergeMaxMsgs",
+  "mergeSuffixTokens",
+  "mergeForcedReleaseMs",
 ];
+
+/** Boolean config keys: a non-boolean from a hand-edited file would be truthy-by-accident. */
+const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
+  "surfacePromptEnabled",
+  "silent",
+  "crossSessionNotify",
+  "notifyTaskEvents",
+  "finalOnly",
+  "allowRemotePermissionEscalation",
+  "allowAnyFilePath",
+  "mergeEnabled",
+  "mergeSuffixTokens",
+]);
+
+/**
+ * Positive-number config keys. The guard rejects anything that cannot
+ * describe the value at all (non-numeric, non-finite, ≤ 0) so a malformed
+ * file cannot silently disable a bound or a timeout.
+ */
+const POSITIVE_NUMBER_KEYS: ReadonlySet<string> = new Set([
+  "finalOnlyIdleMs",
+  "finalOnlyCeilingMs",
+  "maxOutgoingFileBytes",
+  "mergeMaxMsgs",
+  "mergeForcedReleaseMs",
+]);
+
+/**
+ * Non-negative number keys: `0` is meaningful and must survive the guard.
+ * For `mergeSilenceMs` it means "no merge window" — dispatch immediately,
+ * which is also the escape hatch tests and `merge-averse` installs use.
+ */
+const NON_NEGATIVE_NUMBER_KEYS: ReadonlySet<string> = new Set(["mergeSilenceMs"]);
 
 export class ConfigStore {
   private readonly filePath: string;
@@ -81,6 +131,21 @@ export class ConfigStore {
               delete parsed.allowedUsers;
             }
           }
+          // Same reasoning for the typed switches this version added: a
+          // hand-edited `mergeEnabled: "no"` is a truthy string, and a
+          // `maxOutgoingFileBytes: "20"` would compare every file as too big.
+          // A malformed value is dropped, so the built-in default applies.
+          for (const key of Object.keys(parsed)) {
+            const value = (parsed as Record<string, unknown>)[key];
+            if (value === undefined) continue;
+            if (BOOLEAN_KEYS.has(key) && typeof value !== "boolean") {
+              delete (parsed as Record<string, unknown>)[key];
+            } else if (POSITIVE_NUMBER_KEYS.has(key) && (typeof value !== "number" || !Number.isFinite(value) || value <= 0)) {
+              delete (parsed as Record<string, unknown>)[key];
+            } else if (NON_NEGATIVE_NUMBER_KEYS.has(key) && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+              delete (parsed as Record<string, unknown>)[key];
+            }
+          }
           return parsed;
         }
       }
@@ -91,8 +156,10 @@ export class ConfigStore {
   }
 
   private save(): void {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-    fs.writeFileSync(this.filePath, JSON.stringify(this.overrides, null, 2), "utf-8");
+    ensurePrivateDir(path.dirname(this.filePath));
+    // 0o600: this file names the storage layout and can hold a custom surface
+    // prompt, and (from this version) the inbound allowlist.
+    writePrivateFile(this.filePath, JSON.stringify(this.overrides, null, 2));
   }
 
   /** Resolve the effective config: composition defaults overridden by stored values. */
@@ -112,8 +179,9 @@ export class ConfigStore {
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) continue;
       if (!(EDITABLE_KEYS as string[]).includes(key)) continue;
-      if ((key === "surfacePromptEnabled" || key === "silent" || key === "crossSessionNotify" || key === "notifyTaskEvents" || key === "finalOnly") && typeof value !== "boolean") continue;
-      if ((key === "finalOnlyIdleMs" || key === "finalOnlyCeilingMs") && (typeof value !== "number" || !Number.isFinite(value) || value <= 0)) continue;
+      if (BOOLEAN_KEYS.has(key) && typeof value !== "boolean") continue;
+      if (POSITIVE_NUMBER_KEYS.has(key) && (typeof value !== "number" || !Number.isFinite(value) || value <= 0)) continue;
+      if (NON_NEGATIVE_NUMBER_KEYS.has(key) && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) continue;
       // 0 is meaningful here (unlimited), so the guard only rejects a value
       // that cannot describe a rate at all: non-numeric, non-finite or
       // negative. A negative limit would refuse EVERY push.

@@ -112,3 +112,22 @@ export function maskSecrets(text: string): string {
   }
   return maskBearerTokens(out);
 }
+
+/**
+ * Mask a WeChat user id for a LOG LINE.
+ *
+ * Logs are the one artifact that routinely leaves the machine (bug reports,
+ * CI transcripts, pasted terminal output), and a WeChat user id is a stable
+ * handle on a real person. The short head/tail are kept so an operator can
+ * still correlate two lines about the same sender, and a very short id is
+ * masked whole (there is nothing to keep that would not identify it).
+ *
+ * NOT used for text sent back to WeChat: the bound peer sees their own id in
+ * `/status` on purpose (S3 — the owner must never have to guess it), and an
+ * id must not be masked inside a message the user is supposed to read.
+ */
+export function maskUserId(userId: string): string {
+  if (!userId) return "";
+  if (userId.length <= 4) return MASK;
+  return `${userId.slice(0, 2)}${MASK}${userId.slice(-2)}`;
+}

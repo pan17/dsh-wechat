@@ -133,6 +133,8 @@ describe("forwarding replaces a corrupt bound session", () => {
     };
     const cfg = defaultConfig();
     cfg.storageDir = dir;
+    // Merge window off (0ms) — see the note in the other fixture.
+    cfg.mergeSilenceMs = 0;
     const bridge = new WeChatDSHBridge(ctx, cfg);
     (bridge as unknown as { token: unknown }).token = {
       baseUrl: "https://gw",
@@ -216,6 +218,9 @@ describe("/s new does not resume the bound session via native dispatch", () => {
     };
     const cfg = defaultConfig();
     cfg.storageDir = dir;
+    // Merge window off (0ms): the corrupt-session replacement must be visible
+    // on the very message that triggers it, not behind a silence timer.
+    cfg.mergeSilenceMs = 0;
     const bridge = new WeChatDSHBridge(ctx, cfg);
     (bridge as unknown as { token: unknown }).token = {
       baseUrl: "https://gw",

@@ -34,6 +34,11 @@ const RENDERED_TOGGLES = [
   "silent",
   "finalOnly",
   "surfacePromptEnabled",
+  // Hardening wave: the merge window and the two security switches.
+  "mergeEnabled",
+  "mergeSuffixTokens",
+  "allowRemotePermissionEscalation",
+  "allowAnyFilePath",
 ] as const;
 
 describe("settings panel ↔ host config wiring", () => {
@@ -63,11 +68,28 @@ describe("settings panel ↔ host config wiring", () => {
     expect(client).toContain("/final on|off");
   });
 
+  it("the 打字合并 control points at the WeChat-side switch", () => {
+    expect(client).toContain("打字合并");
+    expect(client).toContain("/merge on|off");
+    // The suffix tokens are the reason the feature is usable at all; the
+    // panel has to document them.
+    expect(client).toContain("`..`");
+    expect(client).toContain("`!!`");
+  });
+
   // The two text/number fields have their own silent-failure modes, so they are
   // guarded the same way the checkboxes are: a field that is missing from the
   // form init renders empty, and one missing from the save payload sends
   // nothing while the panel still reports success.
-  it.each(["sendWechatRateLimitPerMinute", "allowedUsers"])(
+  it.each([
+    "sendWechatRateLimitPerMinute",
+    "allowedUsers",
+    // Hardening wave: the merge parameters and the outgoing-file size cap.
+    "mergeSilenceMs",
+    "mergeMaxMsgs",
+    "mergeForcedReleaseMs",
+    "maxOutgoingFileBytes",
+  ])(
     "%s is initialised, rendered and saved",
     (key) => {
       expect(client).toContain(`r.body.config?.${key}`);
@@ -106,5 +128,107 @@ describe("settings panel ↔ host config wiring", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Grouping guard.
+ *
+ * The panel used to be one flat card with fifteen controls, which meant the
+ * 打字合并 switch and its three window parameters — one feature, five
+ * controls — were scattered across two different blocks. These assertions pin
+ * the grouping, because "the fields still exist somewhere" is exactly what a
+ * bad refactor leaves behind: every control keeps rendering while the feature
+ * it belongs to is impossible to find.
+ */
+describe("settings panel grouping", () => {
+  /** Group ids the panel renders, in source order. */
+  const GROUPS = ["connection", "delivery", "merge", "prompt", "security"] as const;
+
+  it.each(GROUPS)("renders a %s group", (id) => {
+    expect(client).toContain(`id: "${id}"`);
+  });
+
+  it("every group carries a title and a live summary", () => {
+    // A collapsed group is only readable through its summary, so each Group
+    // call must pass one; a missing summary would collapse to a bare title.
+    const calls = client.split("createElement(Group, {").slice(1);
+    expect(calls.length).toBe(GROUPS.length);
+    for (const call of calls) {
+      expect(call).toContain("title:");
+      expect(call).toContain("summary:");
+      expect(call).toContain("onToggle: toggleGroup");
+    }
+  });
+
+  it("the 打字合并 switch and all of its parameters share one group", () => {
+    // Slice the merge group's source region: from its Group call to the next
+    // group's. Every merge key must fall inside, and none may leak into a
+    // sibling — that leak is what made the feature hard to find.
+    const mergeStart = client.indexOf('id: "merge"');
+    const promptStart = client.indexOf('id: "prompt"');
+    expect(mergeStart).toBeGreaterThan(-1);
+    expect(promptStart).toBeGreaterThan(mergeStart);
+    const mergeGroup = client.slice(mergeStart, promptStart);
+
+    for (const key of ["mergeEnabled", "mergeSuffixTokens"]) {
+      expect(mergeGroup).toContain(`form?.${key}`);
+    }
+    for (const key of ["mergeSilenceMs", "mergeMaxMsgs", "mergeForcedReleaseMs"]) {
+      expect(mergeGroup).toContain(`value: form.${key}`);
+    }
+
+    // The three window parameters must not be RENDERED before the merge
+    // group: they belong to it and nowhere else. (`payloadOf` mentions them
+    // earlier on purpose — that is the save payload, not a control.)
+    const before = client.slice(0, mergeStart);
+    expect(before).not.toContain("value: form.mergeSilenceMs");
+    expect(before).not.toContain("value: form.mergeMaxMsgs");
+    expect(before).not.toContain("value: form.mergeForcedReleaseMs");
+  });
+
+  it("the merge parameters are inert until the feature is switched on", () => {
+    // Disabled, not hidden: the stored values stay visible and are still
+    // submitted, so turning the feature off never loses a tuned window.
+    for (const key of ["mergeSilenceMs", "mergeMaxMsgs", "mergeForcedReleaseMs"]) {
+      expect(client).toContain(`value: form.${key}`);
+    }
+    expect(client.match(/disabled: !form\?\.mergeEnabled/g)?.length).toBe(4);
+  });
+
+  it("remembers which groups are expanded, without requiring storage", () => {
+    expect(client).toContain('"dsh-wechat/settings-open"');
+    // Private mode / quota must degrade to "toggles but forgets", not throw.
+    expect(client).toContain("window.localStorage");
+    expect(client).toContain("catch (e) {");
+  });
+
+  it("marks unsaved edits against the payload Save would send", () => {
+    // The dirty marker compares `payloadOf(form)` with the last confirmed
+    // baseline — comparing raw form state instead would flag a reformatted
+    // but semantically identical value as dirty.
+    expect(client).toContain("function payloadOf(form)");
+    expect(client).toContain("JSON.stringify(payloadOf(form))");
+    expect(client).toContain("有未保存的修改");
+    // One payload builder means the panel cannot post a different shape than
+    // the one it measured.
+    expect(client.match(/payloadOf\(form\)/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("every class the panel renders has a rule in its stylesheet", () => {
+    // A typo in a className is invisible: the element renders unstyled and
+    // the grouping silently loses its header styling. Catch it statically.
+    const defined = new Set(
+      // A class may be defined as a descendant selector (`.wx_qr img{…}`),
+      // so the lookahead accepts a combinator as well as `{`.
+      Array.from(client.matchAll(/\.(wx_[a-z_]+)(?=[\s,{:.])/g), (m) => m[1]!),
+    );
+    const used = new Set(
+      Array.from(client.matchAll(/className: "([^"]+)"/g), (m) => m[1]!.split(/\s+/))
+        .flat()
+        .filter((name) => name.startsWith("wx_")),
+    );
+    expect(used.size).toBeGreaterThan(20);
+    for (const name of used) expect(defined.has(name)).toBe(true);
   });
 });

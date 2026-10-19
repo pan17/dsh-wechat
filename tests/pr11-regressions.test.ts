@@ -224,7 +224,9 @@ describe("hard ceiling bounds memory when the force-send cannot deliver", () => 
     // is what actually bounds it.
     expect(anyBridge.outboundCache.length).toBeLessThanOrEqual(MAX_OUTBOUND_QUEUE_HARD);
     expect(anyBridge.outboundCache.length).toBeLessThan(pushes);
-  });
+    // Every attempt is audited; the sink must have stayed cheap enough that the
+    // 450-iteration loop fits comfortably inside this budget.
+  }, 60_000);
 });
 
 describe("cross-session completion notice is not suppressed forever while offline", () => {

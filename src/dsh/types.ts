@@ -76,8 +76,13 @@ export interface SessionEventRecord {
  * hosts still expose `events`; both are accepted.
  */
 export interface AgentSession {
-  /** Durable creation metadata: the recorded agent preset, if any. */
-  header?: { id?: string; agentPreset?: string };
+  /**
+   * Durable creation metadata: the recorded agent preset, if any, and the
+   * working directory the session was created with (`SessionHeader.cwd`).
+   * `cwd` is what the `send_wechat` file bound is evaluated against, so the
+   * field is declared here rather than reached for through a cast.
+   */
+  header?: { id?: string; agentPreset?: string; cwd?: string };
   /** Legacy in-memory log (pre-0.1.5). Prefer {@link snapshotEvents}. */
   events?: readonly SessionEventRecord[];
   /**

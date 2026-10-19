@@ -35,6 +35,14 @@ export interface PluginConfig {
   finalOnlyCeilingMs?: number;
   surfacePromptEnabled?: boolean;
   surfacePrompt?: string;
+  allowRemotePermissionEscalation?: boolean;
+  allowAnyFilePath?: boolean;
+  maxOutgoingFileBytes?: number;
+  mergeEnabled?: boolean;
+  mergeSilenceMs?: number;
+  mergeMaxMsgs?: number;
+  mergeSuffixTokens?: boolean;
+  mergeForcedReleaseMs?: number;
 }
 
 export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise<void> {
@@ -141,7 +149,9 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
             "Send a text message or a local file to a WeChat user. " +
             "If the calling session is bound to a WeChat user, the message goes to that user; " +
             "otherwise it goes to the first known WeChat user (single-user deployments are the norm). " +
-            "Use this to proactively push results, confirmations, or files to WeChat.",
+            "Use this to proactively push results, confirmations, or files to WeChat. " +
+            "A file must live inside the calling session's working directory or a registered " +
+            "workspace, and must be under the configured size limit; anything else is refused.",
           parameters: {
             type: "object",
             properties: {
@@ -151,7 +161,10 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
               },
               file_path: {
                 type: "string",
-                description: "Absolute path of a local file to send to WeChat.",
+                description:
+                  "Path of a local file to send to WeChat. Must resolve inside the calling "
+                  + "session's working directory or a registered workspace (unless the operator "
+                  + "enabled allowAnyFilePath), and must fit maxOutgoingFileBytes.",
               },
             },
           },

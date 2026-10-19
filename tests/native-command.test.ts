@@ -122,6 +122,9 @@ function makeBridge(opts: {
   };
   const cfg = defaultConfig();
   cfg.storageDir = dir;
+  // Merge window off (0ms): an unregistered `/foo bar` must reach the agent on
+  // the message that carried it (the merge window has its own suite).
+  cfg.mergeSilenceMs = 0;
   const bridge = new WeChatDSHBridge(ctx, cfg);
   // Skip the monitor / login flow: we only test handleMessage.
   (bridge as unknown as { token: unknown }).token = {

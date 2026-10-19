@@ -63,6 +63,9 @@ function makeBridge(agent: { agent: unknown; received: unknown[] }) {
   };
   const cfg = defaultConfig();
   cfg.storageDir = dir;
+  // Merge window off (0ms): these cases observe the message-source marker on
+  // the very message that produced it, not after a silence window.
+  cfg.mergeSilenceMs = 0;
   const bridge = new WeChatDSHBridge(ctx, cfg);
   (bridge as unknown as { token: unknown }).token = { baseUrl: "https://gw", token: "t", accountId: "b1", userId: "u", savedAt: "" };
   return bridge;

@@ -66,6 +66,9 @@ function makeBridge() {
   };
   const cfg = defaultConfig();
   cfg.storageDir = dir;
+  // Merge window off (0ms): peer binding must be observable on the first
+  // message after logout/relogin, not behind a silence timer.
+  cfg.mergeSilenceMs = 0;
   const bridge = new WeChatDSHBridge(ctx, cfg);
   (bridge as unknown as { token: unknown }).token = {
     baseUrl: "https://gw",

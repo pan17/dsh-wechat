@@ -53,7 +53,10 @@ function fixture(gate?: Promise<void>) {
   };
   const ctx = { get: (name: string) => name === "agents" ? service : undefined, on: () => () => {} } as BridgeContext;
   const dir = tempDir();
-  const bridge = new WeChatDSHBridge(ctx, { ...defaultConfig(), storageDir: dir });
+  // Merge window disabled (0ms): this suite asserts the inbound IDENTITY /
+  // replay semantics of one message at a time, which the merge window would
+  // otherwise defer behind its silence timer.
+  const bridge = new WeChatDSHBridge(ctx, { ...defaultConfig(), storageDir: dir, mergeSilenceMs: 0 });
   bridges.push(bridge);
   const token = { baseUrl: "https://gw.invalid", token: "fake", accountId: "b1", userId: "u1", savedAt: "" };
   const harness = bridge as unknown as {

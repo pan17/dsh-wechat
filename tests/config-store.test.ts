@@ -318,4 +318,76 @@ describe("ConfigStore", () => {
     expect(cfg.sendWechatRateLimitPerMinute).toBe(10);
     expect(cfg.allowedUsers).toEqual([]);
   });
+
+  it("defaults the hardening wave: no escalation, no arbitrary paths, merge off", () => {
+    const cfg = defaultConfig();
+    // Security defaults must be the restrictive ones.
+    expect(cfg.allowRemotePermissionEscalation).toBe(false);
+    expect(cfg.allowAnyFilePath).toBe(false);
+    expect(cfg.maxOutgoingFileBytes).toBe(20 * 1024 * 1024);
+    // 打字合并 is OFF by default: batching changes what "one turn" means and
+    // adds a silence window of latency, so it is opt-in. The tuning knobs keep
+    // their values so `/merge on` behaves as documented the moment it is used.
+    expect(cfg.mergeEnabled).toBe(false);
+    expect(cfg.mergeSilenceMs).toBe(3000);
+    expect(cfg.mergeMaxMsgs).toBe(10);
+    expect(cfg.mergeSuffixTokens).toBe(true);
+    expect(cfg.mergeForcedReleaseMs).toBe(180_000);
+  });
+
+  it("persists the new booleans and numbers with type guards", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      const store = new ConfigStore(dir);
+      store.update({
+        mergeEnabled: false,
+        mergeSuffixTokens: false,
+        allowRemotePermissionEscalation: true,
+        allowAnyFilePath: true,
+        mergeSilenceMs: 0,
+        mergeMaxMsgs: 3,
+        mergeForcedReleaseMs: 1000,
+        maxOutgoingFileBytes: 4096,
+      });
+      const stored = new ConfigStore(dir).stored();
+      expect(stored.mergeEnabled).toBe(false);
+      expect(stored.allowAnyFilePath).toBe(true);
+      // 0 = "no merge window" is meaningful and must survive.
+      expect(stored.mergeSilenceMs).toBe(0);
+      expect(stored.mergeMaxMsgs).toBe(3);
+      expect(stored.maxOutgoingFileBytes).toBe(4096);
+
+      // Junk is refused rather than persisted.
+      store.update({ mergeEnabled: "yes" as never, mergeSilenceMs: -1 as never, maxOutgoingFileBytes: 0 as never });
+      const after = new ConfigStore(dir).stored();
+      expect(after.mergeEnabled).toBe(false);
+      expect(after.mergeSilenceMs).toBe(0);
+      expect(after.maxOutgoingFileBytes).toBe(4096);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("sanitises hand-edited hardening keys read straight from config.json", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({
+        mergeEnabled: "no",
+        allowAnyFilePath: 1,
+        maxOutgoingFileBytes: "4096",
+        mergeSilenceMs: null,
+        mergeMaxMsgs: 5,
+      }), "utf-8");
+      const stored = new ConfigStore(dir).stored();
+      // Malformed values are dropped so the built-in default applies; a
+      // truthy string must never switch a security default on.
+      expect(stored.mergeEnabled).toBeUndefined();
+      expect(stored.allowAnyFilePath).toBeUndefined();
+      expect(stored.maxOutgoingFileBytes).toBeUndefined();
+      expect(stored.mergeSilenceMs).toBeUndefined();
+      expect(stored.mergeMaxMsgs).toBe(5);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

@@ -11,6 +11,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { ensurePrivateDir, writePrivateFile } from "./utils/secure-fs.js";
 
 export interface UserState {
   /** The WeChat user id this state belongs to. */
@@ -101,7 +102,12 @@ function normalizeOutbound(value: unknown): OutboundState | undefined {
     version: 1,
     peerUserId: raw.peerUserId,
     messageCount: count,
-    queue: queue.slice(-MAX_OUTBOUND_QUEUE),
+    // The reload cap MUST match the runtime hard ceiling, not the soft cap:
+    // the runtime queue legally holds up to `MAX_OUTBOUND_QUEUE_HARD` (400)
+    // entries, so keeping only the last 100 here silently discarded items
+    // 101–400 of a full queue on every restart. `persistOutboundState` writes
+    // the whole bounded set, so a reload restores exactly what was saved.
+    queue: queue.slice(-MAX_OUTBOUND_QUEUE_HARD),
   };
 }
 
@@ -142,10 +148,12 @@ export class StateStore {
   }
 
   private save(): void {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    ensurePrivateDir(path.dirname(this.filePath));
     const tempPath = `${this.filePath}.tmp-${process.pid}`;
     try {
-      fs.writeFileSync(tempPath, JSON.stringify(this.state, null, 2), "utf-8");
+      // 0o600 on both the temp file and the renamed target: the state file
+      // carries the WeChat↔session mapping and the queued outbound bodies.
+      writePrivateFile(tempPath, JSON.stringify(this.state, null, 2));
       fs.renameSync(tempPath, this.filePath);
     } catch (err) {
       try {

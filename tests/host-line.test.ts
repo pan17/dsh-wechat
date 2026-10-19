@@ -23,7 +23,7 @@
  *   3. `>=0.2.0-rc.2` alone — the real predecessor. Correct floor, but no
  *      ceiling, so it admitted `0.3.0` and `1.0.0`.
  *
- * The range is now ONE arm, `>=0.2.0-rc.2 <0.3.0-0`, used verbatim in both
+ * The range is now ONE arm, `>=0.2.1-0 <0.3.0-0`, used verbatim in both
  * fields. Per-tuple enumeration (as an earlier revision used) is unnecessary:
  * the only consumer evaluates with `includePrerelease: true`, where a single
  * arm already admits every 0.2.x prerelease — and enumeration could never be
@@ -48,8 +48,8 @@ const PEER = manifest.peerDependencies?.["@deepseek-ai/dsh"] ?? "";
 
 /** Versions the declaration must admit, under plain AND includePrerelease. */
 const MUST_ADMIT = [
-  "0.2.0-rc.2",
-  "0.2.0",
+  "0.2.1-0",
+  "0.2.1-rc.2",
   "0.2.1",
   "0.2.2",
   "0.2.3",
@@ -63,8 +63,10 @@ const MUST_REJECT = [
   "0.1.4",
   "0.1.5-rc.1",
   "0.1.9",
-  // Just below the floor on the same tuple.
+  // Below the floor: 0.2.0 and its rc line are no longer claimed.
   "0.2.0-rc.1",
+  "0.2.0-rc.2",
+  "0.2.0",
   // The unbounded predecessor admitted all of these; the ceiling must not.
   "0.3.0-0",
   "0.3.0-rc.1",
@@ -94,17 +96,18 @@ describe("engines.dsh declares the host lines this plugin actually runs on", () 
     ).toBe(false);
   });
 
-  it("covers the 0.2.0-rc.2 floor the deployment targets", () => {
-    // The explicit requirement: at least 0.2.0-rc.2.
-    expect(semver.satisfies("0.2.0-rc.2", RANGE, { includePrerelease: true })).toBe(true);
-    expect(semver.satisfies("0.2.0-rc.2", RANGE)).toBe(true);
+  it("covers the 0.2.1-0 floor and the rc.2 target", () => {
+    // The explicit requirement: at least 0.2.1-0, including 0.2.1-rc.2.
+    expect(semver.satisfies("0.2.1-0", RANGE, { includePrerelease: true })).toBe(true);
+    expect(semver.satisfies("0.2.1-rc.2", RANGE, { includePrerelease: true })).toBe(true);
+    expect(semver.satisfies("0.2.1-rc.2", RANGE)).toBe(true);
   });
 
   it("admits every 0.2.x prerelease under the consumer's semantics", () => {
     // `dshmarket` is the only reader of `engines.dsh`, and it always passes
     // `{ includePrerelease: true }` (lib/discovery-compatibility.js). A single
     // arm is therefore sufficient; no per-tuple enumeration is needed.
-    for (const version of ["0.2.1-alpha.1", "0.2.1-rc.1", "0.2.2-rc.1", "0.2.3-rc.1"]) {
+    for (const version of ["0.2.1-alpha.1", "0.2.1-rc.1", "0.2.1-rc.2", "0.2.2-rc.1", "0.2.3-rc.1"]) {
       expect(
         semver.satisfies(version, RANGE, { includePrerelease: true }),
         version,
@@ -115,11 +118,11 @@ describe("engines.dsh declares the host lines this plugin actually runs on", () 
   it("keeps the 0.3.0 line out even when prereleases are included", () => {
     // `<0.3.0` alone would admit `0.3.0-rc.1` under includePrerelease; the
     // `-0` fence post is what closes that hole.
-    expect(semver.satisfies("0.3.0-rc.1", ">=0.2.0-rc.2 <0.3.0", { includePrerelease: true })).toBe(
+    expect(semver.satisfies("0.3.0-rc.1", ">=0.2.1-0 <0.3.0", { includePrerelease: true })).toBe(
       true,
     );
     expect(
-      semver.satisfies("0.3.0-rc.1", ">=0.2.0-rc.2 <0.3.0-0", { includePrerelease: true }),
+      semver.satisfies("0.3.0-rc.1", ">=0.2.1-0 <0.3.0-0", { includePrerelease: true }),
     ).toBe(false);
   });
 });
@@ -132,10 +135,10 @@ describe("@deepseek-ai/dsh peer turns the declarative claim into an enforced one
     expect(PEER).toBe(RANGE);
   });
 
-  it("admits the running host runtime (0.2.0-rc.2)", () => {
+  it("admits the running host runtime (0.2.1-rc.2)", () => {
     // The host evaluates peers with `{ includePrerelease: true }`
     // (`semver.satisfies(runtimeVersion, requirement, { includePrerelease: true })`).
-    expect(semver.satisfies("0.2.0-rc.2", PEER, { includePrerelease: true })).toBe(true);
+    expect(semver.satisfies("0.2.1-rc.2", PEER, { includePrerelease: true })).toBe(true);
   });
 
   it("is marked optional so installing it does not pull in the whole harness", () => {

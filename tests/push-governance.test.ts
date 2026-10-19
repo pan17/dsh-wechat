@@ -107,7 +107,11 @@ describe("send_wechat per-minute rate limit", () => {
 
   it("counts media pushes too — the tool call is what is limited", async () => {
     const bridge = makeBridge({ sendWechatRateLimitPerMinute: 1 });
-    const tmp = path.join(os.tmpdir(), `dsh-wx-rate-${Date.now()}.txt`);
+    // A file the tool is allowed to read: inside the sending session's cwd
+    // (the S2 bound refuses anything else, which would confuse the limiter).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-rate-file-"));
+    (bridge as any).state.update("u1", { cwd: dir });
+    const tmp = path.join(dir, `dsh-wx-rate-${Date.now()}.txt`);
     fs.writeFileSync(tmp, "payload");
     try {
       const first = await bridge.handleSendWeChat("wx-s1", { file_path: tmp });
@@ -116,7 +120,7 @@ describe("send_wechat per-minute rate limit", () => {
       expect(second.ok).toBe(false);
       expect(sendMediaMessage).toHaveBeenCalledTimes(1);
     } finally {
-      fs.unlinkSync(tmp);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -209,7 +213,7 @@ describe("inbound allowlist", () => {
     expect(sendTextMessage).toHaveBeenCalled();
   });
 
-  it("logs the rejected id so the operator can see who was turned away", async () => {
+  it("logs the rejected id MASKED so the operator can correlate without leaking it", async () => {
     const logs: string[] = [];
     const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
       logs.push(args.map(String).join(" "));
@@ -217,7 +221,10 @@ describe("inbound allowlist", () => {
     try {
       const bridge = makeBridge({ allowedUsers: ["u1"] });
       await bridge.handleMessage(userText("让我进去", "intruder-42"));
-      expect(logs.some((l) => l.includes("intruder-42") && l.includes("allowedUsers"))).toBe(true);
+      // S4: the operator sees the rejection and can correlate it with other
+      // lines about the same sender, but the log never carries the raw id.
+      expect(logs.some((l) => l.includes("in***42") && l.includes("allowedUsers"))).toBe(true);
+      expect(logs.some((l) => l.includes("intruder-42"))).toBe(false);
     } finally {
       spy.mockRestore();
     }

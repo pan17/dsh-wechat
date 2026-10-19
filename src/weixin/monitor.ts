@@ -11,6 +11,7 @@ import {
   notifyStart,
   isSessionTimeoutError,
 } from "./api.js";
+import { writePrivateFile } from "../utils/secure-fs.js";
 import type { WeixinMessage, GetUpdatesResp } from "./types.js";
 
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000;
@@ -71,8 +72,10 @@ function loadSyncBuf(storageDir: string): string {
 }
 
 function saveSyncBuf(storageDir: string, buf: string): void {
-  fs.mkdirSync(storageDir, { recursive: true });
-  fs.writeFileSync(getSyncBufPath(storageDir), JSON.stringify({ get_updates_buf: buf }), "utf-8");
+  // The long-poll cursor is not a secret, but it lives in the same private
+  // directory as the token: one mode policy for every file the plugin writes
+  // (0o700 dir / 0o600 file; Windows relies on inherited ACLs).
+  writePrivateFile(getSyncBufPath(storageDir), JSON.stringify({ get_updates_buf: buf }));
 }
 
 /** Drop the long-poll cursor so a new bot session does not resume the old one. */

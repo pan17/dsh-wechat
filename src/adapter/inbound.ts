@@ -4,12 +4,12 @@
  * https://github.com/pan17/wechat-opencode (src/adapter/inbound.ts)
  */
 
-import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { WeixinMessage, MessageItem } from "../weixin/types.js";
 import { MessageItemType } from "../weixin/types.js";
 import { parseAesKey, downloadAndDecrypt } from "../weixin/media.js";
+import { ensurePrivateDir, writePrivateFile } from "../utils/secure-fs.js";
 
 export interface PromptBlock {
   type: "text";
@@ -18,12 +18,16 @@ export interface PromptBlock {
 
 /**
  * Save downloaded file to temp directory with a unique name.
+ *
+ * Inbound media is the user's own content, so it lives under the same private
+ * policy as the rest of the storage dir: directory 0o700, file 0o600 (Windows
+ * ignores the mode and relies on the inherited ACLs — see secure-fs).
  */
 function saveToTemp(buffer: Buffer, fileName: string, tempDir: string): string {
-  fs.mkdirSync(tempDir, { recursive: true });
+  ensurePrivateDir(tempDir);
   const safeName = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}-${fileName.replace(/[^\w.-]/g, "_")}`;
   const filePath = path.join(tempDir, safeName);
-  fs.writeFileSync(filePath, buffer);
+  writePrivateFile(filePath, buffer);
   return filePath;
 }
 

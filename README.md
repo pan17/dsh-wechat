@@ -16,6 +16,7 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 
 - **发送** — 微信文本/图片/文件/语音消息 → DSH agent（媒体自动下载解密到
   `~/.dsh-wechat/tempfile/`，本地路径作为附件注入）
+- **打字合并（默认关闭，需显式开启）** — 开启后连续几条微信消息在静默窗口（默认 3 秒）内到达时**合并成一轮**，不再一句话分五段就烧掉五轮；条数上限（默认 10）或上限时间（默认 3 分钟，到点必发）会强制释放。消息末尾 `..` = 还要接着说（暂不发出），`!!` = 立刻提交（两者开启时会被去掉）。**图片/文件不参与合并**：它们会先把已经输入的文字作为一轮发出去，再自己作为一轮进入 agent，顺序不变。微信端 `/merge on|off|status` 切换，设置页同款开关。默认关闭是因为合并改变了「一轮」的含义，且每条消息要多等一个静默窗口——升级后行为与旧版一致，需要时再开
 - **接收** — agent 正文独立发送；正文之间的思考与工具调用/结果合并成一条「执行过程」，按桌面端的分组方式阅读。过程在收到下一段正文的第一个有效流式片段时立即推送，正文接收完成后独立发送；提问/审批卡或轮次结束也会发送待发过程；`send_wechat` 工具可主动推送文本/文件到微信
 - **微信 slash 命令** — `/workspace`、`/session`、`/preset`、`/model`、
   `/perm`、`/silent`、`/flush`、`/notify`、`/next`、`/status`、`/stop`、`/rq` 等
@@ -26,16 +27,21 @@ DSH 设置页内扫码登录与连接配置。以静态 Cordis 插件交付，�
 - **静默模式** — `/silent on` 后每轮只发送最终回复，设置页可切换（全局配置，重新扫码后仍保留）。⚠️ 单位是**轮**：一次需求若被拆成多轮（例如目标自动续跑 8 轮），仍会收到 8 条
 - **结论模式（只回最终结论）** — 设置页勾选或微信发 `/final on`，跨轮次的中间过程一律暂存，整条任务彻底停下来后**只发一条最终结论**：自动续跑再多轮也只有一条。默认静默 45 秒后交付，最长 10 分钟必发一次；权限卡、提问卡、报错始终立即推送，不受压制；「执行过程」分组直接丢弃；微信发 `/flush` 可随时立即取回。开启后优先于「静默」。配置键 `finalOnly` / `finalOnlyIdleMs` / `finalOnlyCeilingMs`
 - **投递可信度** — 错误与摘录先过秘密脱敏（JWT / `sk-` / `gh*_` / `xox*` / `AKIA` / `Bearer` / 长 hex / 长 base64 → `***`，**绝不作用于正常回复正文**）；跨会话完成卡预览取**尾部** 80 字（结论在最后）；长回复按 `（i/n）` 有序分段，代码围栏与表格原子不可切；出站队列满时**强制发出最旧一条**而不是丢弃；`send_wechat` 每分钟限流；`allowedUsers` 白名单可拒绝陌生联系人驱动 bot
+- **权限提权只能在本机做** — 微信里的 `/perm default <预设>` 只在**不放宽**权限时写入全局默认；`danger-full-access` 沙箱、或审批策略为 `never` 的预设会被拒绝，并提示到 DSH 设置页操作（全局默认对**所有**新会话生效，与微信无关）。会话级 `/perm switch` 不受影响（非持久）。确需远程改默认时开启 `allowRemotePermissionEscalation`
+- **`send_wechat` 不是任意文件读取原语** — 只允许发送**调用会话**工作目录或已注册工作区内的文件（按 `fs.realpath` 归一后比较，`..` 与符号链接都逃不出去），并有字节上限（默认 20 MiB，读取前即拒绝）。要放开任意路径需显式开启 `allowAnyFilePath`
+- **入站白名单升级播种** — 老部署升级时若 `state.json` 里**已有绑定用户**且白名单从未配置过，会自动把该用户写入 `allowedUsers`（否则升级后第一个发消息的陌生人就会接管 bot），并在微信里**提示一次**、`/status` 里显示你自己的 user id；全新安装（还没有绑定用户）保持「首个给你发消息的人成为绑定对端」，不会被锁在门外
+- **日志与审计** — 入站日志只记**脱敏**后的发送者 id，正文预览再过一次 `maskSecrets`；`~/.dsh-wechat/audit.jsonl` 追加记录入站（脱敏 id + 长度，不含正文）、slash 命令名、审批/提问决定、`send_wechat` 文件路径、每次出站发送结果，按 1 MiB 上限轮转为 `audit.jsonl.1`；`~/.dsh-wechat` 目录 `0700`、其下文件（token/state/config/sync-buf/审计）均为 `0600`
+- **出站串行槽可诊断** — 锁内再调用公共入口会**立刻报错**（而不是把自己排到自己后面永久卡死），单次操作挂死时后续发送最多等 30 秒后照常发出并记日志
 - **繁忙时投递（与 DSH 同源）** — 按 `busyEnter` 排队/插话；微信 `/enter` 同步
 - **跨会话决策推送** — `/notify on` 后，任意会话的权限/提问卡整卡推送到微信。当前会话可直接回；其它会话必须 `P{n}=…`（`P1=/rq` 关闭该卡）。默认关。跨会话任务完成/报错走 `/notify tasks on|off`
 - **二维码登录** — `http://127.0.0.1:3080/wechat/qr` 扫码登录，设置页内嵌
-- **设置页 UI** — DSH 设置 → **WeChat**：单卡展示状态、扫码、退出登录、连接配置与通知/静默开关（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
+- **设置页 UI** — DSH 设置 → **WeChat**：状态区 + 5 个可折叠分组（连接与默认行为 / 消息推送 / 打字合并 / 微信渠道提示词 / 安全边界），默认收起并显示当前值摘要（保存即生效，存储于 `~/.dsh-wechat/config.json` 与 `state.json`）
 - **断点续传** — `sync-buf` 与微信会话映射持久化，重启 DSH 后自动恢复会话
 - **单用户** — 只服务第一个微信用户；bot token 缺失/失效时不向微信推送，日志会写明原因（需重新扫码或等会话恢复）
 
 ## 安装（部署到 DSH profile）
 
-当前版本要求 **DSH `>=0.2.0-rc.2`（且 `<0.3.0-0`）**。这条要求写了两处：`engines.dsh`（供插件市场展示，宿主不读）与 `peerDependencies["@deepseek-ai/dsh"]`（宿主**强制校验**——不匹配会跳过整个插件包）。低于 `0.2.0-rc.2` 或高于 `0.2.x` 的 DSH 会被拒绝加载。
+当前版本要求 **DSH `>=0.2.1-0`（且 `<0.3.0-0`）**。这条要求写了两处：`engines.dsh`（供插件市场展示，宿主不读）与 `peerDependencies["@deepseek-ai/dsh"]`（宿主**强制校验**——不匹配会跳过整个插件包）。低于 `0.2.1-0` 或高于 `0.2.x` 的 DSH 会被拒绝加载。
 
 ### 方式一：设置页内直接安装（推荐）
 
@@ -141,6 +147,7 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 | `/enter queue\|steer\|status`（`/busy`） | 繁忙时投递：agent 运行中收到微信消息时排队（`queue`）还是插话进当前轮次（`steer`）；读写 DSH 设置 `ui-conversation.busyEnter`，与 GUI「繁忙时 Enter 键行为」同源同步；空闲会话始终新开一轮 |
 | `/silent on\|off`（`/sl`） | 静默模式：开启后仅在轮次结束发送最后一条助手正文；关闭后思考与工具合并为「执行过程」，正文独立发送；写入 `config.json`，重新扫码后仍保留，设置页可切换。⚠️ 单位是「轮」——一次需求若被拆成多轮（例如目标自动续跑 8 轮），仍会收到 8 条；要按「任务」只收一条请用结论模式（`/final on`） |
 | `/final on\|off\|status`（`/fo`） | 结论模式开关：开启后跨轮次暂存，整条任务停下后只发一条最终结论（优先于 `/silent`）；`off` 会把**当前暂存的内容先交付**再关闭（暂存是 agent 已经产出的结论，关掉不该把它销毁）；`status` 显示模式与暂存条数。写入 `config.json`，重新扫码后仍保留，与设置页「结论模式」同一个值。⚠️ `/f` 是 `/flush` 的别名，**不是** `/final` 的 |
+| `/merge on\|off\|status`（`/mg`） | 打字合并开关：**默认关闭**，开启后连续几条微信消息在静默窗口（默认 3 秒）内合并成一轮；`status` 显示窗口/上限/强制放行/当前暂存条数。消息末尾 `..` 表示还要接着说（暂不发出），`!!` 表示立刻提交（开启时两个后缀都会从正文去掉；整条消息只有后缀且没有待合并内容时按普通文本处理）。达到条数上限、`!!`、或强制放行上限（默认 3 分钟，图片/文件到达也会先冲刷）时一定发出；乱序的旧消息**不会**延长窗口。`off` 会先把暂存的消息作为一轮发出去再关闭（那是你自己说的话，不该被开关吞掉）。写入 `config.json`，重新扫码后仍保留，与设置页「打字合并」同一个值 |
 | `/flush`（`/f`） | 立即取回结论模式暂存的最终结论，不必等静默期；没有暂存内容时提示为空 |
 | `/surface on\|off\|status`（`/wxprompt`） | 微信渠道提示词注入开关（默认关）；正文在设置页编辑，不在微信改 |
 | `/notify on\|off\|status`（`/watch`） | 跨会话决策推送总闸（开：任意会话权限/提问卡整卡推送并可直接回复；关：只答当前会话），默认关闭；`/notify tasks on\|off` 单独开关跨会话任务完成/报错提醒（设置页可切换） |
@@ -180,12 +187,31 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 客户端半部通过 `dsh.client` + `exports["./client"]` 声明（与 dsh-mcp-manager
 同款交付），挂载到 `settings.section` slot（nav 顺序 40）：
 
-- **状态卡** — 登录阶段（未登录/等待扫码/已扫码，待确认/已登录/登录失败）、Bot ID、
-  监控运行状态、已绑定用户数，与 `跨会话决策推送` / `跨会话任务完成提醒` / `静默` / `结论模式` 开关同卡展示
-- **扫码** — 未登录时页面内直接显示二维码，扫码确认后自动进入已登录
-- **操作按钮** — `重新扫码`（清除 token 重新登录）、`退出登录`，与保存配置同行
-- **连接配置** — 设置页展示 `cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers`，以及 `跨会话决策推送` / `跨会话任务完成提醒` / `静默` / `结论模式` / 微信渠道提示词（开关 + 正文）；保存即生效。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` / `finalOnlyIdleMs` / `finalOnlyCeilingMs` 仍可写 `~/.dsh-wechat/config.json` 或插件行 `config:`，设置页保存不会覆盖它们。网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
-- **帮助** — 卡片标题行的 **帮助** 按钮展开本地命令表（与微信 `/help` 同源）；DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出
+- **状态区** — 登录阶段（未登录/等待扫码/已扫码，待确认/已登录/登录失败）、Bot ID、
+  监控运行状态、已绑定用户数；未登录时直接显示二维码，扫码确认后自动进入已登录；
+  同一区放 `重新扫码`（清除 token 重新登录）与 `退出登录`
+- **可折叠分组** — 设置按用途分成 5 组，**默认全部收起**，收起时右侧显示由当前配置
+  实时算出的摘要（例如「打字合并：已关闭 · 每条消息各自一轮」），展开才编辑：
+
+  | 分组 | 包含 |
+  |---|---|
+  | 连接与默认行为 | `cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers` |
+  | 消息推送 | `跨会话决策推送` / `跨会话任务完成提醒` / `静默` / `结论模式` |
+  | 打字合并 | `打字合并` 总开关 + `mergeSilenceMs` / `mergeMaxMsgs` / `mergeForcedReleaseMs` / `合并后缀 .. 与 !!`（总开关关闭时参数置灰，但值仍随保存提交，不会丢配置） |
+  | 微信渠道提示词 | `surfacePromptEnabled` + 提示词正文 |
+  | 安全边界 | `allowRemotePermissionEscalation` / `allowAnyFilePath` / `maxOutgoingFileBytes` |
+
+  展开状态记在浏览器 localStorage（`dsh-wechat/settings-open`），不进 `config.json`；
+  存储不可用时退化为「能展开但不记忆」，不会报错。
+- **保存** — 底部 `保存配置` 一次提交全部字段；有改动未保存时按钮旁显示
+  `● 有未保存的修改`。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` /
+  `finalOnlyIdleMs` / `finalOnlyCeilingMs` 仍可写 `~/.dsh-wechat/config.json` 或插件行
+  `config:`，设置页保存不会覆盖它们。网关参数变更会自动重启长轮询；存储于
+  `~/.dsh-wechat/config.json` 与 `state.json`
+- **帮助** — 卡片标题行的 **指令帮助** 按钮展开本地命令表（与微信 `/help` 同源）；
+  DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出
+- **已知限制** — 页面底部的告警盒，同样可折叠（默认收起），列出 iLink 的 10 条窗口
+  与 24 小时互动窗口
 
 与宿主通信走插件自己的 HTTP API（`/wechat/api/status|help|config|relogin|
 logout`），客户端零 `@deepseek-ai` 依赖。
@@ -218,7 +244,15 @@ logout`），客户端零 `@deepseek-ai` 依赖。
 | `finalOnlyIdleMs` | `45000` | 结论模式静默期：任一活动事件（助手正文、轮次结束、`agent/status` 空闲/运行）都会把它重新推后 |
 | `finalOnlyCeilingMs` | `600000` | 结论模式硬顶：从第一次暂存起算，到时无论是否仍在续跑都强制交付一次（10 分钟） |
 | `sendWechatRateLimitPerMinute` | `10` | `send_wechat` 工具每分钟推送上限（滑动 60 秒窗口；`0` = 不限）。超限时工具**明确返回失败**并告知模型，而不是继续刷用户 |
-| `allowedUsers` | `[]` | 入站白名单（微信 user id 数组）。**空 = 现有行为**：首个入站者成为绑定对端；非空 = 只有名单内的 id 会被处理，其余在去重/预算/建会话/命令分发之前拦下并记日志，绝不回复 |
+| `allowedUsers` | `[]` | 入站白名单（微信 user id 数组）。**空 = 现有行为**：首个入站者成为绑定对端；非空 = 只有名单内的 id 会被处理，其余在去重/预算/建会话/命令分发之前拦下并记日志，绝不回复。**升级播种**：`config.json` 里从未写过该键、且 `state.json` 已有绑定用户时，启动会把该用户写入这里并持久化（微信里提示一次，`/status` 显示你的 id）；显式存过 `[]` 则永不覆盖 |
+| `allowRemotePermissionEscalation` | `false` | 是否允许微信 `/perm default` 放宽**全局**默认权限。关闭时：解析出的沙箱为 `danger-full-access` 或审批为 `never` 的预设被拒绝并提示到 DSH 设置页操作；不放宽的写入仍允许；会话级 `/perm switch` 不受影响 |
+| `allowAnyFilePath` | `false` | 是否允许 `send_wechat` 发送任意路径的文件。关闭时只允许**调用会话**工作目录或已注册工作区内的文件（`fs.realpath` 归一后比较，`..`/符号链接逃不出去） |
+| `maxOutgoingFileBytes` | `20971520` | `send_wechat` 发送文件的字节上限（20 MiB）。超限在 `stat` 阶段即拒绝，不会读进内存；缓存队列里的文件在冲刷时也会重新校验 |
+| `mergeEnabled` | `false` | **打字合并总闸（默认关闭）**：开启后连续几条微信消息合并成一轮。`/merge on\|off` 与设置页同款；关闭时每条消息各自一轮 |
+| `mergeSilenceMs` | `3000` | 合并静默窗口（毫秒）：窗口内到达的消息继续追加；`0` = 关闭窗口（等同关闭合并）。乱序更旧的消息不会延长窗口 |
+| `mergeMaxMsgs` | `10` | 单批消息条数硬上限：达到即立刻合并发出（防御性上限，永不超过） |
+| `mergeSuffixTokens` | `true` | 是否识别正文末尾的 `..`（继续追加）与 `!!`（立刻提交）；开启时后缀会从正文中去掉 |
+| `mergeForcedReleaseMs` | `180000` | 强制放行上限（毫秒，3 分钟）：无论窗口、`..` 暂挂、还是上一批仍在投递，到点一定发出——「宁可两句话一轮，也不让通道卡死」 |
 | `surfacePromptEnabled` | `false` | 微信渠道提示词总闸（微信消息驱动时注入，GUI 消息时仍隐藏） |
 | `surfacePrompt` | 见默认中文 | 注入正文（设置页编辑；含 `{{` 会被打散以免打断 DSH interpolate） |
 
@@ -227,16 +261,26 @@ logout`），客户端零 `@deepseek-ai` 依赖。
 ```bash
 npm install
 npm run build    # tsc → dist/
-npm test         # vitest（splitText/出站 Markdown 过滤/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词/结论模式/脱敏/限流与白名单/dispose 语义/驱动宿主版本区间/DSH >=0.2.0-rc.2 适配）
+npm test         # vitest（splitText/出站 Markdown 过滤/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词/结论模式/打字合并/脱敏/限流与白名单/权限提权闸门/send_wechat 文件边界/白名单播种/审计与文件权限/出站串行槽/有界缓存/dispose 语义/驱动宿主版本区间/DSH >=0.2.1-0 适配）
 ```
 
-当前版本针对 **DeepSeek Harness `>=0.2.0-rc.2 <0.3.0-0`** 的宿主 API；仓库本身不依赖任何 `@deepseek-ai/dsh-*` 运行时包（`peerDependencies` 里的 `@deepseek-ai/dsh` 是**宿主契约声明**，不是依赖，并已标 `optional` 以免安装时把整个 harness 拖进 profile）。宿主版本要求写了两处、值完全一致：
+⚠️ **CI 跑在 Linux（`ubuntu-latest`）上，所以 Windows 上"全绿"不等于 CI 绿。** 已经踩过一次：一条断言把 Windows 形状的字面量 `C:\home\.dsh` 同时当输入和期望前缀，而实现会先对该根目录做 `path.resolve`——在 POSIX 上那是**相对路径**，会解析到 cwd 之下，于是 `built.startsWith("C:\home\.dsh/sessions")` 恒为 false，本地 Windows 必绿、CI 必红。
+
+改动测试（尤其涉及路径/权限/文件系统的用例）后，请在 Linux 上再跑一遍完整 CI 步骤：
+
+```bash
+bash scripts/ci-local.sh    # Linux / macOS / Windows 的 WSL 里都可用
+```
+
+它把检出复制到本机临时目录再 `npm ci && tsc --noEmit && vitest run`（与 CI 完全一致），因此不会用 Linux 版的 esbuild/rollup 覆盖你工作副本里的 `node_modules`。
+
+当前版本针对 **DeepSeek Harness `>=0.2.1-0 <0.3.0-0`** 的宿主 API；仓库本身不依赖任何 `@deepseek-ai/dsh-*` 运行时包（`peerDependencies` 里的 `@deepseek-ai/dsh` 是**宿主契约声明**，不是依赖，并已标 `optional` 以免安装时把整个 harness 拖进 profile）。宿主版本要求写了两处、值完全一致：
 
 - `engines.dsh` —— **声明性**。宿主 `evaluatePluginCompatibility` 只校验 `peerDependencies`，**没有任何代码读 `engines`**；真正读它的是插件市场 `dshmarket`（顶层 `engines.dsh` 优先于嵌套 `dsh.engines.dsh`），且固定以 `{ includePrerelease: true }` 求值。
 - `peerDependencies["@deepseek-ai/dsh"]` —— **强制**。不匹配时宿主会**跳过整个 `dsh-wechat` bundle**（`profile.ts` 抛错 → `skippedBundles`，并在每次启动时向 stderr 写一行 `skipping profile bundle`），插件在桌面端表现为消失。
   - 该 peer 必须同时标 `peerDependenciesMeta.optional`。实测（`pnpm pack` 后 tarball 安装）：不加 `optional` 会**安装失败**（`exit=1`）——peer 被当成真实依赖解析，`@deepseek-ai/dsh` 元包带 82 条 dependencies，会拉进 530 个包并撞上未发布包 `@deepseek-ai/dsh-type-meta` 的 npm 404；即使能解析，lockfile 也会从 28 行膨胀到 8199 行。加 `optional` 后 `exit=0`、lockfile 28 行。宿主门禁**不读** `peerDependenciesMeta`，所以强制力不受影响。
 
-范围只有一段 arm，因为前发布元组枚举并无必要：唯一消费者在 `includePrerelease` 语义下求值，一条 `>=0.2.0-rc.2 <0.3.0-0` 已放行全部 0.2.x 前发布版；而枚举永远补不全（每来一个新的 0.2.x 元组都得再加一条）。上界必须写成 `<0.3.0-0` 而非 `<0.3.0`——后者在 `includePrerelease` 下会放行 `0.3.0-rc.1`。`tests/host-line.test.ts` 用真实 `semver` 把这张准入/拒绝矩阵与两处声明的一致性钉死。
+范围只有一段 arm，因为前发布元组枚举并无必要：唯一消费者在 `includePrerelease` 语义下求值，一条 `>=0.2.1-0 <0.3.0-0` 已放行全部 0.2.x 前发布版；而枚举永远补不全（每来一个新的 0.2.x 元组都得再加一条）。上界必须写成 `<0.3.0-0` 而非 `<0.3.0`——后者在 `includePrerelease` 下会放行 `0.3.0-rc.1`。`tests/host-line.test.ts` 用真实 `semver` 把这张准入/拒绝矩阵与两处声明的一致性钉死。
 
 > **与生态另一种写法的对比**：`@anysearch/anysearch-dsh` 不写 `engines.dsh`，而是对**具体子包**声明 `peerDependencies`（`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-web` 等）且大多用 `"*"`，其 `docs/dsh-compatibility.md` 明确说这是「默认放行新 DSH 版本、矩阵只记录已验证版本而非安装白名单」。两者取舍不同：`"*"` 换来「新宿主版本无需改 manifest」，代价是**放弃版本防护**（`*` 连 `99.0.0` 都放行）；本仓选择精确区间，代价是 DSH 大版本升级时要主动更新声明。注意 anysearch 那套用 `"*"` 无法照搬到一个元包 peer 上——`@deepseek-ai/dsh` 是聚合包，解析它就会拉整棵依赖树。
 
@@ -251,7 +295,11 @@ npm test         # vitest（splitText/出站 Markdown 过滤/解析/帧处理/wa
 - 结论模式（`finalOnly`）按**任务**而非轮次收敛：暂存的是「这条任务最终那一段正文」，因此**中间轮次的正文与「执行过程」都不会到达微信**，交付时若跨了多轮会在首行标注 `✅ 已完成（共 N 轮）`。它不改变 agent 的行为，只改变推送时机；等待期间随时可发 `/flush` 取回，发下一条需求也会先交付上一件事的结论。微信端用 `/final on|off|status` 开关（与设置页同一个值），`/final off` 会先交付暂存再关闭。硬顶存在的原因是「宁可晚一点，也不能永远沉默」。暂存只在内存里，插件 dispose 会冲刷交付、登出/换绑会丢弃。
 - 秘密脱敏（`maskSecrets`）作用范围刻意只限**错误文本与摘录**：`32+ hex` 与 `40+ base64` 两条规则会误伤 commit SHA、长 id 与长路径，所以绝不用于 agent 的正常回复正文。这是有意的取舍，`tests/redact.test.ts` 用两条断言把这个误伤边界固定下来，而不是假装它不存在。
 - `（i/n）` 分段按**码点**计预算、前缀长度计入预算，代码围栏与 GFM 表格原子不可切；唯一允许超长的例外是「最小合法形式本身就超过预算」的构造（围栏分隔符、或表头+分隔行+首行），此时宁可超长也不产出残缺的 Markdown。
-- `allowedUsers` 为空时是**现有行为**（首个给你发消息的人成为绑定对端），不是「拒绝所有人」——这样老部署升级后不会突然失联；要收紧就填名单，未列出的 id 会在去重/建会话/命令分发之前被拦下并记日志，绝不会得到回复。
+- `allowedUsers` 为空时是**现有行为**（首个给你发消息的人成为绑定对端），不是「拒绝所有人」——这样老部署升级后不会突然失联；要收紧就填名单，未列出的 id 会在去重/建会话/命令分发之前被拦下并记日志，绝不会得到回复。⚠️ **升级播种会改变这一状态**：`config.json` 里从未配置过该键、而 `state.json` 已有绑定用户时，启动会把该绑定用户写进名单（并在微信里提示一次）——这正是为了堵住「升级后第一个陌生人接管 bot」，但也意味着升级后**其他人**发消息会被忽略；要放开就在设置页清空该字段（显式存过 `[]` 后不会被再次播种）。
+- 打字合并（`mergeEnabled`）**默认关闭**：每条微信消息各自一轮，与旧版行为一致。开启后（`/merge on` 或设置页）窗口内的多条会合并成一轮，代价是每条消息多等一个静默窗口；它对语义的影响是「一轮里可能包含多条用户消息」，需要每条消息单独成轮时保持关闭或发 `/merge off`。图片/文件类消息**不参与合并**（先冲刷已输入的文字，再自己作为一轮），因此一次「文字 + 图片」仍会产生两轮；`..` 暂挂的批次仍受条数上限与 3 分钟强制放行约束，不会无限期等下去。
+- 记忆表有界：跨会话完成卡的正文预览（每会话一条，上限 64 个会话）、`/s list` 的最近活动时间（上限 512 个会话）、`/model` 覆盖（上限 128 个会话）、微信消息来源标记（上限 512 条 / 10 分钟 TTL）都是**缓存**——被淘汰只会让该行退回默认显示（创建时间、部署默认模型、按会话 id 显示标题），不会丢失队列里的任何消息。出站队列的内存边界仍是硬上限 400 条（`MAX_OUTBOUND_QUEUE_HARD`），重启后**完整**恢复（此前只恢复最后 100 条，第 101–400 条会被静默丢弃）。
+- 打字合并的缓冲区**不因 slash 命令而提前释放**：`/status`、`/next` 等命令照常立即执行，缓冲的文本仍由静默窗口 / 条数上限 / 强制放行三者之一释放（因此不会丢，只是可能晚几秒）。插件 dispose 会先把缓冲区投递再注销交互；登出 / 重新扫码 / 换绑则**丢弃**（身份变了，别人说的话不该发给下一个绑定者）。
+- `~/.dsh-wechat` 与其下文件（`auth/token.json`、`state.json`、`config.json`、`sync-buf.json`、`audit.jsonl`）以 `0700` / `0600` 创建。⚠️ **Windows 上 Node 忽略 mode 参数**（`chmod` 只能切只读位），实际保护来自 `%USERPROFILE%` 继承的 ACL（仅本人、`SYSTEM`、`Administrators` 可读）——这是依赖继承 ACL，不是本插件自己设的权限。审计文件按 1 MiB 轮转为 `audit.jsonl.1`（只保留一份历史），轮转会记一行日志。
 - 审批/提问卡挂在 Host 的 `approval/request` 与 `user-questions/request`
   waterfall 上，与 GUI 竞速；无微信 peer 时立即 `next()`，软超时只撤微信卡、不替用户决策。微信先答时会 abort 传给 GUI 的 `request.signal`（不碰 turn 的 `exec.signal`），Web composer 卡随 Gateway `cancel` 帧收起。DSH 重启后未决卡片随 turn 消失（上游已知限制）。
 - 微信回答卡片后的回执**每条占一次微信发送额度**（10 条/窗口）。一次 `P1=1 P2=2` 会发 2 条回执；额度用尽时回执与其他出站消息一样进入 `/next` FIFO 缓存，不会被丢弃。`P{n}` 是整批处理开始时快照的编号（卡片在结算时即被摘除，现算取不到编号、回执会退化成不带编号的文案）。跨会话卡的 `❗来自其他会话` 只是正文提示标记，不影响编号或回复语法。
