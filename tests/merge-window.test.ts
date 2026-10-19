@@ -85,7 +85,10 @@ function makeBridge(patch: Patch = {}) {
     get: (id: string) => liveAgents.get(id),
     list: () => [...liveAgents.values()],
   };
-  const cfg = { ...defaultConfig(), storageDir: dir, ...patch };
+  // `mergeEnabled` is OFF by default in production; every case in THIS file is
+  // about the window's behaviour once it is on, so the harness turns it on
+  // unless the case is explicitly about the default or about switching.
+  const cfg = { ...defaultConfig(), storageDir: dir, mergeEnabled: true, ...patch };
   const bridge = new WeChatDSHBridge(
     { get: (name: string) => (name === "agents" ? agentsService : undefined), on: () => () => {} },
     cfg,
@@ -343,6 +346,47 @@ describe("merge window: non-text items are never merged", () => {
 });
 
 describe("merge window: switch and persistence", () => {
+  it("is OFF by default, so an untouched install keeps one turn per message", async () => {
+    // The harness enables merging for every other case; this one asks the real
+    // question — what does a fresh `defaultConfig()` do? Batching changes what
+    // "one turn" means and adds latency per message, so it must be opt-in.
+    expect(defaultConfig().mergeEnabled).toBe(false);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-merge-"));
+    const received: string[] = [];
+    const agentsService = {
+      create: async (options: { sessionId: string }) => {
+        const agent = {
+          id: options.sessionId,
+          status: "idle",
+          options: { provider: "deepseek", model: "deepseek-chat" },
+          followup: (m: { content: Array<{ text?: string }> }) => {
+            received.push(m.content.map((b) => b.text ?? "").join(""));
+          },
+          steer: () => {},
+          cancel: () => {},
+          whenIdle: async () => {},
+        };
+        return { agent };
+      },
+      resume: async () => undefined,
+      get: () => undefined,
+      list: () => [],
+    };
+    const bridge = new WeChatDSHBridge(
+      { get: (name: string) => (name === "agents" ? agentsService : undefined), on: () => () => {} },
+      { ...defaultConfig(), storageDir: dir, mergeSilenceMs: 60_000 },
+    );
+    (bridge as unknown as { token: unknown }).token = {
+      baseUrl: "https://gw", token: "t", accountId: "b1", userId: "bot", savedAt: "",
+    };
+    live.push(bridge);
+    const inbound = asInbound(bridge);
+    await inbound.handleMessage(text("一"));
+    await inbound.handleMessage(text("二"));
+    // No window is armed at all: both messages became their own turn at once.
+    expect(received).toEqual(["一", "二"]);
+  });
+
   it("mergeSilenceMs=0 disables the window (one turn per message)", async () => {
     const { bridge, received } = makeBridge({ mergeSilenceMs: 0 });
     const inbound = asInbound(bridge);

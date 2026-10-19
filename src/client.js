@@ -418,7 +418,7 @@ window.__ModuleLoader__.load({
 						createElement("label", { className: "wx_check" },
 							createElement("input", { type: "checkbox", checked: !!form?.mergeEnabled, onChange: (e) => setForm({ ...form, mergeEnabled: e.target.checked }) }),
 							createElement("span", null, "打字合并"),
-							createElement(HelpTip, { text: "默认开启：连续几条微信消息合并成一轮（一句话分几段发不再烧掉几轮）。消息末尾 `..` 表示还要接着说，`!!` 表示立刻提交；图片/文件不参与合并。关闭后每条消息各自一轮。微信端也可用 /merge on|off 切换（与这里同一个值）。" }),
+							createElement(HelpTip, { text: "默认关闭：每条微信消息各自一轮。开启后连续几条消息会在静默窗口内合并成一轮（一句话分几段发不再烧掉几轮），代价是每条消息多等几秒。消息末尾 `..` 表示还要接着说，`!!` 表示立刻提交；图片/文件不参与合并。微信端也可用 /merge on|off 切换（与这里同一个值）。" }),
 						),
 						createElement("label", { className: "wx_check" },
 							createElement("input", { type: "checkbox", checked: !!form?.mergeSuffixTokens, onChange: (e) => setForm({ ...form, mergeSuffixTokens: e.target.checked }) }),

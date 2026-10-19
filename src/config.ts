@@ -104,9 +104,12 @@ export interface WeChatDSHConfig {
    * peer are buffered per chat and delivered as ONE prompt instead of one turn
    * per message, so a thought typed as five bubbles costs one turn.
    *
-   * Default `true` — THIS CHANGES THE PRE-0.12 BEHAVIOUR, where every WeChat
-   * message was its own turn. Turn it off from WeChat with `/merge off` or in
-   * the settings page.
+   * Default `false` — every WeChat message is its own turn unless the operator
+   * opts in (from WeChat with `/merge on`, or in the settings page). Batching
+   * changes what "one turn" MEANS — a turn can then carry several user messages
+   * — and it adds a few seconds of latency per message, which is the wrong
+   * trade for the short imperative commands that dominate this channel. Opt-in
+   * keeps the pre-0.12 one-message-one-turn behaviour on upgrade.
    */
   mergeEnabled: boolean;
   /** Silence window (ms) after the last buffered message before the batch is delivered. `0` disables the window. */
@@ -169,7 +172,7 @@ export function defaultConfig(): WeChatDSHConfig {
     allowRemotePermissionEscalation: false,
     allowAnyFilePath: false,
     maxOutgoingFileBytes: 20 * 1024 * 1024,
-    mergeEnabled: true,
+    mergeEnabled: false,
     mergeSilenceMs: 3000,
     mergeMaxMsgs: 10,
     mergeSuffixTokens: true,

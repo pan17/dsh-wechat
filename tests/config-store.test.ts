@@ -319,15 +319,16 @@ describe("ConfigStore", () => {
     expect(cfg.allowedUsers).toEqual([]);
   });
 
-  it("defaults the hardening wave: no escalation, no arbitrary paths, merge on", () => {
+  it("defaults the hardening wave: no escalation, no arbitrary paths, merge off", () => {
     const cfg = defaultConfig();
     // Security defaults must be the restrictive ones.
     expect(cfg.allowRemotePermissionEscalation).toBe(false);
     expect(cfg.allowAnyFilePath).toBe(false);
     expect(cfg.maxOutgoingFileBytes).toBe(20 * 1024 * 1024);
-    // 打字合并 is ON by default — the one default that changes existing
-    // behaviour (documented in README / CHANGELOG).
-    expect(cfg.mergeEnabled).toBe(true);
+    // 打字合并 is OFF by default: batching changes what "one turn" means and
+    // adds a silence window of latency, so it is opt-in. The tuning knobs keep
+    // their values so `/merge on` behaves as documented the moment it is used.
+    expect(cfg.mergeEnabled).toBe(false);
     expect(cfg.mergeSilenceMs).toBe(3000);
     expect(cfg.mergeMaxMsgs).toBe(10);
     expect(cfg.mergeSuffixTokens).toBe(true);
