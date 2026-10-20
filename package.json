@@ -1,11 +1,12 @@
 {
   "name": "dsh-wechat",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Bridge WeChat (iLink bot) to DeepSeek Harness (DSH)",
   "type": "module",
   "files": [
     "dist/",
     "resources/",
+    "docs/",
     "cordis.patch.yml",
     "README.md",
     "LICENSE",
