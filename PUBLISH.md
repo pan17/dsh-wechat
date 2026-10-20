@@ -131,9 +131,14 @@ git push origin main --tags
 
 推送 tag 后，GitHub Actions 会自动触发 `.github/workflows/release.yml`，依次执行：
 
-1. **`publish-npm`** — 安装依赖 → 构建 → 测试 → 发布到 npm（使用 `NPM` secret 认证；`prepublishOnly` 已内置 build + test 双保险）
-2. **`release`** — npm 发布成功后，自动创建带 Release Notes 的 GitHub Release
+1. **`ci-green`** — 轮询该提交的 CI 结论，只有 `success` 才放行下面两个 job；CI 红则整个发布被拦下（GitHub Release 与 npm 都不会发出）
+2. **`release`** — 从 CHANGELOG 抽取该版本段落，创建 GitHub Release
+3. **`publish-npm`** — 安装依赖 → 构建 → 发布到 npm（使用 `DSH_WECHAT` secret 认证；`prepublishOnly` 已内置 build + test 双保险）
 
-> **前置条件**：在仓库 Settings → Secrets and variables → Actions 中配置 `NPM` secret，值为 npm 的 Automation Token（`npm token create --type automation` 生成）。
+> **前置条件**：在仓库 Settings → Secrets and variables → Actions 中配置 `DSH_WECHAT` secret，值为 npm 的 Automation Token（`npm token create --type automation` 生成）。名字必须与 `release.yml` 里 `NODE_AUTH_TOKEN: ${{ secrets.DSH_WECHAT }}` 一致，否则发布这一步会认证失败。
+
+> **发布后核对**：npm 提示「Your package is being processed」后通常要等 1–3 分钟才可查。用 `npm view dsh-wechat version` 确认 `latest` 已指向新版本——`publish-npm` 显示成功只代表上传完成，registry 生效有延迟。
+
+> **CI 红时**：修好、推 `main`、等 CI 绿，然后删掉 tag 重打（`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`，再 `git tag vX.Y.Z && git push origin vX.Y.Z`）。只在 npm 上**还没有**这个版本时才能这么做，先 `npm view dsh-wechat@X.Y.Z version` 确认 404。
 
 ---

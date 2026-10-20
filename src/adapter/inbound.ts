@@ -20,13 +20,14 @@ export interface PromptBlock {
 /**
  * How a saved inbound media file is announced to the model.
  *
- *   - `"at"` (default) — a host `@文件` reference (`@path` / `@"path with
- *     spaces"`), the exact token the GUI composer produces, so the GUI renders
- *     an openable chip. `dsh-file-reference-local` installs
- *     `FILE_REFERENCE_PROMPT` for it, which tells the model to call `read`.
- *   - `"path"` — the plain-path wording (`文件已保存到: <abs path>`), for a user
- *     who prefers prose over a mention token (or a host without the reference
- *     plugin). Same pointer, different spelling.
+ *   - `"at"` — a host `@文件` reference (`@path` / `@"path with spaces"`), the
+ *     exact token the GUI composer produces, so the GUI renders an openable
+ *     chip. `dsh-file-reference-local` installs `FILE_REFERENCE_PROMPT` for it,
+ *     which tells the model to call `read`. Opt-in: the chip only appears when
+ *     the host has that plugin mounted.
+ *   - `"path"` (default) — the plain-path wording (`文件已保存到: <abs path>`),
+ *     which reads correctly whatever the host has mounted. Same pointer,
+ *     different spelling.
  *
  * NEITHER mode pastes the file's content. That is not a mode, it is the rule: a
  * file is a POINTER. Inlining the bytes duplicates what `read` returns, turns
@@ -198,7 +199,7 @@ export async function weixinMessageToPrompt(
   opts?: { refStyle?: MediaRefStyle },
 ): Promise<PromptBlock[]> {
   const blocks: PromptBlock[] = [];
-  const refStyle: MediaRefStyle = opts?.refStyle ?? "at";
+  const refStyle: MediaRefStyle = opts?.refStyle ?? "path";
 
   // Extract text
   const text = extractText(msg.item_list);

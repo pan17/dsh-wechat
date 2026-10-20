@@ -384,40 +384,38 @@ describe("media merge: delivery failures and lifecycle", () => {
 });
 
 describe("attachment delivery: a file is a pointer, never its bytes", () => {
-  it("@ mode is the default and announces an image as a host @path reference", async () => {
+  it("path mode is the default and announces an image as a plain path", async () => {
     const { bridge, received } = makeBridge({ mediaMergeEnabled: true, mediaHoldMs: 60_000 });
     await asInbound(bridge).handleMessage(image());
     await asInbound(bridge).handleMessage(text("看"));
 
     const mediaBlock = blockTexts(received[0]!)[1]!;
-    expect(mediaBlock).toContain("[收到图片] @");
-    // Prose wording belongs to `path` mode only; the default is the mention.
-    expect(mediaBlock).not.toContain("文件已保存到:");
-    // Forward slashes only: a mention must not depend on the host OS.
-    expect(mediaBlock).not.toContain("\\");
+    expect(mediaBlock).toContain("[收到图片] 文件已保存到:");
+    // The mention is opt-in: it only renders as a chip when the host has
+    // `dsh-file-reference` mounted, so it is not the default spelling.
+    expect(mediaBlock).not.toContain("@");
   });
 
-  it("path mode keeps the plain wording", async () => {
+  it("@ mode announces an image as a host @path reference", async () => {
     const { bridge, received } = makeBridge({
       mediaMergeEnabled: true,
       mediaHoldMs: 60_000,
-      mediaAtRefEnabled: false,
+      mediaAtRefEnabled: true,
     });
     await asInbound(bridge).handleMessage(image());
     await asInbound(bridge).handleMessage(text("看"));
 
     const mediaBlock = blockTexts(received[0]!)[1]!;
-    expect(mediaBlock).toContain("[收到图片] 文件已保存到:");
-    expect(mediaBlock).not.toContain("@");
+    expect(mediaBlock).toContain("[收到图片] @");
+    // Prose wording belongs to `path` mode only.
+    expect(mediaBlock).not.toContain("文件已保存到:");
+    // Forward slashes only: a mention must not depend on the host OS.
+    expect(mediaBlock).not.toContain("\\");
   });
 
   it("path mode is one line — no「你可以使用这个路径…」tail", async () => {
     downloadAndDecrypt.mockResolvedValueOnce(Buffer.from("hello", "utf-8"));
-    const { bridge, received } = makeBridge({
-      mediaMergeEnabled: true,
-      mediaHoldMs: 60_000,
-      mediaAtRefEnabled: false,
-    });
+    const { bridge, received } = makeBridge({ mediaMergeEnabled: true, mediaHoldMs: 60_000 });
     await asInbound(bridge).handleMessage(fileMsg("note.txt"));
     await asInbound(bridge).handleMessage(text("总结"));
 
@@ -482,7 +480,7 @@ describe("attachment delivery: a file is a pointer, never its bytes", () => {
     await asInbound(bridge).handleMessage(text("看看"));
 
     const joined = blockTexts(received[0]!).join("\n");
-    expect(joined).toContain("[收到文件: photo.png] @");
+    expect(joined).toContain("[收到文件: photo.png] 文件已保存到:");
     expect(joined).not.toContain("文件内容");
   });
 });
@@ -602,7 +600,17 @@ describe("/status reports the media switches", () => {
     expect(status).toBeTruthy();
     expect(status).toContain("图片/文件合并");
     expect(status).toContain("off");
-    expect(status).toContain("交付: @引用");
+    // Plain path is the default spelling; `@引用` is opt-in via `/media at`.
+    expect(status).toContain("交付: 路径");
+  });
+
+  it("reports @引用 once /media at switches it", async () => {
+    const { bridge } = makeBridge();
+    const inbound = asInbound(bridge);
+    await inbound.handleMessage(text("/media at"));
+    await inbound.handleMessage(text("/status"));
+    const status = sendTextMessage.mock.calls.map((c) => String(c[1])).find((t) => t.includes("交付: @引用"));
+    expect(status).toBeTruthy();
   });
 
   it("shows the held count while an attachment waits", async () => {

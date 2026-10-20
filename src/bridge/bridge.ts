@@ -2206,13 +2206,14 @@ export class WeChatDSHBridge {
   }
 
   /**
-   * Attachment spelling: `@文件` reference (default) or plain-path wording.
+   * Attachment spelling: plain-path wording (default) or an `@文件` reference.
    *
    * Wording ONLY — `adapter/inbound.ts` is a pointer in both cases and never
-   * inlines the file's content, whatever this returns.
+   * inlines the file's content, whatever this returns. Off by default because
+   * the chip only renders when the host has `dsh-file-reference` mounted.
    */
   private mediaAtRefEnabled(): boolean {
-    return this.config.mediaAtRefEnabled !== false;
+    return this.config.mediaAtRefEnabled === true;
   }
 
   /**

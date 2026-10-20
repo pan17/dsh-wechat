@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-20
+
+### Changed
+
+- **附件交付默认改成纯路径，「以 @引用 方式交给 AI」改为默认关闭。** 0.13.0 把这个开关默认打开了，理由是 chip 更好看；但 `@路径` 只有在宿主挂载了 `dsh-file-reference` 时才被解析成可点开的引用，没挂载时气泡里就是一行裸 `@C:/…`——比路径难读，还容易让人以为坏了。路径写法在任何宿主上都能正常阅读，所以默认回到路径，chip 变成显式选择（`/media at` 或设置页「图片与文件 → 以 @引用 方式交给 AI」）。两种措辞交给模型的都只是指针，文件内容仍然永不内联。已经保存过该键的 `config.json` 不会被改动：显式存着 `true` 的继续用 `@引用`。
+
 ## [0.13.0] - 2026-10-20
 
 ### Added
@@ -27,7 +33,7 @@
     - **只暂存「没有话」的媒体**：同一条消息自带文字说明时立即发送（它已经说明意图，再等只是加延迟）；语音（无转写）不参与；没有可下载引用的媒体不参与（暂存它只可能产出「下载失败」）。
     - **关闭时逐字回退**：`mediaMergeEnabled=false` 仍是原来的「先冲刷文字、媒体单独一轮」，与 0.12 完全一致——所以默认关闭。
     - 关闭路径不吞东西：`/media off` 与设置页关闭该开关都会**先发出**已暂存的附件再关闭（那是用户自己发的图）。
-  - **交付措辞（`mediaAtRefEnabled`，默认 `@文件`）** —— 附件存到本机后只把**指针**交给模型，措辞有两种：`@引用` 复用 `at-refs.ts` 的 `formatFileMention`（与 `dsh-file-reference` grammar 逐字对齐；Windows 反斜杠转 `/`，含空格写成 `@"…"`），由 `dsh-file-reference-local` 的 `FILE_REFERENCE_PROMPT` 要求模型自己调 `read`，在 GUI 里就是一个可点开的 chip；`path` 是「文件已保存到: 路径」的散文写法（只有这一行，不再附加「你可以使用这个路径来读取或处理文件」——那是 `FILE_REFERENCE_PROMPT` 已经在说的事，放在微信气泡里只是噪音）。这是**措辞**开关，不是内容开关——两者交给模型的字节数都是 0。
+  - **交付措辞（`mediaAtRefEnabled`，默认关闭 = 纯路径）** —— 附件存到本机后只把**指针**交给模型，措辞有两种：`path`（默认）是「文件已保存到: 路径」的单行纯文本（不再附加「你可以使用这个路径来读取或处理文件」——那是 `FILE_REFERENCE_PROMPT` 已经在说的事，放在微信气泡里只是噪音）；`@引用` 需显式开启，复用 `at-refs.ts` 的 `formatFileMention`（与 `dsh-file-reference` grammar 逐字对齐；Windows 反斜杠转 `/`，含空格写成 `@"…"`），由 `dsh-file-reference-local` 的 `FILE_REFERENCE_PROMPT` 要求模型自己调 `read`，在 GUI 里就是一个可点开的 chip。默认关闭是因为 chip 依赖宿主挂载文件引用插件，没挂载时气泡里只剩一行裸 `@C:/…`，而路径在任何宿主上都能正常阅读。这是**措辞**开关，不是内容开关——两者交给模型的字节数都是 0。
 
     0.12 给文本文件（`.txt/.md/.csv/.log/…`，按扩展名白名单）额外附上整段内容，理由是「省一次 tool call」。这个理由站不住：`@文件` 是指针，不是内容搬运——同一次对话里内容会**出现两遍**（气泡里一遍、`read` 结果一遍），GUI 里就是一个几百行的气泡；而那段内联**没有任何大小上限**（`buffer.toString("utf-8")` 直接吃整个 buffer），一个 4 MB 的日志会被整段塞进 prompt，要么超出上下文窗口直接失败，要么把预算全烧在模型未必需要的字节上。0.13.0 因此**删掉这条路径**：`convertMediaItem` 的文件分支只剩 `[收到文件: name] <指针>`，`isTextFile` / 内联代码 / 那个 32 KB 预算一起移除，**任何配置都无法把文件内容请回来**。图片与视频同样只给指针（`[收到图片] @<path>`、`[收到视频] @<path>`），路径含引号/控制字符时退回普通路径写法，绝不产出会被截断成散文的 mention。
   - **接线**：`/media on|off|at|path`（别名 `/md`），与 `/merge` 同款——parser、dispatcher、卡片 bypass、`LOCAL_COMMAND_NAMES` 去重、`/help`、`config.json` 持久化、`/status` 新增「图片/文件合并」行（含暂存个数与当前交付措辞）、设置页同一份值。
@@ -35,7 +41,7 @@
 
 ### Changed
 
-- **微信收到的文本文件不再把内容内联进消息（与 0.12 不兼容；内容内联不可恢复，措辞开关保留）。** 0.12 的措辞是「路径 + 全文」，0.13.0 只给指针：`@文件` 是交给模型的引用，宿主 `FILE_REFERENCE_PROMPT` 会让它自己 `read`，因此内容不需要、也不应该出现在 user message 里。删掉的是**内联那条路径**（`isTextFile`、`buffer.toString("utf-8")`、无上限的整段拼接），不是「以什么形式发送」的开关：`mediaAtRefEnabled` 仍然在，`/media at|path` 与设置页复选框照旧可用，只是取值从「要不要给内容」变成了「给 `@引用` 还是给纯路径」——两个取值交给模型的都只是指针。升级后行为变化：GUI 气泡里不再出现文件正文，只留一个可点开的引用（或一行路径）；模型需要内容时会自己读。另一个顺带修好的坑：`ConfigStore.load()` 现在会丢掉本版本不认识的键，删掉的开关不会永远躺在 `config.json` 里冒充有效配置（那个文件是用户唯一能读到生效配置的地方）。
+- **微信收到的文本文件不再把内容内联进消息（与 0.12 不兼容；内容内联不可恢复，措辞开关保留）。** 0.12 的措辞是「路径 + 全文」，0.13.0 只给指针：`@文件` 是交给模型的引用，宿主 `FILE_REFERENCE_PROMPT` 会让它自己 `read`，因此内容不需要、也不应该出现在 user message 里。删掉的是**内联那条路径**（`isTextFile`、`buffer.toString("utf-8")`、无上限的整段拼接），不是「以什么形式发送」的开关：`mediaAtRefEnabled` 仍然在（默认关闭 = 纯路径），`/media at|path` 与设置页复选框照旧可用，只是取值从「要不要给内容」变成了「给 `@引用` 还是给纯路径」——两个取值交给模型的都只是指针。升级后行为变化：GUI 气泡里不再出现文件正文，只留一行路径（开了 `@引用` 则是一个可点开的 chip）；模型需要内容时会自己读。另一个顺带修好的坑：`ConfigStore.load()` 现在会丢掉本版本不认识的键，删掉的开关不会永远躺在 `config.json` 里冒充有效配置（那个文件是用户唯一能读到生效配置的地方）。
 - **README 精简，维护者内容迁移到 `docs/DEVELOPMENT.md`（并新增 `AGENTS.md`）。** 原来的 README 有 340 行、5 万字符，架构图、24 行配置表、命令实现细节、20 条已知边界、宿主版本兼容全挤在里面，想装插件的人得先翻过一张配置表和十几条设计取舍。现在 README 只保留七节——介绍 / 功能 / 安装 / 微信命令 / 开发 / 许可 / 免责声明——功能压成一段话、命令表一行一句，共 74 行；架构、设置页实现、配置参考（每个键的默认值与边界）、命令接入方式（`ctx.commands` 原生同步、各命令实现要点、`/at` 的实现约束）、已知边界与宿主版本兼容全部搬到 `docs/DEVELOPMENT.md`。`PUBLISH.md` 的发布前检查拆成两份清单（README 管用户可见变化，DEVELOPMENT 管配置键与实现细节），并新增 `AGENTS.md` 记下这条约定：README 保持简洁通俗易懂。
 
 ### Fixed
@@ -57,7 +63,7 @@
 - 新增 `tests/at-command.test.ts`（57 例）：解析矩阵（`list`/`clear`/`rm`/`s`/`f`、缺参数、非法子命令）、与 18 个既有 parser 的别名冲突守卫、mention 语法往返（中文 / `[]` / 反斜杠 label、`@path` / `@"a b.txt"` / 目录尾斜杠 / 控制字符拒绝）、登记与一次性注入（含「第二条消息不再带 mention」、正文保持在首块以免污染会话标题）、打字合并批次只带一次 mention、关键词解析的两条路径（宿主 `listCandidates` 与无 live agent 时的本地行扫描）与歧义提示、全部拒绝路径（引用自己 / 第 4 个会话 / 第 9 个文件 / 服务缺失 / 找不到路径的候选提示）、工作区**之外**的绝对路径引用（含带 U+202A 的粘贴路径回归）、`/at rm` 与 `/at clear`、TTL 过期与「过期后重新登记是全新一组」、登出清空、`/status` 有/无暂存两态、以及有待处理权限卡时 `/at` 不被吞；另有两例专盯 **GUI 块拼接后的空白边界**（正文以非空白结尾时 `@文件` 仍成 chip，含单元级与走完整 `handleMessage` 链路各一例，匹配用的是 `dsh-client-ui-reference` 的原样语法）。
 - 新增 `tests/media-merge.test.ts`（30 例）：图 → 文合成**一轮**且文字在首块、下载只发生在 flush 时、两图 + 一文（两个附件块）、文件同样合并、自带文字说明的图立即发送、语音不暂存、关闭时逐字回退为两轮、等待窗口到点单独发出（fake timers）、`mergeMaxMsgs` 上限、`mediaHoldMs` 被 `mergeForcedReleaseMs` 夹住、下载失败退化为「下载失败」文字且不丢批次、dispose 冲刷暂存、logout 丢弃且**不下载、不留临时文件**、附件交付的五条硬断言（`@` 模式默认且图片只出 `@`、`path` 模式是「文件已保存到:」且无 `@`、文本文件内容在**两种措辞下**都不出现、1 MiB 的 `.log` 两种模式下都不进 prompt、二进制同样只给指针——都同时断言**旧措辞与「文件内容」字样不再出现**）、`/media` 解析矩阵（`on` / `off` / `at` / `path` / `status`）与 19 个既有 parser 的别名冲突守卫、卡片 bypass / `LOCAL_COMMAND_NAMES` / `/help`、`/media on|off|at|path` 落盘并生效、`/media off` 与设置页关闭都先冲刷、`/status` 两态（含当前交付措辞）、以及与打字合并共存的两种组合（开：`文 → 图 → 文` 一轮；关：图仍先冲刷文字）。
 - `tests/client-panel-wiring.test.ts`：`RENDERED_TOGGLES` 加 `mediaMergeEnabled` 与 `mediaAtRefEnabled`、数值字段加 `mediaHoldMs`、`GROUPS` 加 `media`、merge 切片终点改到 `id: "media"`，并新增「图片与文件的两组开关与参数同组、且不泄漏到前一组」「只有附件等待被置灰，交付措辞始终可点」两条守卫（现共 69 例）。
-- `tests/config-store.test.ts` 新增 3 例：`mediaAtRefEnabled` 默认 `true` 且与两个合并键同款做类型守卫、手写 `config.json` 里的坏值被丢弃后回落默认、本版本不认识的键在加载时被丢掉且下一次写入后不复现。
+- `tests/config-store.test.ts` 新增 3 例：`mediaAtRefEnabled` 默认 `false`（纯路径）且与两个合并键同款做类型守卫、手写 `config.json` 里的坏值被丢弃后回落默认、本版本不认识的键在加载时被丢掉且下一次写入后不复现。
 - `tests/config-store.test.ts`：三键默认值、round-trip、字符串/负数/真值串被拒、手改 `config.json` 的坏值被丢弃回落默认（现共 26 例）。
 - `tests/merge-window.test.ts`：两处「在途批次」用例的 spy 从 `forwardToAgent(user, msg)` 改为 `forwardBlocksToAgent(user, blocks)`，断言的行为不变。
 

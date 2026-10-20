@@ -163,12 +163,17 @@ export interface WeChatDSHConfig {
   /**
    * How a saved inbound attachment is SPELLED in the prompt:
    *
-   *   - `true` (default) — a host `@文件` reference (`@path` / `@"path with
-   *     spaces"`), the exact token the GUI composer produces. The GUI renders
-   *     an openable chip, and `@deepseek-ai/dsh-file-reference-local` tells the
-   *     model to call `read` instead of pretending it inspected the file.
-   *   - `false` — the plain-path wording ("文件已保存到: <abs path>"), for
-   *     someone who prefers prose over a mention token.
+   *   - `true` — a host `@文件` reference (`@path` / `@"path with spaces"`), the
+   *     exact token the GUI composer produces. The GUI renders an openable
+   *     chip, and `@deepseek-ai/dsh-file-reference-local` tells the model to
+   *     call `read` instead of pretending it inspected the file.
+   *   - `false` (default) — the plain-path wording ("文件已保存到: <abs path>").
+   *
+   * Off by default on purpose: the reference is the nicer spelling, but it is
+   * the one that depends on the host having `dsh-file-reference` mounted, and a
+   * mention that nothing parses degrades to a raw `@C:/…` in the bubble. A plain
+   * path always reads correctly, so the safe spelling is the default and the
+   * chip is opt-in.
    *
    * Both are pointers to the same saved file; neither inlines its content.
    */
@@ -223,9 +228,10 @@ export function defaultConfig(): WeChatDSHConfig {
     mergeForcedReleaseMs: 3 * 60_000,
     mediaMergeEnabled: false,
     mediaHoldMs: 3 * 60_000,
-    // `@文件` by default: the host grammar turns it into a chip the reader can
-    // open, and FILE_REFERENCE_PROMPT tells the model to `read` it. The wording
-    // is the only thing this switch changes — neither value inlines content.
-    mediaAtRefEnabled: true,
+    // Plain path by default: `@文件` only becomes a chip when the host has
+    // `dsh-file-reference` mounted, and an unparsed mention shows the reader a
+    // raw `@C:/…`. A path always reads correctly. The wording is the only thing
+    // this switch changes — neither value inlines content.
+    mediaAtRefEnabled: false,
   };
 }
