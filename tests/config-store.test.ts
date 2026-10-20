@@ -391,12 +391,14 @@ describe("ConfigStore", () => {
     }
   });
 
-  it("defaults 图片/文件合并 to off, with a 3-minute attachment wait and path delivery", () => {
+  it("defaults 图片/文件合并 to off, with a 3-minute attachment wait and @引用 delivery", () => {
     const cfg = defaultConfig();
     // Off by default: holding an attachment for a sentence that never arrives
     // is indistinguishable from a dropped message, so it is opt-in.
     expect(cfg.mediaMergeEnabled).toBe(false);
-    expect(cfg.mediaAtRefEnabled).toBe(false);
+    // `@文件` by default: the file is a pointer the model reads, and the GUI
+    // renders it as an openable chip. `/media path` switches the wording only.
+    expect(cfg.mediaAtRefEnabled).toBe(true);
     // 3 minutes — the same as the merge window's forced release, i.e. the
     // longest a turn may be held at all. `mediaHoldMs()` takes the shorter of
     // the two, so this default is exactly the ceiling rather than under it.
@@ -408,10 +410,10 @@ describe("ConfigStore", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
     try {
       const store = new ConfigStore(dir);
-      store.update({ mediaMergeEnabled: true, mediaAtRefEnabled: true, mediaHoldMs: 15_000 });
+      store.update({ mediaMergeEnabled: true, mediaAtRefEnabled: false, mediaHoldMs: 15_000 });
       const stored = new ConfigStore(dir).stored();
       expect(stored.mediaMergeEnabled).toBe(true);
-      expect(stored.mediaAtRefEnabled).toBe(true);
+      expect(stored.mediaAtRefEnabled).toBe(false);
       expect(stored.mediaHoldMs).toBe(15_000);
 
       // Junk is refused rather than persisted — a truthy string must never
@@ -423,7 +425,7 @@ describe("ConfigStore", () => {
       });
       const after = new ConfigStore(dir).stored();
       expect(after.mediaMergeEnabled).toBe(true);
-      expect(after.mediaAtRefEnabled).toBe(true);
+      expect(after.mediaAtRefEnabled).toBe(false);
       expect(after.mediaHoldMs).toBe(15_000);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -439,14 +441,36 @@ describe("ConfigStore", () => {
         mediaHoldMs: -5,
       }), "utf-8");
       const stored = new ConfigStore(dir).stored();
-      // Dropped, so the built-in defaults (off / off / 180000) apply — a
+      // Dropped, so the built-in defaults (off / @引用 / 180000) apply — a
       // hand-edited "on" must not silently enable the hold.
       expect(stored.mediaMergeEnabled).toBeUndefined();
       expect(stored.mediaAtRefEnabled).toBeUndefined();
       expect(stored.mediaHoldMs).toBeUndefined();
       const resolved = new ConfigStore(dir).resolve(defaultConfig());
       expect(resolved.mediaMergeEnabled).toBe(false);
+      expect(resolved.mediaAtRefEnabled).toBe(true);
       expect(resolved.mediaHoldMs).toBe(180_000);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("drops keys this version no longer knows instead of round-tripping them", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({
+        // A switch from a hypothetical other version: unknown here, so it must
+        // not survive (the file is the only place a user can read the effective
+        // config, and a future re-add must not resurrect a stale value).
+        legacyMediaSwitch: false,
+        silent: true,
+      }), "utf-8");
+      const store = new ConfigStore(dir);
+      expect(store.stored()).toEqual({ silent: true });
+      // Still gone after the next write — not resurrected by the round-trip.
+      store.update({ mediaHoldMs: 30_000 });
+      const onDisk = JSON.parse(fs.readFileSync(path.join(dir, "config.json"), "utf-8")) as Record<string, unknown>;
+      expect(onDisk).toEqual({ silent: true, mediaHoldMs: 30_000 });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

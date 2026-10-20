@@ -642,7 +642,7 @@ window.__ModuleLoader__.load({
 							createElement("div", { className: "wx_sub" },
 								form.mediaMergeEnabled
 									? null
-									: createElement("div", { className: "wx_sub_off" }, "开启「图片/文件与文字合并发送」后，下面的等待时间才生效；交付方式一直生效。"),
+									: createElement("div", { className: "wx_sub_off" }, "开启「图片/文件与文字合并发送」后，下面的等待时间才生效；交付措辞一直生效。"),
 								createElement("div", { className: "wx_form" },
 									createElement("label", null,
 										createElement("span", { className: "wx_field_label" }, "附件等待",
@@ -653,7 +653,7 @@ window.__ModuleLoader__.load({
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.mediaAtRefEnabled, onChange: (e) => setForm({ ...form, mediaAtRefEnabled: e.target.checked }) }),
 									createElement("span", null, "以 @引用 方式交给 AI"),
-									createElement(HelpTip, { text: "关闭（默认）：沿用「文件已保存到: 路径」，文本文件还会把内容整段附在消息里。开启：按宿主自己的 @路径 语法交付（含空格的路径写成 @\"…\"），文件引用提示词会要求 AI 自己按需读取文件，而不是假装读过；因此文本文件的内容不再内联。两种方式都会先把文件存到本机，@引用 只是一个指针。微信端也可用 /media at|path 切换。" })),
+									createElement(HelpTip, { text: "开启（默认）：按宿主自己的 @路径 语法交付（含空格的路径写成 @\"…\"），消息里就是一个可点开的引用，与拖文件进输入框同款。关闭：沿用「文件已保存到: 路径」的纯路径写法。两种都只是**指针**——文件内容不会出现在消息里，AI 需要时会自己读取该路径（所以对话里不会重复出现文件正文，几 MB 的日志也不会被整段塞进上下文）。两种方式都会先把文件存到本机。微信端也可用 /media at|path 切换。" })),
 							),
 						),
 

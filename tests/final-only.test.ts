@@ -472,19 +472,28 @@ describe("结论模式: /final command", () => {
  * row that silently disappears (or that drifts back to advertising `/f` as
  * the alias — the one alias this command must NOT have) is the same class of
  * bug as a parser that no longer matches its help text.
+ *
+ * README is deliberately terse (see docs/DEVELOPMENT.md for the details), so
+ * the `/f` exclusion is asserted where it is documented in full: the dev doc's
+ * command table and the CHANGELOG.
  */
 describe("结论模式: the docs describe /final", () => {
   const readDoc = (name: string) =>
     fs.readFileSync(new URL(`../${name}`, import.meta.url), "utf-8");
 
-  it("README documents the command, the alias, and the /f exclusion", () => {
+  it("README lists the command with its alias", () => {
     const readme = readDoc("README.md");
     expect(readme).toContain("/final on\\|off\\|status");
     expect(readme).toContain("`/fo`");
-    // `/f` belongs to /flush; README must say so rather than let a reader
-    // assume the obvious abbreviation works.
-    expect(readme).toMatch(/`\/f`\s*是\s*`\/flush`\s*的别名/);
-    expect(readme).toContain("**不是** `/final` 的");
+  });
+
+  it("the dev doc keeps the /f exclusion and the off-delivers-first semantics", () => {
+    const dev = readDoc("docs/DEVELOPMENT.md");
+    // `/f` belongs to /flush; a reader must not assume the obvious
+    // abbreviation works.
+    expect(dev).toMatch(/`\/f`\s*是\s*`\/flush`\s*的别名/);
+    expect(dev).toContain("**不是** `/final` 的");
+    expect(dev).toContain("先交付");
   });
 
   it("CHANGELOG records the command under the release that adds it", () => {

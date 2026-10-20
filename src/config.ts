@@ -161,19 +161,16 @@ export interface WeChatDSHConfig {
    */
   mediaHoldMs: number;
   /**
-   * How inbound media is handed to the model:
+   * How a saved inbound attachment is SPELLED in the prompt:
    *
-   *   - `false` (default) — the historical text: the file is announced with
-   *     its saved absolute path ("文件已保存到: …"), and text files also have
-   *     their content inlined.
-   *   - `true` — the file is announced as a host `@文件` reference
-   *     (`@path` / `@"path with spaces"`), the exact token the GUI composer
-   *     produces. `@deepseek-ai/dsh-file-reference-local` then tells the model
-   *     to call `read` instead of pretending it inspected the file, and no
-   *     file content is inlined.
+   *   - `true` (default) — a host `@文件` reference (`@path` / `@"path with
+   *     spaces"`), the exact token the GUI composer produces. The GUI renders
+   *     an openable chip, and `@deepseek-ai/dsh-file-reference-local` tells the
+   *     model to call `read` instead of pretending it inspected the file.
+   *   - `false` — the plain-path wording ("文件已保存到: <abs path>"), for
+   *     someone who prefers prose over a mention token.
    *
-   * Either way the bytes still land on disk: a reference is a pointer, not a
-   * replacement for the saved file.
+   * Both are pointers to the same saved file; neither inlines its content.
    */
   mediaAtRefEnabled: boolean;
 }
@@ -226,6 +223,9 @@ export function defaultConfig(): WeChatDSHConfig {
     mergeForcedReleaseMs: 3 * 60_000,
     mediaMergeEnabled: false,
     mediaHoldMs: 3 * 60_000,
-    mediaAtRefEnabled: false,
+    // `@文件` by default: the host grammar turns it into a chip the reader can
+    // open, and FILE_REFERENCE_PROMPT tells the model to `read` it. The wording
+    // is the only thing this switch changes — neither value inlines content.
+    mediaAtRefEnabled: true,
   };
 }

@@ -421,8 +421,39 @@ describe("/at mention rendering", () => {
       { kind: "session", mention: "@[A](dsh-session:eA)" },
       { kind: "file", mention: "@b.ts" },
     ]);
-    expect(block).toBe("@[A](dsh-session:eA) @a.ts @b.ts");
+    // The leading break is load-bearing, not cosmetic: see
+    // "keeps a file token at a whitespace boundary" below.
+    expect(block).toBe("\n@[A](dsh-session:eA) @a.ts @b.ts");
     expect(buildMentionBlock([])).toBeUndefined();
+  });
+
+  // The GUI hands one message's text to the mention grammar as
+  // `blocks.map(b => b.text).join("")` (`contentParts` in
+  // `dsh-client-ui-chat`), and that grammar only fires on a whitespace
+  // boundary (`(?<!\S)` in `dsh-client-ui-reference`). A block that STARTED
+  // with the token therefore depended on the user's own words happening to
+  // end in whitespace: `/at f` after 「没事，我测试@功能而已」 reached the
+  // renderer as `…而已@"C:/…"`, whose `@` is preceded by 「已」 — plain text,
+  // no chip, no click-through.
+  it("keeps a file token at a whitespace boundary once the blocks are joined", () => {
+    const guiMention = /(?<!\S)(@"[^"\n]+"|@[^\s]+)/gu;
+    const userText = "没事，我测试@功能而已";
+    const quoted = formatFileMention({ path: "C:/Users/me/test - 副本.txt", kind: "file" })!;
+    const plain = formatFileMention({ path: "C:/Users/me/a.txt", kind: "file" })!;
+
+    const mention = buildMentionBlock([
+      { kind: "file", mention: plain },
+      { kind: "file", mention: quoted },
+    ])!;
+    const joined = [userText, mention].join("");
+    const chips = [...joined.matchAll(guiMention)].map((match) => match[0]);
+    expect(chips).toEqual([plain, quoted]);
+
+    // The same token without the break — the reported bug — matches nothing:
+    // its `@` sits behind 「已」.
+    const broken = userText + quoted;
+    expect(broken).toBe('没事，我测试@功能而已@"C:/Users/me/test - 副本.txt"');
+    expect([...broken.matchAll(guiMention)]).toHaveLength(0);
   });
 
   it("normalizeAtTarget strips exactly one surrounding quote pair", () => {
@@ -493,8 +524,10 @@ describe("/at staging", () => {
     // from this message's leading text, and a leading base64 mention would
     // become the title.
     expect(blocks[0]!.text).toBe("总结一下这个会话");
+    // `\n`-led on purpose: the GUI joins the blocks with "" and the mention
+    // grammar needs whitespace before the `@`.
     expect(blocks[1]!.text).toBe(
-      `@[Alpha 重构](${encodeSessionReferenceUri("session-alpha")})`,
+      `\n@[Alpha 重构](${encodeSessionReferenceUri("session-alpha")})`,
     );
 
     // Consumed: the next message is clean.
@@ -515,7 +548,7 @@ describe("/at staging", () => {
 
     const last = received[0]!.content.at(-1)!.text!;
     expect(last).toBe(
-      `@[Alpha 重构](${encodeSessionReferenceUri("session-alpha")}) @notes.md`,
+      `\n@[Alpha 重构](${encodeSessionReferenceUri("session-alpha")}) @notes.md`,
     );
   });
 
@@ -610,7 +643,28 @@ describe("/at file references", () => {
     expect(lastReply()).toContain('@"my dir/a.txt"');
 
     await inbound.handleMessage(text("读一下"));
-    expect(received[0]!.content.at(-1)!.text).toBe('@"my dir/a.txt"');
+    expect(received[0]!.content.at(-1)!.text).toBe('\n@"my dir/a.txt"');
+  });
+
+  // End-to-end version of the boundary test above: what the bridge actually
+  // delivers, flattened the way the GUI flattens it before the mention
+  // grammar runs.
+  it("a staged file still chips when the user's words end flush against it", async () => {
+    const { bridge, received, cwd } = makeBridge();
+    const inbound = asInbound(bridge);
+    fs.mkdirSync(path.join(cwd, "my dir"));
+    fs.writeFileSync(path.join(cwd, "my dir", "a.txt"), "x");
+
+    await inbound.handleMessage(text('/at f "my dir/a.txt"'));
+    await inbound.handleMessage(text("没事，我测试@功能而已"));
+
+    // `contentParts`: every text block, concatenated with no separator.
+    const bubble = received[0]!.content.map((block) => block.text ?? "").join("");
+    expect(bubble).toBe('没事，我测试@功能而已\n@"my dir/a.txt"');
+    const guiMention = /(?<!\S)(@"[^"\n]+"|@[^\s]+)/gu;
+    expect([...bubble.matchAll(guiMention)].map((match) => match[0])).toEqual([
+      '@"my dir/a.txt"',
+    ]);
   });
 
   it("marks a directory with a trailing slash", async () => {
@@ -836,7 +890,7 @@ describe("/at management", () => {
     await inbound.handleMessage(text("/at rm 1"));
     expect(lastReply()).toContain("已移除引用 1");
     await inbound.handleMessage(text("只剩文件"));
-    expect(received[0]!.content.at(-1)!.text).toBe("@a.txt");
+    expect(received[0]!.content.at(-1)!.text).toBe("\n@a.txt");
   });
 
   it("/at rm out of range reports the range", async () => {
@@ -893,7 +947,7 @@ describe("/at management", () => {
     // The expired entry was dropped, so this counts as the FIRST reference.
     expect(lastReply()).toContain("1/8");
     await inbound.handleMessage(text("只带一个"));
-    expect(received[0]!.content.at(-1)!.text).toBe("@stale.txt");
+    expect(received[0]!.content.at(-1)!.text).toBe("\n@stale.txt");
   });
 
   it("logout clears the staging table", async () => {

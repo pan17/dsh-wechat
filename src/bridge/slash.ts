@@ -14,12 +14,16 @@ export type SilentCommand = { kind: "silent"; mode: "on" | "off" | "status" };
 export type FinalCommand = { kind: "final"; mode: "on" | "off" | "status" };
 export type MergeCommand = { kind: "merge"; mode: "on" | "off" | "status" };
 /**
- * `/media` — 图片/文件与文字合并发送 + 附件交付方式.
+ * `/media` — 图片/文件与文字合并发送 + 附件交付措辞.
  *
- * One command, two independent switches (merging and how a file is handed to
- * the model), because a user asks for them together ("send the picture AND
- * the question") and splitting them across two commands would make neither
+ * One command, two independent switches (whether to hold a caption-less
+ * attachment for the sentence typed next, and how the saved file is spelled in
+ * the prompt), because a user asks for them together ("send the picture AND the
+ * question") and splitting them across two commands would make neither
  * discoverable.
+ *
+ * `at|path` changes the SPELLING only: `adapter/inbound.ts` hands over a pointer
+ * in both cases and never inlines the file's content.
  */
 export type MediaCommand =
   | { kind: "media"; target: "merge"; mode: "on" | "off" }
@@ -112,13 +116,14 @@ export function parseMergeCommand(text: string): MergeCommand | null {
 
 /**
  * Parse `/media` (alias `/md`) — 图片/文件与文字合并发送, plus how a saved
- * attachment is handed to the model:
+ * attachment is spelled in the prompt:
  *
  *   /media                    → status (both switches + the current wording)
  *   /media on|off             → hold a caption-less image/file/video and send
  *                               it together with the text typed next
- *   /media at|path            → `@路径` reference vs. the historical
- *                               "文件已保存到: 路径" wording
+ *   /media at|path            → `@路径` reference (default) vs. the plain-path
+ *                               "文件已保存到: 路径" wording — SPELLING only,
+ *                               neither inlines the file's content
  *
  * `/md` is safe: `/m`, `/mo` and `/me` are already taken or ambiguous, while
  * `/md` collides with nothing in `LOCAL_COMMAND_NAMES` (asserted by the alias
@@ -874,7 +879,7 @@ export function formatHelp(
     "• /silent on|off (sl) — 开启仅每轮最终回复；关闭显示合并的思考与工具执行过程",
     "• /final on|off (fo) — 结论模式：跨轮次暂存，整条任务停下后只发一条最终结论（优先于 /silent）",
     "• /merge on|off|status (mg) — 打字合并：连续多条微信消息合成一轮；末尾 `..` 继续追加、`!!` 立即提交",
-    "• /media on|off|at|path (md) — 图片/文件合并：无文字的图片/文件先暂存，和随后那条文字合成一轮（默认关）；at|path 切换附件以 @引用 还是「已保存到路径」交付给 AI",
+    "• /media on|off|at|path (md) — 图片/文件合并：无文字的图片/文件先暂存，和随后那条文字合成一轮（默认关）；at|path 切换附件的**措辞**（@引用 还是「已保存到路径」），两者都只给指针，不会把文件内容塞进对话",
     "• /flush (f) — 立即取回结论模式暂存的最终结论，不必等静默期",
     "• /surface on|off|status (wxprompt) — 微信渠道提示词注入开关（默认关；正文在设置页编辑）",
     "• /notify on|off|status (watch) — 跨会话决策推送：权限/提问卡整卡（默认关闭）；/notify tasks on|off 跨会话任务完成提醒",

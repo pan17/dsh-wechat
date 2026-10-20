@@ -1,6 +1,7 @@
 /**
- * 图片/文件与文字合并发送 (`mediaMergeEnabled` / `mediaHoldMs`) and the
- * attachment delivery style (`mediaAtRefEnabled`).
+ * 图片/文件与文字合并发送 (`mediaMergeEnabled` / `mediaHoldMs`) and how a saved
+ * attachment is spelled for the model — `@文件` reference or plain path, always
+ * a pointer and never its bytes.
  *
  * The feature exists because a screenshot and the question about it used to
  * cost TWO turns: the image was never merged (it flushed the pending text and
@@ -10,12 +11,14 @@
  *
  *   1. TEXT FIRST — the user's sentence is the leading block, because
  *      `dsh-session-title` titles a session from the leading text of the first
- *      message, and `[收到图片] 文件已保存到: …` is not a title;
+ *      message, and `[收到图片] @C:/…` is not a title;
  *   2. NOTHING IS DOWNLOADED BEFORE THE FLUSH — a held attachment that is
  *      dropped (identity change) must not leave a file or spend a request;
  *   3. THE CHANNEL NEVER HANGS — the wait always ends on the sentence, the cap,
  *      the attachment window, or the forced release, whichever comes first;
- *   4. OFF = THE OLD BEHAVIOUR, byte for byte.
+ *   4. OFF = THE OLD BEHAVIOUR, byte for byte — including the delivery wording:
+ *      a file is a pointer in BOTH wordings, and no switch can turn its content
+ *      back on (0.12's inlining is gone, not gated).
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
@@ -380,55 +383,107 @@ describe("media merge: delivery failures and lifecycle", () => {
   });
 });
 
-describe("attachment delivery style (mediaAtRefEnabled)", () => {
-  it("path mode keeps the historical wording", async () => {
+describe("attachment delivery: a file is a pointer, never its bytes", () => {
+  it("@ mode is the default and announces an image as a host @path reference", async () => {
     const { bridge, received } = makeBridge({ mediaMergeEnabled: true, mediaHoldMs: 60_000 });
-    await asInbound(bridge).handleMessage(image());
-    await asInbound(bridge).handleMessage(text("看"));
-
-    expect(blockTexts(received[0]!)[1]).toContain("文件已保存到:");
-  });
-
-  it("@ mode emits a host @path reference instead", async () => {
-    const { bridge, received } = makeBridge({
-      mediaMergeEnabled: true,
-      mediaHoldMs: 60_000,
-      mediaAtRefEnabled: true,
-    });
     await asInbound(bridge).handleMessage(image());
     await asInbound(bridge).handleMessage(text("看"));
 
     const mediaBlock = blockTexts(received[0]!)[1]!;
     expect(mediaBlock).toContain("[收到图片] @");
+    // Prose wording belongs to `path` mode only; the default is the mention.
     expect(mediaBlock).not.toContain("文件已保存到:");
     // Forward slashes only: a mention must not depend on the host OS.
     expect(mediaBlock).not.toContain("\\");
   });
 
-  it("@ mode does NOT inline a text file's content", async () => {
-    downloadAndDecrypt.mockResolvedValueOnce(Buffer.from("a,b\n1,2\n", "utf-8"));
+  it("path mode keeps the plain wording", async () => {
     const { bridge, received } = makeBridge({
       mediaMergeEnabled: true,
       mediaHoldMs: 60_000,
-      mediaAtRefEnabled: true,
+      mediaAtRefEnabled: false,
     });
-    await asInbound(bridge).handleMessage(fileMsg("data.csv"));
-    await asInbound(bridge).handleMessage(text("统计"));
+    await asInbound(bridge).handleMessage(image());
+    await asInbound(bridge).handleMessage(text("看"));
 
-    const joined = blockTexts(received[0]!).join("\n");
-    expect(joined).toContain("@");
-    // `@文件` is a POINTER: the host's FILE_REFERENCE_PROMPT tells the model to
-    // read it, so shipping the bytes too would defeat the mode.
-    expect(joined).not.toContain("a,b\n1,2");
+    const mediaBlock = blockTexts(received[0]!)[1]!;
+    expect(mediaBlock).toContain("[收到图片] 文件已保存到:");
+    expect(mediaBlock).not.toContain("@");
   });
 
-  it("path mode DOES still inline a text file's content", async () => {
-    downloadAndDecrypt.mockResolvedValueOnce(Buffer.from("a,b\n1,2\n", "utf-8"));
-    const { bridge, received } = makeBridge({ mediaMergeEnabled: true, mediaHoldMs: 60_000 });
-    await asInbound(bridge).handleMessage(fileMsg("data.csv"));
-    await asInbound(bridge).handleMessage(text("统计"));
+  it("path mode is one line — no「你可以使用这个路径…」tail", async () => {
+    downloadAndDecrypt.mockResolvedValueOnce(Buffer.from("hello", "utf-8"));
+    const { bridge, received } = makeBridge({
+      mediaMergeEnabled: true,
+      mediaHoldMs: 60_000,
+      mediaAtRefEnabled: false,
+    });
+    await asInbound(bridge).handleMessage(fileMsg("note.txt"));
+    await asInbound(bridge).handleMessage(text("总结"));
 
-    expect(blockTexts(received[0]!).join("\n")).toContain("a,b");
+    const mediaBlock = blockTexts(received[0]!).find((t) => t.includes("[收到文件:"))!;
+    // A file notice is exactly one line: `FILE_REFERENCE_PROMPT` already tells
+    // the model what a path is for, so a trailing instruction here would only
+    // add noise to the bubble.
+    expect(mediaBlock.split("\n")).toHaveLength(1);
+    expect(mediaBlock).toContain("[收到文件: note.txt] 文件已保存到:");
+    expect(mediaBlock).not.toContain("你可以使用这个路径");
+    expect(mediaBlock).not.toContain("hello");
+  });
+
+  it("a text file's content is never inlined — in either wording", async () => {
+    for (const style of [true, false] as const) {
+      downloadAndDecrypt.mockResolvedValueOnce(Buffer.from("a,b\n1,2\n", "utf-8"));
+      const { bridge, received } = makeBridge({
+        mediaMergeEnabled: true,
+        mediaHoldMs: 60_000,
+        mediaAtRefEnabled: style,
+      });
+      await asInbound(bridge).handleMessage(fileMsg("data.csv"));
+      await asInbound(bridge).handleMessage(text("统计"));
+
+      const joined = blockTexts(received[0]!).join("\n");
+      // A POINTER in both modes: the model reads the path when it needs the
+      // bytes, so shipping them too would duplicate the file and (for a big
+      // attachment) blow the context window. The wording is the only difference.
+      expect(joined, `mediaAtRefEnabled=${style}`).toContain("[收到文件: data.csv]");
+      expect(joined, `mediaAtRefEnabled=${style}`).toContain(
+        style ? "@" : "文件已保存到:",
+      );
+      expect(joined).not.toContain("a,b\n1,2");
+      expect(joined).not.toContain("文件内容");
+    }
+  });
+
+  it("a large text file is not inlined either — size never enters the decision", async () => {
+    // 1 MiB of "a": a `.log` that 0.12 would have pasted into the prompt whole.
+    for (const style of [true, false] as const) {
+      downloadAndDecrypt.mockResolvedValueOnce(Buffer.alloc(1024 * 1024, 0x61));
+      const { bridge, received } = makeBridge({
+        mediaMergeEnabled: true,
+        mediaHoldMs: 60_000,
+        mediaAtRefEnabled: style,
+      });
+      await asInbound(bridge).handleMessage(fileMsg("big.log"));
+      await asInbound(bridge).handleMessage(text("看看"));
+
+      const joined = blockTexts(received[0]!).join("\n");
+      expect(joined, `mediaAtRefEnabled=${style}`).not.toContain("aaaaaaaa");
+      expect(joined).toContain("[收到文件: big.log]");
+      // The prompt stays one or two short lines, whatever the file size.
+      expect(joined.length).toBeLessThan(400);
+    }
+  });
+
+  it("a binary file gets the same pointer treatment", async () => {
+    downloadAndDecrypt.mockResolvedValueOnce(Buffer.alloc(64 * 1024, 0x89));
+    const { bridge, received } = makeBridge({ mediaMergeEnabled: true, mediaHoldMs: 60_000 });
+    await asInbound(bridge).handleMessage(fileMsg("photo.png"));
+    await asInbound(bridge).handleMessage(text("看看"));
+
+    const joined = blockTexts(received[0]!).join("\n");
+    expect(joined).toContain("[收到文件: photo.png] @");
+    expect(joined).not.toContain("文件内容");
   });
 });
 
@@ -439,8 +494,11 @@ describe("/media is wired exactly like /merge", () => {
     expect(parseMediaCommand("/MEDIA STATUS")).toEqual({ kind: "media", target: "status" });
     expect(parseMediaCommand("/media on")).toEqual({ kind: "media", target: "merge", mode: "on" });
     expect(parseMediaCommand("/md off")).toEqual({ kind: "media", target: "merge", mode: "off" });
+    // `at|path` only picks the WORDING; it does not change what the prompt
+    // carries (a pointer either way), so it stays a plain sub-command.
     expect(parseMediaCommand("/media at")).toEqual({ kind: "media", target: "ref", style: "at" });
     expect(parseMediaCommand("/media path")).toEqual({ kind: "media", target: "ref", style: "path" });
+    expect(parseMediaCommand("/md AT")).toEqual({ kind: "media", target: "ref", style: "at" });
     expect(parseMediaCommand("/media maybe")).toBeNull();
     expect(parseMediaCommand("/medial")).toBeNull();
   });
@@ -497,11 +555,12 @@ describe("/media is wired exactly like /merge", () => {
     expect(store.stored().mediaMergeEnabled).toBe(true);
     expect((bridge as unknown as { config: { mediaMergeEnabled: boolean } }).config.mediaMergeEnabled).toBe(true);
 
-    await inbound.handleMessage(text("/media at"));
-    expect(store.stored().mediaAtRefEnabled).toBe(true);
-
     await inbound.handleMessage(text("/media path"));
     expect(store.stored().mediaAtRefEnabled).toBe(false);
+    expect((bridge as unknown as { config: { mediaAtRefEnabled: boolean } }).config.mediaAtRefEnabled).toBe(false);
+
+    await inbound.handleMessage(text("/media at"));
+    expect(store.stored().mediaAtRefEnabled).toBe(true);
 
     await inbound.handleMessage(text("/media off"));
     expect(store.stored().mediaMergeEnabled).toBe(false);
@@ -536,14 +595,14 @@ describe("/media is wired exactly like /merge", () => {
 });
 
 describe("/status reports the media switches", () => {
-  it("shows the off state and the delivery style by default", async () => {
+  it("shows the off state and the delivery wording by default", async () => {
     const { bridge } = makeBridge();
     await asInbound(bridge).handleMessage(text("/status"));
     const status = sendTextMessage.mock.calls.map((c) => String(c[1])).find((t) => t.includes("图片/文件合并"));
     expect(status).toBeTruthy();
     expect(status).toContain("图片/文件合并");
     expect(status).toContain("off");
-    expect(status).toContain("交付: 路径");
+    expect(status).toContain("交付: @引用");
   });
 
   it("shows the held count while an attachment waits", async () => {

@@ -2068,9 +2068,9 @@ export class WeChatDSHBridge {
   private promptBlocksFor(msg: WeixinMessage): Promise<Array<{ type: "text"; text: string }>> {
     const tempDir = path.join(this.config.storageDir, "tempfile");
     return weixinMessageToPrompt(msg, this.config.cdnBaseUrl, (m) => this.log(m), tempDir, {
-      // `@文件` mode hands the model a pointer the host's own
-      // `FILE_REFERENCE_PROMPT` resolves; the historical wording stays the
-      // default so an untouched install is byte-for-byte unchanged.
+      // Spelling only: `@文件` renders as an openable chip in the GUI and the
+      // host's FILE_REFERENCE_PROMPT tells the model to `read` it; the plain-path
+      // wording is the same pointer as prose. Neither inlines the file.
       refStyle: this.mediaAtRefEnabled() ? "at" : "path",
     });
   }
@@ -2129,6 +2129,10 @@ export class WeChatDSHBridge {
     // there would make the user re-issue `/at` for a failure that was not
     // their fault.
     const staged = this.pendingRefsFor(user.userId);
+    // The block opens with a line break on purpose: the GUI flattens a
+    // message's text blocks by joining them with an EMPTY string, and the
+    // `@文件` grammar only fires at a whitespace boundary — see
+    // `MENTION_BLOCK_BREAK` in `at-refs.ts`.
     const mentionBlock = staged ? buildMentionBlock(stagedRefList(staged)) : undefined;
     if (mentionBlock) blocks.push({ type: "text", text: mentionBlock });
     this.markSessionSource(user.sessionId, "wechat");
@@ -2201,9 +2205,14 @@ export class WeChatDSHBridge {
     return this.config.mediaMergeEnabled === true;
   }
 
-  /** `@文件` delivery for inbound attachments (default off = "文件已保存到: 路径"). */
+  /**
+   * Attachment spelling: `@文件` reference (default) or plain-path wording.
+   *
+   * Wording ONLY — `adapter/inbound.ts` is a pointer in both cases and never
+   * inlines the file's content, whatever this returns.
+   */
   private mediaAtRefEnabled(): boolean {
-    return this.config.mediaAtRefEnabled === true;
+    return this.config.mediaAtRefEnabled !== false;
   }
 
   /**
@@ -4370,15 +4379,16 @@ export class WeChatDSHBridge {
       await this.sendReply(
         userId,
         cmd.style === "at"
-          ? "📎 附件交付方式: @引用（模型看到 @路径，会自己按需读取文件内容，不再把文本文件内容整段塞进上下文）"
-          : "📎 附件交付方式: 路径（沿用「文件已保存到: 路径」，文本文件会同时附上内容）",
+          ? "📎 附件交付: @引用（消息里是一个可点开的 @路径，模型自己按需 read）"
+          : "📎 附件交付: 路径（消息里是「文件已保存到: 路径」，模型自己按需 read）",
       );
       return;
     }
     await this.sendReply(
       userId,
       `🖼 图片/文件合并: ${this.mediaMergeStatusText()}`
-      + "\n切换: /media on|off（是否等待随后那条文字）、/media at|path（附件以 @引用 还是路径交付）"
+      + "\n切换: /media on|off（是否等待随后那条文字）、/media at|path（@引用 还是纯路径措辞）"
+      + "\n两种交付都只是指针：文件内容不会进消息，模型需要时自己 read。"
       + "\n设置页「图片与文件」同步，写入 config.json 后重新扫码仍保留。",
     );
   }

@@ -18,15 +18,21 @@ export interface PromptBlock {
 }
 
 /**
- * How an inbound media file is announced to the model.
+ * How a saved inbound media file is announced to the model.
  *
- *   - `"path"` (default) — the historical wording: `文件已保存到: <绝对路径>`,
- *     plus the file's content inlined when it is text.
- *   - `"at"` — a host `@文件` reference (`@path` / `@"path with spaces"`), the
- *     exact token the GUI composer produces. `dsh-file-reference-local`
- *     installs `FILE_REFERENCE_PROMPT` for it, which tells the model to call
- *     `read` instead of claiming it inspected the file — so inlining a text
- *     file's content here would defeat the point (and duplicate it).
+ *   - `"at"` (default) — a host `@文件` reference (`@path` / `@"path with
+ *     spaces"`), the exact token the GUI composer produces, so the GUI renders
+ *     an openable chip. `dsh-file-reference-local` installs
+ *     `FILE_REFERENCE_PROMPT` for it, which tells the model to call `read`.
+ *   - `"path"` — the plain-path wording (`文件已保存到: <abs path>`), for a user
+ *     who prefers prose over a mention token (or a host without the reference
+ *     plugin). Same pointer, different spelling.
+ *
+ * NEITHER mode pastes the file's content. That is not a mode, it is the rule: a
+ * file is a POINTER. Inlining the bytes duplicates what `read` returns, turns
+ * the chat bubble into a wall of the file's text, and lets one large attachment
+ * burn the context window. (0.12 and earlier did paste small text files; 0.13.0
+ * removed that path outright — the wording switch cannot bring it back.)
  */
 export type MediaRefStyle = "path" | "at";
 
@@ -46,7 +52,7 @@ function saveToTemp(buffer: Buffer, fileName: string, tempDir: string): string {
 }
 
 /**
- * Render one saved path as the token the model should see.
+ * Render one saved path as the pointer the model should see.
  *
  * In `"at"` mode the path goes through {@link formatFileMention} — the SAME
  * spelling layer `/at f` uses, byte-compatible with
@@ -56,6 +62,9 @@ function saveToTemp(buffer: Buffer, fileName: string, tempDir: string): string {
  * rather than producing a token that would silently truncate into prose; the
  * inbound filename is already sanitized by {@link saveToTemp}, so this is a
  * belt-and-braces branch, not a reachable user-facing refusal.
+ *
+ * In `"path"` mode it is just the absolute path — the model gets the same
+ * location, only as prose.
  */
 function mediaPointer(realPath: string, style: MediaRefStyle): string {
   if (style === "at") {
@@ -66,6 +75,18 @@ function mediaPointer(realPath: string, style: MediaRefStyle): string {
     if (mention) return mention;
   }
   return realPath;
+}
+
+/**
+ * The phrase the model reads for one saved attachment.
+ *
+ * `at` → the bare reference (`@C:/…`, which the GUI turns into a chip);
+ * `path` → the historical prose ("文件已保存到: C:/…"), so a path-mode bubble
+ * reads as a sentence instead of a lone path. Same pointer, different spelling.
+ */
+function mediaNotice(realPath: string, style: MediaRefStyle): string {
+  const pointer = mediaPointer(realPath, style);
+  return style === "at" ? pointer : `文件已保存到: ${pointer}`;
 }
 
 /**
@@ -165,9 +186,9 @@ export function isHoldableMediaItem(item: MessageItem | undefined): item is Mess
  * user-message content stays clean: the session-title generator reads the
  * user message verbatim, and a hint block would pollute session titles.
  *
- * `opts.refStyle` selects how a saved media file is handed over (see
- * {@link MediaRefStyle}); omitting it keeps the historical `"path"` wording
- * byte for byte, so every existing caller and test is unaffected.
+ * A saved media file is handed over as a pointer and nothing else — see
+ * {@link mediaPointer} and {@link MediaRefStyle}. `opts.refStyle` picks the
+ * SPELLING only; no mode inlines the file's content.
  */
 export async function weixinMessageToPrompt(
   msg: WeixinMessage,
@@ -177,7 +198,7 @@ export async function weixinMessageToPrompt(
   opts?: { refStyle?: MediaRefStyle },
 ): Promise<PromptBlock[]> {
   const blocks: PromptBlock[] = [];
-  const refStyle: MediaRefStyle = opts?.refStyle ?? "path";
+  const refStyle: MediaRefStyle = opts?.refStyle ?? "at";
 
   // Extract text
   const text = extractText(msg.item_list);
@@ -229,7 +250,7 @@ async function convertMediaItem(
 
     return {
       type: "text",
-      text: `[收到图片] ${refStyle === "at" ? mediaPointer(realPath, refStyle) : `文件已保存到: ${realPath}`}`,
+      text: `[收到图片] ${mediaNotice(realPath, refStyle)}`,
     };
   }
 
@@ -244,26 +265,17 @@ async function convertMediaItem(
     const fileName = item.file_item.file_name ?? "file";
     const realPath = saveToTemp(buffer, fileName, tempDir);
 
-    // `@文件` mode hands the model a POINTER: `dsh-file-reference-local`
-    // instructs it to call `read`, so inlining the content would both defeat
-    // that and send the same bytes twice.
-    if (refStyle === "at") {
-      return { type: "text", text: `[收到文件: ${fileName}] ${mediaPointer(realPath, refStyle)}` };
-    }
-
-    // Text files: also read content and include it
-    if (isTextFile(fileName)) {
-      const content = buffer.toString("utf-8");
-      return {
-        type: "text",
-        text: `[收到文件: ${fileName}]\n文件路径: ${realPath}\n\n文件内容:\n${content}`,
-      };
-    }
-
-    // Binary files: just tell agent where it is
+    // A POINTER in both styles, never the bytes: `dsh-file-reference-local`
+    // instructs the model to call `read`, and pasting the content would both
+    // duplicate that and (for a large attachment) blow the context window. The
+    // file is on disk; if the model needs it, it reads it.
+    //
+    // No "you can use this path to read the file" sentence: it tells the model
+    // what the reference prompt already says, and in a WeChat bubble it is pure
+    // noise between the user's question and the attachment.
     return {
       type: "text",
-      text: `[收到文件: ${fileName}] 文件已保存到: ${realPath}\n你可以使用这个路径来读取或处理文件。`,
+      text: `[收到文件: ${fileName}] ${mediaNotice(realPath, refStyle)}`,
     };
   }
 
@@ -282,18 +294,9 @@ async function convertMediaItem(
 
     return {
       type: "text",
-      text: `[收到视频] ${refStyle === "at" ? mediaPointer(realPath, refStyle) : `文件已保存到: ${realPath}`}`,
+      text: `[收到视频] ${mediaNotice(realPath, refStyle)}`,
     };
   }
 
   return null;
-}
-
-function isTextFile(name: string): boolean {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  return [
-    "txt", "md", "json", "js", "ts", "py", "java", "c", "cpp", "h",
-    "css", "html", "xml", "yaml", "yml", "toml", "ini", "cfg", "sh",
-    "bash", "rs", "go", "rb", "php", "sql", "csv", "log", "env",
-  ].includes(ext);
 }

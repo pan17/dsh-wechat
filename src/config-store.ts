@@ -129,6 +129,16 @@ export class ConfigStore {
           ) {
             delete parsed.surfacePrompt;
           }
+          // Keys this version no longer knows are dropped rather than
+          // round-tripped forever. A switch that a later version removes would
+          // otherwise keep advertising itself in the only file a user can read
+          // the effective configuration from, and a future re-add would
+          // silently resurrect a stale value.
+          for (const key of Object.keys(parsed)) {
+            if (!EDITABLE_KEYS.includes(key as keyof EditableConfig)) {
+              delete (parsed as Record<string, unknown>)[key];
+            }
+          }
           // A hand-edited `config.json` bypasses `update()`'s guards, and the
           // inbound allowlist is compared against every message: keeping a
           // non-string member would make the list look non-empty (so the

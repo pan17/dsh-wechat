@@ -39,7 +39,7 @@ const RENDERED_TOGGLES = [
   "mergeSuffixTokens",
   "allowRemotePermissionEscalation",
   "allowAnyFilePath",
-  // 图片/文件合并 + 附件交付方式.
+  // 图片/文件合并 + 附件交付措辞 (the wording switch changes no content).
   "mediaMergeEnabled",
   "mediaAtRefEnabled",
 ] as const;
@@ -193,18 +193,17 @@ describe("settings panel grouping", () => {
   });
 
   it("the 图片与文件 switch and its parameters share one group, ahead of the prompt group", () => {
-    // Same guard for the attachment feature: its two switches and its only
-    // number must live in ONE place, or "where do I turn this on?" becomes a
-    // hunt through five collapsed groups.
+    // Same guard for the attachment feature: its switch and its only number
+    // must live in ONE place, or "where do I turn this on?" becomes a hunt
+    // through five collapsed groups.
     const mediaStart = client.indexOf('id: "media"');
     const promptStart = client.indexOf('id: "prompt"');
     expect(mediaStart).toBeGreaterThan(-1);
     expect(promptStart).toBeGreaterThan(mediaStart);
     const mediaGroup = client.slice(mediaStart, promptStart);
 
-    for (const key of ["mediaMergeEnabled", "mediaAtRefEnabled"]) {
-      expect(mediaGroup).toContain(`form?.${key}`);
-    }
+    expect(mediaGroup).toContain("form?.mediaMergeEnabled");
+    expect(mediaGroup).toContain("form?.mediaAtRefEnabled");
     expect(mediaGroup).toContain("value: form.mediaHoldMs");
 
     // Nothing of it may leak into an earlier group.
@@ -212,7 +211,7 @@ describe("settings panel grouping", () => {
     expect(before).not.toContain("value: form.mediaHoldMs");
     expect(before).not.toContain("form?.mediaAtRefEnabled");
 
-    // The panel must document the WeChat-side switch, like every other
+    // The panel must document the WeChat-side switches, like every other
     // feature's help text does.
     expect(mediaGroup).toContain("/media on|off");
     expect(mediaGroup).toContain("/media at|path");
@@ -228,8 +227,8 @@ describe("settings panel grouping", () => {
   });
 
   it("the attachment wait is inert until 图片/文件合并 is switched on", () => {
-    // `mediaAtRefEnabled` is NOT gated: the delivery style applies to every
-    // attachment, held or not, so it must stay clickable with the hold off.
+    // The wording switch is NOT gated: it applies to every attachment, held or
+    // not, so it must stay clickable with the hold off.
     expect(client.match(/disabled: !form\?\.mediaMergeEnabled/g)?.length).toBe(1);
     expect(client).not.toContain("disabled: !form?.mediaAtRefEnabled");
     expect(client).toContain("mediaSummary");

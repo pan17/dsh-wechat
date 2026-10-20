@@ -88,6 +88,32 @@ export interface StagedReference {
 }
 
 /**
+ * Line break that OPENS every mention block.
+ *
+ * A user message is a LIST of text blocks, and the Web GUI flattens that list
+ * with an EMPTY separator (`contentParts` in `dsh-client-ui-chat` joins every
+ * `text` block with `""`) before handing the string to the mention parser.
+ * Both copies of the file-reference grammar — the renderer's
+ * (`(?<!\S)` in `@deepseek-ai/dsh-client-ui-reference`) and the host's
+ * (`(?:^|\s)` in `@deepseek-ai/dsh-file-reference`) — insist that the `@` sits
+ * at a whitespace boundary. So a block that STARTS with the token is a chip
+ * only while the user's own words happen to end in whitespace: `/at f` staged
+ * after `没事，我测试@功能而已` produced the literal
+ * `…而已@"C:/…/test - 副本.txt"`, whose `@` is preceded by 「已」 → no chip, no
+ * click-through, just text (the report: 「看起来没正常@文件」). The WeChat upload
+ * path never showed the bug because it emits `[收到文件: name] @path` with the
+ * boundary inside its own block.
+ *
+ * Opening the block with a line break makes the boundary a property of the
+ * token's own spelling, independent of how a surface concatenates blocks, and
+ * it reads better: the appended references sit on their own line. Neither
+ * text rule can eat it — `trimWhitespaceRule`/`collapseWhitespaceRule` are
+ * ordered after the file rules (1000/1010 vs 30), so the file rule scans the
+ * original string and still sees the whitespace to its left.
+ */
+const MENTION_BLOCK_BREAK = "\n";
+
+/**
  * Render the staged references as one prompt block, or `undefined` when
  * nothing is staged.
  *
@@ -100,13 +126,17 @@ export interface StagedReference {
  * prepending it: the host derives a session title from the leading text of the
  * first human message, and a leading `@[标题](dsh-session:…)` would title a new
  * session with a base64 payload. Mention parsing itself is position-independent.
+ *
+ * The returned text ALWAYS begins with {@link MENTION_BLOCK_BREAK} — see there
+ * for the boundary requirement that makes this the difference between a real
+ * `@文件` chip and dead text.
  */
 export function buildMentionBlock(staged: readonly StagedReference[]): string | undefined {
   const sessions = staged.filter((s) => s.kind === "session").map((s) => s.mention);
   const files = staged.filter((s) => s.kind === "file").map((s) => s.mention);
   const tokens = [...sessions, ...files];
   if (tokens.length === 0) return undefined;
-  return tokens.join(" ");
+  return `${MENTION_BLOCK_BREAK}${tokens.join(" ")}`;
 }
 
 /**
