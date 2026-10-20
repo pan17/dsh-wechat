@@ -6,15 +6,29 @@
 
 import path from "node:path";
 import crypto from "node:crypto";
-import type { WeixinMessage, MessageItem } from "../weixin/types.js";
+import type { WeixinMessage, MessageItem, CDNMedia } from "../weixin/types.js";
 import { MessageItemType } from "../weixin/types.js";
 import { parseAesKey, downloadAndDecrypt } from "../weixin/media.js";
 import { ensurePrivateDir, writePrivateFile } from "../utils/secure-fs.js";
+import { formatFileMention } from "../bridge/at-refs.js";
 
 export interface PromptBlock {
   type: "text";
   text: string;
 }
+
+/**
+ * How an inbound media file is announced to the model.
+ *
+ *   - `"path"` (default) — the historical wording: `文件已保存到: <绝对路径>`,
+ *     plus the file's content inlined when it is text.
+ *   - `"at"` — a host `@文件` reference (`@path` / `@"path with spaces"`), the
+ *     exact token the GUI composer produces. `dsh-file-reference-local`
+ *     installs `FILE_REFERENCE_PROMPT` for it, which tells the model to call
+ *     `read` instead of claiming it inspected the file — so inlining a text
+ *     file's content here would defeat the point (and duplicate it).
+ */
+export type MediaRefStyle = "path" | "at";
 
 /**
  * Save downloaded file to temp directory with a unique name.
@@ -29,6 +43,29 @@ function saveToTemp(buffer: Buffer, fileName: string, tempDir: string): string {
   const filePath = path.join(tempDir, safeName);
   writePrivateFile(filePath, buffer);
   return filePath;
+}
+
+/**
+ * Render one saved path as the token the model should see.
+ *
+ * In `"at"` mode the path goes through {@link formatFileMention} — the SAME
+ * spelling layer `/at f` uses, byte-compatible with
+ * `@deepseek-ai/dsh-file-reference`'s grammar — with Windows separators folded
+ * to `/` so a mention never depends on the host OS. A path that grammar cannot
+ * express (a control character or a double quote) falls back to the plain path
+ * rather than producing a token that would silently truncate into prose; the
+ * inbound filename is already sanitized by {@link saveToTemp}, so this is a
+ * belt-and-braces branch, not a reachable user-facing refusal.
+ */
+function mediaPointer(realPath: string, style: MediaRefStyle): string {
+  if (style === "at") {
+    const mention = formatFileMention({
+      path: realPath.split(path.sep).join("/"),
+      kind: "file",
+    });
+    if (mention) return mention;
+  }
+  return realPath;
 }
 
 /**
@@ -85,7 +122,7 @@ export function extractText(itemList?: MessageItem[]): string {
 /**
  * Find the first media item in a message.
  */
-function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
+export function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
   if (!itemList) return undefined;
   return (
     itemList.find((i) => i.type === MessageItemType.IMAGE && i.image_item?.media?.encrypt_query_param) ??
@@ -98,20 +135,49 @@ function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
 }
 
 /**
+ * Whether a media item may be HELD so it can share a turn with the sentence
+ * the user types next (图片/文件合并).
+ *
+ * Deliberately narrower than {@link findMediaItem}:
+ *
+ *   - an IMAGE / FILE / VIDEO (the three the feature is about);
+ *   - a VOICE item with an untouched transcript is EXCLUDED — it carries no
+ *     usable payload here (`convertMediaItem` only ever answers "无转写"), so
+ *     holding it would delay a turn to merge in a placeholder;
+ *   - an item with no downloadable media reference is excluded, because the
+ *     only thing holding it could produce is a "下载失败" line.
+ */
+export function isHoldableMediaItem(item: MessageItem | undefined): item is MessageItem {
+  if (!item) return false;
+  const hasMedia = (media: CDNMedia | undefined): boolean =>
+    typeof media?.encrypt_query_param === "string" && media.encrypt_query_param.length > 0;
+  if (item.type === MessageItemType.IMAGE) return hasMedia(item.image_item?.media);
+  if (item.type === MessageItemType.VIDEO) return hasMedia(item.video_item?.media);
+  if (item.type === MessageItemType.FILE) return hasMedia(item.file_item?.media);
+  return false;
+}
+
+/**
  * Convert a WeChat message to prompt content blocks for a DSH session.
  *
  * The WeChat surface context is NOT injected here — it lives in a
  * global runtime context (index.ts `dsh-wechat-surface`) so
  * user-message content stays clean: the session-title generator reads the
  * user message verbatim, and a hint block would pollute session titles.
+ *
+ * `opts.refStyle` selects how a saved media file is handed over (see
+ * {@link MediaRefStyle}); omitting it keeps the historical `"path"` wording
+ * byte for byte, so every existing caller and test is unaffected.
  */
 export async function weixinMessageToPrompt(
   msg: WeixinMessage,
   cdnBaseUrl: string,
   log: (msg: string) => void,
   tempDir: string,
+  opts?: { refStyle?: MediaRefStyle },
 ): Promise<PromptBlock[]> {
   const blocks: PromptBlock[] = [];
+  const refStyle: MediaRefStyle = opts?.refStyle ?? "path";
 
   // Extract text
   const text = extractText(msg.item_list);
@@ -123,7 +189,7 @@ export async function weixinMessageToPrompt(
   const mediaItem = findMediaItem(msg.item_list);
   if (mediaItem) {
     try {
-      const attached = await convertMediaItem(mediaItem, cdnBaseUrl, log, tempDir);
+      const attached = await convertMediaItem(mediaItem, cdnBaseUrl, log, tempDir, refStyle);
       if (attached) blocks.push(attached);
     } catch (err) {
       log(`Media download failed, skipping: ${String(err)}`);
@@ -149,6 +215,7 @@ async function convertMediaItem(
   cdnBaseUrl: string,
   log: (msg: string) => void,
   tempDir: string,
+  refStyle: MediaRefStyle,
 ): Promise<PromptBlock | null> {
   if (item.type === MessageItemType.IMAGE && item.image_item?.media) {
     const media = item.image_item.media;
@@ -162,7 +229,7 @@ async function convertMediaItem(
 
     return {
       type: "text",
-      text: `[收到图片] 文件已保存到: ${realPath}`,
+      text: `[收到图片] ${refStyle === "at" ? mediaPointer(realPath, refStyle) : `文件已保存到: ${realPath}`}`,
     };
   }
 
@@ -176,6 +243,13 @@ async function convertMediaItem(
 
     const fileName = item.file_item.file_name ?? "file";
     const realPath = saveToTemp(buffer, fileName, tempDir);
+
+    // `@文件` mode hands the model a POINTER: `dsh-file-reference-local`
+    // instructs it to call `read`, so inlining the content would both defeat
+    // that and send the same bytes twice.
+    if (refStyle === "at") {
+      return { type: "text", text: `[收到文件: ${fileName}] ${mediaPointer(realPath, refStyle)}` };
+    }
 
     // Text files: also read content and include it
     if (isTextFile(fileName)) {
@@ -208,7 +282,7 @@ async function convertMediaItem(
 
     return {
       type: "text",
-      text: `[收到视频] 文件已保存到: ${realPath}`,
+      text: `[收到视频] ${refStyle === "at" ? mediaPointer(realPath, refStyle) : `文件已保存到: ${realPath}`}`,
     };
   }
 

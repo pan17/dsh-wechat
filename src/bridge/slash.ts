@@ -13,6 +13,18 @@ export type StatusCommand = { kind: "status" };
 export type SilentCommand = { kind: "silent"; mode: "on" | "off" | "status" };
 export type FinalCommand = { kind: "final"; mode: "on" | "off" | "status" };
 export type MergeCommand = { kind: "merge"; mode: "on" | "off" | "status" };
+/**
+ * `/media` — 图片/文件与文字合并发送 + 附件交付方式.
+ *
+ * One command, two independent switches (merging and how a file is handed to
+ * the model), because a user asks for them together ("send the picture AND
+ * the question") and splitting them across two commands would make neither
+ * discoverable.
+ */
+export type MediaCommand =
+  | { kind: "media"; target: "merge"; mode: "on" | "off" }
+  | { kind: "media"; target: "ref"; style: "at" | "path" }
+  | { kind: "media"; target: "status" };
 export type SurfaceCommand = { kind: "surface"; mode: "on" | "off" | "status" };
 export type StopCommand = { kind: "stop" };
 export type RejectQuestionCommand = { kind: "reject-question" };
@@ -30,6 +42,7 @@ export type SlashCommand =
   | SilentCommand
   | FinalCommand
   | MergeCommand
+  | MediaCommand
   | StopCommand
   | RejectQuestionCommand
   | RejectPermissionCommand;
@@ -98,10 +111,36 @@ export function parseMergeCommand(text: string): MergeCommand | null {
 }
 
 /**
+ * Parse `/media` (alias `/md`) — 图片/文件与文字合并发送, plus how a saved
+ * attachment is handed to the model:
+ *
+ *   /media                    → status (both switches + the current wording)
+ *   /media on|off             → hold a caption-less image/file/video and send
+ *                               it together with the text typed next
+ *   /media at|path            → `@路径` reference vs. the historical
+ *                               "文件已保存到: 路径" wording
+ *
+ * `/md` is safe: `/m`, `/mo` and `/me` are already taken or ambiguous, while
+ * `/md` collides with nothing in `LOCAL_COMMAND_NAMES` (asserted by the alias
+ * guard in tests/media-merge.test.ts).
+ */
+export function parseMediaCommand(text: string): MediaCommand | null {
+  const trimmed = text.trim().toLowerCase();
+  if (trimmed === "/media" || trimmed === "/md") return { kind: "media", target: "status" };
+  const m = trimmed.match(/^\/(?:media|md)\s+(on|off|status|at|path)\s*$/);
+  if (!m) return null;
+  const sub = m[1]!;
+  if (sub === "on" || sub === "off") return { kind: "media", target: "merge", mode: sub };
+  if (sub === "at" || sub === "path") return { kind: "media", target: "ref", style: sub };
+  return { kind: "media", target: "status" };
+}
+
+/**
  * Parse `/surface` (alias `/wxprompt`) — query or toggle the WeChat
  * surface-prompt injection. Bare command defaults to status. The prompt
  * text itself is edited from the settings page, not this command.
- */export function parseSurfaceCommand(text: string): SurfaceCommand | null {
+ */
+export function parseSurfaceCommand(text: string): SurfaceCommand | null {
   const trimmed = text.trim().toLowerCase();
   if (trimmed === "/surface" || trimmed === "/wxprompt") {
     return { kind: "surface", mode: "status" };
@@ -744,6 +783,7 @@ export function isBypassSlashCommand(text: string): boolean {
     parseSilentCommand(text) !== null ||
     parseFinalCommand(text) !== null ||
     parseMergeCommand(text) !== null ||
+    parseMediaCommand(text) !== null ||
     parseSurfaceCommand(text) !== null ||
     parseStatusCommand(text) !== null ||
     parseWorkspaceCommand(text) !== null ||
@@ -796,6 +836,8 @@ export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "fo",
   "merge",
   "mg",
+  "media",
+  "md",
   "surface",
   "wxprompt",
   "stop",
@@ -832,6 +874,7 @@ export function formatHelp(
     "• /silent on|off (sl) — 开启仅每轮最终回复；关闭显示合并的思考与工具执行过程",
     "• /final on|off (fo) — 结论模式：跨轮次暂存，整条任务停下后只发一条最终结论（优先于 /silent）",
     "• /merge on|off|status (mg) — 打字合并：连续多条微信消息合成一轮；末尾 `..` 继续追加、`!!` 立即提交",
+    "• /media on|off|at|path (md) — 图片/文件合并：无文字的图片/文件先暂存，和随后那条文字合成一轮（默认关）；at|path 切换附件以 @引用 还是「已保存到路径」交付给 AI",
     "• /flush (f) — 立即取回结论模式暂存的最终结论，不必等静默期",
     "• /surface on|off|status (wxprompt) — 微信渠道提示词注入开关（默认关；正文在设置页编辑）",
     "• /notify on|off|status (watch) — 跨会话决策推送：权限/提问卡整卡（默认关闭）；/notify tasks on|off 跨会话任务完成提醒",

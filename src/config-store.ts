@@ -36,6 +36,9 @@ export type EditableConfig = Pick<
   | "mergeMaxMsgs"
   | "mergeSuffixTokens"
   | "mergeForcedReleaseMs"
+  | "mediaMergeEnabled"
+  | "mediaHoldMs"
+  | "mediaAtRefEnabled"
 >;
 
 export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
@@ -63,6 +66,9 @@ export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "mergeMaxMsgs",
   "mergeSuffixTokens",
   "mergeForcedReleaseMs",
+  "mediaMergeEnabled",
+  "mediaHoldMs",
+  "mediaAtRefEnabled",
 ];
 
 /** Boolean config keys: a non-boolean from a hand-edited file would be truthy-by-accident. */
@@ -76,6 +82,8 @@ const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
   "allowAnyFilePath",
   "mergeEnabled",
   "mergeSuffixTokens",
+  "mediaMergeEnabled",
+  "mediaAtRefEnabled",
 ]);
 
 /**
@@ -89,6 +97,7 @@ const POSITIVE_NUMBER_KEYS: ReadonlySet<string> = new Set([
   "maxOutgoingFileBytes",
   "mergeMaxMsgs",
   "mergeForcedReleaseMs",
+  "mediaHoldMs",
 ]);
 
 /**

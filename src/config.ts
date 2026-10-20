@@ -129,6 +129,53 @@ export interface WeChatDSHConfig {
    * Default 3 minutes.
    */
   mergeForcedReleaseMs: number;
+  /**
+   * 图片/文件与文字合并发送 (media + text coalescing).
+   *
+   * Historically a media item NEVER joined a text batch: it flushed the
+   * pending text as its own turn and then went to the agent as a SECOND turn,
+   * so "here is my screenshot, please look at it" required two turns and the
+   * agent answered the image before it had the question.
+   *
+   * With this switch on, a media message that carries NO text of its own is
+   * HELD (nothing is downloaded yet) and delivered together with the text the
+   * user types next, as ONE prompt. A media message that already carries its
+   * own caption still goes straight through: it needs no follow-up sentence.
+   *
+   * Default `false`: an untouched install keeps the 0.12 behaviour exactly
+   * (media is never delayed), because holding an image for a sentence that
+   * never arrives would look like a dropped message.
+   */
+  mediaMergeEnabled: boolean;
+  /**
+   * How long a held media item waits for its text (ms). When the window
+   * elapses the held items are delivered on their own — a picture with no
+   * question still deserves an answer, and "held forever" is not a state a
+   * chat channel may reach. The effective wait is
+   * `min(mediaHoldMs, mergeForcedReleaseMs)`, so the merge window's own
+   * liveness ceiling also bounds this one.
+   *
+   * Default 3 minutes — the same as `mergeForcedReleaseMs`, i.e. by default the
+   * attachment wait IS the merge window's liveness ceiling, the longest a turn
+   * may be held at all.
+   */
+  mediaHoldMs: number;
+  /**
+   * How inbound media is handed to the model:
+   *
+   *   - `false` (default) — the historical text: the file is announced with
+   *     its saved absolute path ("文件已保存到: …"), and text files also have
+   *     their content inlined.
+   *   - `true` — the file is announced as a host `@文件` reference
+   *     (`@path` / `@"path with spaces"`), the exact token the GUI composer
+   *     produces. `@deepseek-ai/dsh-file-reference-local` then tells the model
+   *     to call `read` instead of pretending it inspected the file, and no
+   *     file content is inlined.
+   *
+   * Either way the bytes still land on disk: a reference is a pointer, not a
+   * replacement for the saved file.
+   */
+  mediaAtRefEnabled: boolean;
 }
 
 /** Default WeChat surface prompt — injected as a runtime-context snapshot. */
@@ -177,5 +224,8 @@ export function defaultConfig(): WeChatDSHConfig {
     mergeMaxMsgs: 10,
     mergeSuffixTokens: true,
     mergeForcedReleaseMs: 3 * 60_000,
+    mediaMergeEnabled: false,
+    mediaHoldMs: 3 * 60_000,
+    mediaAtRefEnabled: false,
   };
 }

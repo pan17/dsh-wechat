@@ -274,15 +274,18 @@ describe("merge window: forced release and in-flight batches", () => {
     let first = true;
     // The sink is stubbed so "in flight" is controllable; the buffering and
     // flushing under test are the real ones (driven through handleMessage).
-    vi.spyOn(bridge as never, "forwardToAgent" as never).mockImplementation((async (
+    // The sink is `forwardBlocksToAgent` — the merge dispatcher assembles
+    // blocks and hands them over there (it no longer builds a synthetic
+    // WeixinMessage), so the first block is the joined batch text.
+    vi.spyOn(bridge as never, "forwardBlocksToAgent" as never).mockImplementation((async (
       _user: unknown,
-      msg: { item_list: Array<{ text_item?: { text?: string } }> },
+      blocks: Array<{ text?: string }>,
     ) => {
       if (first) {
         first = false;
         await gate;
       }
-      dispatched.push(msg.item_list[0]?.text_item?.text ?? "");
+      dispatched.push(blocks[0]?.text ?? "");
     }) as never);
 
     void asInbound(bridge).handleMessage(text("第一批 !!"));
@@ -304,15 +307,15 @@ describe("merge window: forced release and in-flight batches", () => {
     // The first dispatch NEVER settles: exactly the "one hung operation must
     // not block the channel" case the forced release exists for.
     let first = true;
-    vi.spyOn(bridge as never, "forwardToAgent" as never).mockImplementation((async (
+    vi.spyOn(bridge as never, "forwardBlocksToAgent" as never).mockImplementation((async (
       _user: unknown,
-      msg: { item_list: Array<{ text_item?: { text?: string } }> },
+      blocks: Array<{ text?: string }>,
     ) => {
       if (first) {
         first = false;
         await new Promise(() => {});
       }
-      dispatched.push(msg.item_list[0]?.text_item?.text ?? "");
+      dispatched.push(blocks[0]?.text ?? "");
     }) as never);
 
     void asInbound(bridge).handleMessage(text("卡住的一批 !!"));

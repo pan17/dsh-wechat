@@ -29,7 +29,7 @@ import {
 } from "../weixin/api.js";
 import { MessageItemType, MessageType, TypingStatus, UploadMediaType } from "../weixin/types.js";
 import type { WeixinMessage } from "../weixin/types.js";
-import { extractText, weixinMessageToPrompt } from "../adapter/inbound.js";
+import { extractText, findMediaItem, isHoldableMediaItem, weixinMessageToPrompt } from "../adapter/inbound.js";
 import { formatForWeChat } from "../adapter/outbound.js";
 import { ExecutionProcess } from "../adapter/process-format.js";
 import type { AssistantStreamFrame, OutputContentBlock, ToolCallData, ToolResultData } from "../dsh/types.js";
@@ -70,6 +70,7 @@ import {
   splitProviderModelTarget,
   parseNextCommand,
   parseFlushCommand,
+  parseMediaCommand,
   parseNotifyCommand,
   parsePermCommand,
   parsePresetCommand,
@@ -92,6 +93,7 @@ import {
   type FinalCommand,
   type HistoryCommand,
   type MergeCommand,
+  type MediaCommand,
   type ModelCommand,
   type NotifyCommand,
   type SurfaceCommand,
@@ -308,33 +310,48 @@ interface PendingFinal {
 }
 
 /**
- * Per-chat merge state (打字合并).
+ * Per-chat merge state (打字合并 + 图片/文件合并).
  *
- * Entries are appended in arrival order and joined with newlines into ONE
- * prompt. `newestSourceAt` is the newest message timestamp seen (or arrival
- * time when iLink supplied none) and exists for exactly one rule: an
- * OUT-OF-ORDER older message must not extend the silence timer — otherwise a
- * late replay could hold a batch open indefinitely while the user waits.
+ * Entries are appended in arrival order and assembled into ONE prompt. A plain
+ * TEXT entry is buffered by the 打字合并 window; a MEDIA entry is a caption-less
+ * image/file/video held only when `mediaMergeEnabled` is on (`mediaHoldMs`),
+ * and it never downloads at buffer time — the bytes are fetched when the batch
+ * is actually delivered, so a batch that is dropped (identity change, plugin
+ * dispose before delivery) leaves no file behind and no network round trip.
+ *
+ * `newestSourceAt` is the newest message timestamp seen (or arrival time when
+ * iLink supplied none) and exists for exactly one rule: an OUT-OF-ORDER older
+ * message must not extend the silence timer — otherwise a late replay could
+ * hold a batch open indefinitely while the user waits.
  *
  * `silence` is absent while a `..` suffix holds the batch open; `ceiling` is
  * the forced release that always exists, so no batch can outlive
  * {@link WeChatDSHBridge.mergeForcedReleaseMs} regardless of suffixes,
- * message storms or a previous batch that never settles.
+ * message storms or a previous batch that never settles. `mediaTimer` is the
+ * attachment-specific wait (its own, shorter default) and is cleared on every
+ * flush path together with the other two.
  */
 interface MergeState {
   userId: string;
-  entries: string[];
+  entries: MergeEntry[];
   /** Newest source timestamp seen (the out-of-order guard compares against it). */
   newestSourceAt: number;
   /** When the batch opened — reported by `/merge status` (never write-only). */
   firstAt: number;
   silence?: NodeJS.Timeout;
   ceiling?: NodeJS.Timeout;
+  /** Attachment wait deadline (`mediaHoldMs`); only armed while a media entry is buffered. */
+  mediaTimer?: NodeJS.Timeout;
   /** `..` seen: keep appending, no silence flush until the cap/`!!`/ceiling. */
   holdOpen: boolean;
   /** In-flight dispatch of this chat's previous batch (ordering barrier). */
   inFlight: Promise<void> | null;
 }
+
+/** One buffered item: the user's words, or an attachment waiting for them. */
+type MergeEntry =
+  | { kind: "text"; text: string; at: number }
+  | { kind: "media"; msg: WeixinMessage; at: number };
 
 /**
  * One pending approval card mirrored from an `approval/request`.
@@ -1623,6 +1640,12 @@ export class WeChatDSHBridge {
     if (patch.mergeEnabled === false) {
       await this.flushAllMergedText("config-merge-off");
     }
+    // Same rule for the attachment hold: switching it off means "do not wait
+    // for me to type anything", so the held picture is delivered now rather
+    // than discarded.
+    if (patch.mediaMergeEnabled === false) {
+      await this.flushAllMergedText("config-media-merge-off");
+    }
 
     const editable: Record<string, unknown> = {};
     for (const key of EDITABLE_KEYS) {
@@ -1877,6 +1900,12 @@ export class WeChatDSHBridge {
         return;
       }
 
+      const mediaCmd = parseMediaCommand(text);
+      if (mediaCmd) {
+        await this.handleMediaCommand(userId, mediaCmd);
+        return;
+      }
+
       if (parseFlushCommand(text)) {
         const flushed = await this.flushAllPendingFinal("command");
         await this.sendReply(
@@ -2023,8 +2052,64 @@ export class WeChatDSHBridge {
       );
     }
 
+    const blocks = await this.promptBlocksFor(msg);
+    if (this.interactionStopped) return;
+    await this.forwardBlocksToAgent(user, blocks, agent);
+  }
+
+  /**
+   * Convert ONE inbound WeChat message into prompt blocks (text + media).
+   *
+   * Split out of {@link forwardToAgent} so a merged batch can build its blocks
+   * from SEVERAL messages and then hand them to the same delivery path — the
+   * agent ensure, the `/at` mention, the source marker and the busy-enter
+   * choice must exist exactly once.
+   */
+  private promptBlocksFor(msg: WeixinMessage): Promise<Array<{ type: "text"; text: string }>> {
     const tempDir = path.join(this.config.storageDir, "tempfile");
-    const blocks = await weixinMessageToPrompt(msg, this.config.cdnBaseUrl, (m) => this.log(m), tempDir);
+    return weixinMessageToPrompt(msg, this.config.cdnBaseUrl, (m) => this.log(m), tempDir, {
+      // `@文件` mode hands the model a pointer the host's own
+      // `FILE_REFERENCE_PROMPT` resolves; the historical wording stays the
+      // default so an untouched install is byte-for-byte unchanged.
+      refStyle: this.mediaAtRefEnabled() ? "at" : "path",
+    });
+  }
+
+  /**
+   * Deliver already-assembled blocks to the bound session's agent.
+   *
+   * `agent` may be passed when the caller already ensured it (the merge
+   * dispatcher does, to keep its ordering barrier honest about what it is
+   * waiting on).
+   */
+  private async forwardBlocksToAgent(
+    user: UserState,
+    blocks: Array<{ type: "text"; text: string }>,
+    ensured?: Agent,
+  ): Promise<void> {
+    const previousSessionId = user.sessionId;
+    let agent = ensured;
+    let replacedSessionId: string | undefined;
+    if (!agent) {
+      const result = await this.agents.ensure(user, { replaceOnResumeFailure: true });
+      agent = result.agent;
+      replacedSessionId = result.replacedSessionId;
+      if (this.interactionStopped) return;
+      this.persistSessionBinding(user);
+      if (!agent) {
+        const hint = previousSessionId
+          ? `（绑定会话 ${previousSessionId} 无法恢复）`
+          : "";
+        await this.sendReply(user.userId, `⚠️ 无法创建/恢复 DSH 会话${hint}，请检查 DSH 日志。`);
+        return;
+      }
+      if (replacedSessionId) {
+        await this.sendReply(
+          user.userId,
+          `⚠️ 原会话 ${replacedSessionId} 已损坏，无法恢复；已新建会话 ${user.sessionId}。`,
+        );
+      }
+    }
     if (this.interactionStopped) return;
     // `/at` references staged by the user ride THIS message, APPENDED after
     // the user's own words.
@@ -2060,7 +2145,7 @@ export class WeChatDSHBridge {
     if (staged) this.dropPendingRefs(user.userId);
   }
 
-  // ─── Inbound merge window (F1, 打字合并) ───
+  // ─── Inbound merge window (打字合并 + 图片/文件合并) ───
   //
   // One thought typed as five WeChat messages used to cost five turns. Bare
   // text now enters a per-chat buffer that is delivered as ONE prompt when the
@@ -2076,14 +2161,17 @@ export class WeChatDSHBridge {
   //   - a message that arrives while a previous batch is in flight starts a
   //     NEW batch that waits for the in-flight one only up to that same bound,
   //     so it is never silently swallowed;
-  //   - non-text items (image / file / video / voice-without-transcript) are
-  //     NEVER merged: they first flush the pending text as its own turn, then
-  //     go to the agent as their own turn, which preserves the order the user
-  //     typed and keeps a media attachment out of a text batch.
+  //   - a caption-less image / file / video is held ONLY while
+  //     `mediaMergeEnabled` is on, and then only until the sentence it belongs
+  //     to arrives or `mediaHoldMs` (bounded by the same forced release) runs
+  //     out. With the switch off (the default) media keeps the historical
+  //     rule: it first flushes the pending text as its own turn, then goes to
+  //     the agent as its own turn. Voice-without-a-transcript is never held —
+  //     holding it would delay a turn only to merge in a placeholder.
   //
-  // Toggle from WeChat with `/merge on|off|status`; parameter defaults live in
-  // `config.ts`. `mergeSilenceMs: 0` (or `/merge off`) restores one-turn-per-
-  // message exactly.
+  // Toggle from WeChat with `/merge on|off|status` and `/media on|off`;
+  // parameter defaults live in `config.ts`. `mergeSilenceMs: 0` (or
+  // `/merge off`) restores one-turn-per-message exactly.
 
   private mergeEnabled(): boolean {
     return this.config.mergeEnabled === true;
@@ -2108,13 +2196,112 @@ export class WeChatDSHBridge {
     return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 3 * 60_000;
   }
 
-  /** Entry point for every inbound item: decide merge vs. immediate turn. */
+  /** 图片/文件合并 total switch (default off = media is never delayed). */
+  private mediaMergeEnabled(): boolean {
+    return this.config.mediaMergeEnabled === true;
+  }
+
+  /** `@文件` delivery for inbound attachments (default off = "文件已保存到: 路径"). */
+  private mediaAtRefEnabled(): boolean {
+    return this.config.mediaAtRefEnabled === true;
+  }
+
+  /**
+   * How long a held attachment waits for its sentence (default 3 min).
+   *
+   * Bounded by {@link mergeForcedReleaseMs} on purpose: the merge window's own
+   * liveness ceiling must also cap this wait, so a configured 10-minute media
+   * window can never outlive the batch's guaranteed dispatch. The two defaults
+   * are equal, so out of the box the attachment wait IS the longest a turn may
+   * be held.
+   */
+  private mediaHoldMs(): number {
+    const value = this.config.mediaHoldMs;
+    const own = typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 3 * 60_000;
+    return Math.min(own, this.mergeForcedReleaseMs());
+  }
+
+  /** Buffered entries that are attachments (for `/status` and `/media`). */
+  private bufferedMediaCount(): number {
+    let total = 0;
+    for (const state of this.mergedText.values()) {
+      for (const entry of state.entries) if (entry.kind === "media") total += 1;
+    }
+    return total;
+  }
+
+  /**
+   * Entry point for every inbound item: decide merge vs. immediate turn.
+   *
+   * The decision is driven by WHAT the message carries, because the two
+   * features that buffer have different shapes:
+   *
+   *   - plain text → 打字合并 window (`mergeEnabled`);
+   *   - caption-less image/file/video → attachment hold (`mediaMergeEnabled`);
+   *   - text + its own media (one message) → never held: it already says what
+   *     it wants, so waiting for another sentence would only add latency;
+   *   - voice / anything else → never held.
+   */
   private async enqueueInbound(user: UserState, msg: WeixinMessage): Promise<void> {
     const text = extractText(msg.item_list);
     const items = msg.item_list ?? [];
-    const hasMedia = items.some((item) => item.type !== undefined && item.type !== MessageItemType.TEXT);
-    if (!this.mergeEnabled() || this.mergeSilenceMs() <= 0 || !text || hasMedia) {
-      if (hasMedia && this.mergedText.has(user.userId)) {
+    const hasItemMedia = items.some((item) => item.type !== undefined && item.type !== MessageItemType.TEXT);
+    const holdable = this.mediaMergeEnabled() ? findMediaItem(msg.item_list) : undefined;
+    const holdAsMedia = isHoldableMediaItem(holdable) && text === "";
+    const state = this.mergedText.get(user.userId);
+    const hasBuffered = state !== undefined && state.entries.length > 0;
+    const batchHasMedia = state?.entries.some((entry) => entry.kind === "media") === true;
+    const batchHasText = state?.entries.some((entry) => entry.kind === "text") === true;
+
+    // ── Held attachment ──
+    // A caption-less image/file/video joins the batch instead of ending it, so
+    // "screenshot … then the question" costs ONE turn with the question first.
+    if (holdAsMedia) {
+      const target = this.mergeStateFor(user.userId);
+      const now = Date.now();
+      const sourceAt = typeof msg.create_time_ms === "number" && Number.isFinite(msg.create_time_ms)
+        ? msg.create_time_ms
+        : now;
+      const newer = target.entries.length === 0 || sourceAt >= target.newestSourceAt;
+      target.entries.push({ kind: "media", msg, at: now });
+      if (newer) target.newestSourceAt = sourceAt;
+      if (batchHasText && target.silence) {
+        // The typed text this picture belongs to is already buffered: the
+        // flush now waits for a caption, so the per-message silence window has
+        // nothing left to decide. The attachment window is the live bound.
+        clearTimeout(target.silence);
+        target.silence = undefined;
+      }
+      this.armBatchCeilings(target);
+      if (target.entries.length >= this.mergeMaxMsgs()) {
+        await this.flushMergedText(user.userId, "cap");
+        return;
+      }
+      this.log(
+        `media-merge: holding attachment for ${maskUserId(user.userId)} `
+        + `(${target.entries.length} item(s), wait ${Math.round(this.mediaHoldMs() / 1000)}s)`,
+      );
+      return;
+    }
+
+    // ── Text that closes an attachment batch ──
+    // The sentence the user typed after the picture: append, then dispatch the
+    // whole batch immediately. Suffix tokens are deliberately NOT parsed here
+    // (`..` / `!!` belong to 打字合并, and stripping two characters off the
+    // sentence that finally explains the attachment risks mangling real text).
+    if (batchHasMedia && text !== "") {
+      const target = this.mergeStateFor(user.userId);
+      target.entries.push({ kind: "text", text, at: Date.now() });
+      target.newestSourceAt = Math.max(
+        target.newestSourceAt,
+        typeof msg.create_time_ms === "number" && Number.isFinite(msg.create_time_ms) ? msg.create_time_ms : Date.now(),
+      );
+      await this.flushMergedText(user.userId, "media-caption");
+      return;
+    }
+
+    if (!this.mergeEnabled() || this.mergeSilenceMs() <= 0 || !text || hasItemMedia) {
+      if (hasItemMedia && hasBuffered) {
         // Deliver what was typed BEFORE the media item first: a batch that
         // swallowed it and then handed over the image would reorder the
         // conversation for the agent.
@@ -2129,8 +2316,8 @@ export class WeChatDSHBridge {
     // control when there is something to control (a bare `!!` commits the
     // pending batch without polluting it) and stays literal text otherwise —
     // a trailing token must never make the message disappear.
-    const state = this.mergeStateFor(user.userId);
-    const buffered = state.entries.length;
+    const batch = this.mergeStateFor(user.userId);
+    const buffered = batch.entries.length;
     let body = text;
     let commitNow = false;
     let holdOpen = false;
@@ -2152,14 +2339,14 @@ export class WeChatDSHBridge {
     const sourceAt = typeof msg.create_time_ms === "number" && Number.isFinite(msg.create_time_ms)
       ? msg.create_time_ms
       : now;
-    const newer = state.entries.length === 0 || sourceAt >= state.newestSourceAt;
+    const newer = batch.entries.length === 0 || sourceAt >= batch.newestSourceAt;
     if (body.length > 0) {
-      state.entries.push(body);
-      if (newer) state.newestSourceAt = sourceAt;
+      batch.entries.push({ kind: "text", text: body, at: now });
+      if (newer) batch.newestSourceAt = sourceAt;
     }
-    if (!state.ceiling) state.ceiling = this.armMergeTimer(state, this.mergeForcedReleaseMs(), "forced-release");
+    this.armBatchCeilings(batch);
 
-    if (state.entries.length >= this.mergeMaxMsgs()) {
+    if (batch.entries.length >= this.mergeMaxMsgs()) {
       await this.flushMergedText(user.userId, "cap");
       return;
     }
@@ -2170,25 +2357,38 @@ export class WeChatDSHBridge {
     if (holdOpen) {
       // `..` = "I am not done": no silence flush; the cap, a later `!!`, a
       // media message or the forced release still deliver the batch.
-      state.holdOpen = true;
-      if (state.silence) {
-        clearTimeout(state.silence);
-        state.silence = undefined;
+      batch.holdOpen = true;
+      if (batch.silence) {
+        clearTimeout(batch.silence);
+        batch.silence = undefined;
       }
-      this.log(`merge: batch for ${maskUserId(user.userId)} held open by '..' (${state.entries.length} msg)`);
+      this.log(`merge: batch for ${maskUserId(user.userId)} held open by '..' (${batch.entries.length} msg)`);
       return;
     }
-    if (state.holdOpen) {
+    if (batch.holdOpen) {
       // Still inside an explicit `..` hold: appending is all this message does.
       return;
     }
     // Only a message that is not older than everything buffered re-arms the
     // silence window (the out-of-order guard).
     if (newer) {
-      if (state.silence) clearTimeout(state.silence);
-      state.silence = this.armMergeTimer(state, this.mergeSilenceMs(), "silence");
+      if (batch.silence) clearTimeout(batch.silence);
+      batch.silence = this.armMergeTimer(batch, this.mergeSilenceMs(), "silence");
     } else {
       this.log(`merge: ignoring out-of-order older message for ${maskUserId(user.userId)} (silence timer not extended)`);
+    }
+  }
+
+  /**
+   * Arm the timers every open batch needs regardless of which feature opened
+   * it: the forced release (always) and the attachment wait (only while a
+   * media entry is buffered).
+   */
+  private armBatchCeilings(state: MergeState): void {
+    if (!state.ceiling) state.ceiling = this.armMergeTimer(state, this.mergeForcedReleaseMs(), "forced-release");
+    const hasMedia = state.entries.some((entry) => entry.kind === "media");
+    if (hasMedia && !state.mediaTimer) {
+      state.mediaTimer = this.armMergeTimer(state, this.mediaHoldMs(), "media-wait");
     }
   }
 
@@ -2208,7 +2408,7 @@ export class WeChatDSHBridge {
     return state;
   }
 
-  /** Arm one batch timer; both timers are cleared on every flush path. */
+  /** Arm one batch timer; every timer is cleared on every flush path. */
   private armMergeTimer(state: MergeState, ms: number, reason: string): NodeJS.Timeout {
     const timer = setTimeout(() => {
       void this.flushMergedText(state.userId, reason).catch((err) => {
@@ -2220,7 +2420,18 @@ export class WeChatDSHBridge {
   }
 
   /**
-   * Deliver the chat's buffered text as ONE prompt.
+   * Deliver the chat's buffered items as ONE prompt.
+   *
+   * Assembly order is TEXT FIRST, then attachments: the host's title generator
+   * joins every text block of the first eligible user message, and a media
+   * block leading would title the session
+   * `[收到图片] 文件已保存到: C:/…` — the same reason `/at` mentions are
+   * appended rather than prepended.
+   *
+   * Attachments are downloaded HERE, not when they were buffered: a batch that
+   * is dropped (identity change) must not have spent network or disk on files
+   * nobody will receive, and the user's own media is fetched once, at the
+   * moment its sentence is known.
    *
    * Ordering: a batch that arrives while the previous one is still being
    * dispatched waits for it — but only up to `mergeForcedReleaseMs`, after
@@ -2240,22 +2451,21 @@ export class WeChatDSHBridge {
       clearTimeout(state.ceiling);
       state.ceiling = undefined;
     }
+    if (state.mediaTimer) {
+      clearTimeout(state.mediaTimer);
+      state.mediaTimer = undefined;
+    }
     state.newestSourceAt = 0;
     const user = this.state.getUser(userId);
     if (!user) {
-      this.log(`merge: dropping ${entries.length} buffered message(s) for unknown user ${maskUserId(userId)}`);
+      this.log(`merge: dropping ${entries.length} buffered item(s) for unknown user ${maskUserId(userId)}`);
       this.dropMergedText(userId);
       return;
     }
-    const text = entries.join("\n");
-    const merged: WeixinMessage = {
-      message_type: MessageType.USER,
-      from_user_id: userId,
-      ...(this.wireContextToken ? { context_token: this.wireContextToken } : {}),
-      item_list: [{ type: MessageItemType.TEXT, text_item: { text } }],
-    };
+    const texts = entries.filter((entry) => entry.kind === "text").map((entry) => entry.text);
+    const mediaMsgs = entries.filter((entry) => entry.kind === "media").map((entry) => entry.msg);
     this.log(
-      `merge flush (${reason}): ${entries.length} message(s), ${text.length} chars for ${maskUserId(userId)}`,
+      `merge flush (${reason}): ${texts.length} text / ${mediaMsgs.length} attachment(s) for ${maskUserId(userId)}`,
     );
     const previous = state.inFlight;
     const run = (async () => {
@@ -2276,7 +2486,15 @@ export class WeChatDSHBridge {
           );
         }
       }
-      await this.forwardToAgent(user, merged);
+      // One media message → its own blocks; the whole batch → one prompt.
+      const blocks: Array<{ type: "text"; text: string }> = [];
+      const text = texts.join("\n");
+      if (text.length > 0) blocks.push({ type: "text", text });
+      for (const msg of mediaMsgs) {
+        blocks.push(...(await this.promptBlocksFor(msg)));
+      }
+      if (blocks.length === 0) blocks.push({ type: "text", text: "[空消息]" });
+      await this.forwardBlocksToAgent(user, blocks);
     })();
     const tracked = run.then(
       () => undefined,
@@ -2309,22 +2527,39 @@ export class WeChatDSHBridge {
       if (!state) continue;
       if (state.silence) clearTimeout(state.silence);
       if (state.ceiling) clearTimeout(state.ceiling);
+      if (state.mediaTimer) clearTimeout(state.mediaTimer);
+      // Held attachments are dropped BEFORE any download happened, so this
+      // discards the intent and nothing else: no temp file, no network call.
       this.mergedText.delete(key);
     }
   }
 
   /** Human-readable merge state for `/merge status` and `/status` (never write-only state). */
   private mergeStatusText(): string {
-    if (!this.mergeEnabled()) return "off（每条消息各自一轮）";
+    const heldMedia = this.bufferedMediaCount();
+    const mediaSuffix = heldMedia > 0 ? ` · 含 ${heldMedia} 个附件` : "";
+    if (!this.mergeEnabled()) {
+      return heldMedia > 0
+        ? `off（每条消息各自一轮）${mediaSuffix}`
+        : "off（每条消息各自一轮）";
+    }
     const pending = this.pendingMergedCount();
     const window = this.mergeSilenceMs();
-    if (window <= 0) return "on（窗口 0ms = 立即转发）";
+    if (window <= 0) return `on（窗口 0ms = 立即转发）${mediaSuffix}`;
     // How long the oldest open batch has been waiting: the window is otherwise
     // invisible until it fires, which makes "why is nothing happening?" hard
     // to answer from WeChat alone.
     const open = [...this.mergedText.values()].find((state) => state.entries.length > 0);
     const openFor = open ? Math.round((Date.now() - open.firstAt) / 1000) : undefined;
-    return `on（静默 ${(window / 1000).toFixed(1)}s / 上限 ${this.mergeMaxMsgs()} 条 / 强制放行 ${Math.round(this.mergeForcedReleaseMs() / 1000)}s${pending > 0 ? ` / 暂存 ${pending} 条（已等 ${openFor}s）` : ""}）`;
+    return `on（静默 ${(window / 1000).toFixed(1)}s / 上限 ${this.mergeMaxMsgs()} 条 / 强制放行 ${Math.round(this.mergeForcedReleaseMs() / 1000)}s${pending > 0 ? ` / 暂存 ${pending} 条（已等 ${openFor}s）${mediaSuffix}` : ""}）`;
+  }
+
+  /** 图片/文件合并 state, for `/media` and `/status` (never write-only state). */
+  private mediaMergeStatusText(): string {
+    const ref = this.mediaAtRefEnabled() ? "@引用" : "路径";
+    if (!this.mediaMergeEnabled()) return `off · 交付: ${ref}`;
+    const held = this.bufferedMediaCount();
+    return `on（等待 ${Math.round(this.mediaHoldMs() / 1000)}s${held > 0 ? ` / 暂存 ${held} 个附件` : ""}）· 交付: ${ref}`;
   }
 
   /** Buffered (not yet dispatched) inbound message count across chats. */
@@ -4092,6 +4327,59 @@ export class WeChatDSHBridge {
       userId,
       `🧵 打字合并: ${this.mergeStatusText()}`
       + "\n切换: /merge on|off（设置页「打字合并」同步，写入 config.json 后重新扫码仍保留）",
+    );
+  }
+
+  // ─── 图片/文件合并 + 附件交付方式 (/media) ───
+
+  /**
+   * `/media` — hold a caption-less image/file/video until the sentence that
+   * explains it, and choose how an attachment is handed to the model.
+   *
+   * Wired exactly like `/merge`: persisted to `config.json`, mirrored in the
+   * settings page, bypasses a pending card, listed in `/help` and
+   * `LOCAL_COMMAND_NAMES`. Turning the hold OFF flushes what it was holding
+   * first — "stop waiting for me" is not "throw the picture away".
+   */
+  private async handleMediaCommand(userId: string, cmd: MediaCommand): Promise<void> {
+    if (cmd.target === "merge") {
+      if (cmd.mode === "on") {
+        this.persistEditable({ mediaMergeEnabled: true });
+        await this.sendReply(
+          userId,
+          "🖼 图片/文件合并已开启：先发图片/文件（不带文字），再发那句要它做的事，"
+          + "两者会合成**一轮**发给我。\n"
+          + `等待上限 ${Math.round(this.mediaHoldMs() / 1000)}s（超过就先单独处理，不会一直挂着）；`
+          + "消息自带文字说明时立即发送；语音不参与。",
+        );
+        return;
+      }
+      const held = this.bufferedMediaCount();
+      this.persistEditable({ mediaMergeEnabled: false });
+      if (held > 0) await this.flushMergedText(userId, "command-media-off");
+      await this.sendReply(
+        userId,
+        held > 0
+          ? `🖼 图片/文件合并已关闭；已把暂存的 ${held} 个附件作为一轮发出。之后附件各自一轮。`
+          : "🖼 图片/文件合并已关闭：之后图片/文件各自一轮，不再等待文字。",
+      );
+      return;
+    }
+    if (cmd.target === "ref") {
+      this.persistEditable({ mediaAtRefEnabled: cmd.style === "at" });
+      await this.sendReply(
+        userId,
+        cmd.style === "at"
+          ? "📎 附件交付方式: @引用（模型看到 @路径，会自己按需读取文件内容，不再把文本文件内容整段塞进上下文）"
+          : "📎 附件交付方式: 路径（沿用「文件已保存到: 路径」，文本文件会同时附上内容）",
+      );
+      return;
+    }
+    await this.sendReply(
+      userId,
+      `🖼 图片/文件合并: ${this.mediaMergeStatusText()}`
+      + "\n切换: /media on|off（是否等待随后那条文字）、/media at|path（附件以 @引用 还是路径交付）"
+      + "\n设置页「图片与文件」同步，写入 config.json 后重新扫码仍保留。",
     );
   }
 
@@ -6028,6 +6316,10 @@ export class WeChatDSHBridge {
       // 打字合并 (F1) — shows the live parameters AND the buffered count, so
       // the window is never a black box the user has to guess about.
       `• 打字合并: ${this.mergeEnabled() ? this.paintBadge(this.mergeStatusText(), "positive") : this.paintBadge("off", "neutral")}`,
+      // 图片/文件合并 — shown always (unlike `/at` staging) because the
+      // delivery style applies to every attachment and is worth knowing at a
+      // glance; the held count appears only while something is actually held.
+      `• 图片/文件合并: ${this.mediaMergeEnabled() ? this.paintBadge(this.mediaMergeStatusText(), "positive") : this.paintBadge(this.mediaMergeStatusText(), "neutral")}`,
       // `/at` staging is only shown while something IS staged: an always-on
       // "引用暂存: 0" row would be one more line on every `/status` for a
       // feature most turns never use.

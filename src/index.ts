@@ -43,6 +43,9 @@ export interface PluginConfig {
   mergeMaxMsgs?: number;
   mergeSuffixTokens?: boolean;
   mergeForcedReleaseMs?: number;
+  mediaMergeEnabled?: boolean;
+  mediaHoldMs?: number;
+  mediaAtRefEnabled?: boolean;
 }
 
 export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise<void> {

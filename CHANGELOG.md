@@ -17,9 +17,25 @@
   - 接线与既有本地命令一致：`parseAtCommand` / `isAtCommandAttempt`、卡片 bypass（有待处理卡时 `/at` 照常执行，且参数写错也是回用法而不是被当成卡片答案）、`LOCAL_COMMAND_NAMES` 去重（同名原生命令抢不走）、`/help` 与设置页「指令帮助」同源。
 - **`src/bridge/at-refs.ts`** —— mention 渲染层（纯函数，零依赖）：`encodeSessionReferenceUri` / `formatSessionMention` / `formatFileMention` / `buildMentionBlock` / `normalizeAtTarget` / `hasInvisibleMarks`。与宿主 `dsh-session-reference` 的 URI 编解码、`dsh-file-reference` 的 grammar 逐字对齐；唯一有意的差异是目录**闭合引号**（宿主在补全过程中输出未闭合的 `@"dir/` 以保持菜单下钻，微信没有菜单，发出去的是成品文本）。
 
+- **图片/文件与文字合并发送（`mediaMergeEnabled`，默认关闭）+ 附件交付方式（`mediaAtRefEnabled`，默认路径）。** 此前微信端的图片/文件**永远是自己一轮**：它到达时会先把打字合并缓冲里的文字冲刷成一轮，再自己作为一轮进 agent，于是「截图 + 这个问题怎么看」要烧掉两轮，而 agent 在那一轮里只看得到图、看不到问题——回答的往往是它自己猜的意图。设置页新增第 6 组「图片与文件」，两个开关分治两件事：
+  - **合并（`mediaMergeEnabled` / `mediaHoldMs`）** —— 开启后，**不带文字说明**的图片/文件/视频先暂存，用户随后发来的**那一条文字**到达时，两者合成**一条 prompt、一轮对话**交给 agent（文字在前、附件在后）。设计要点：
+    - **文字必须在首块**。宿主 `dsh-session-title` 用首条用户消息里**所有** text 块拼标题（确定性 fallback 取开头几个词），若把 `[收到图片] 文件已保存到: C:/…` 放在前面，新会话标题就变成那个路径——与 `/at` 把 mention 追加在正文之后是同一个理由。
+    - **下载推迟到真正投递时**。暂存只记 `WeixinMessage`，flush 时才解密落盘：登出 / 重新扫码 / 换绑（`dropMergedText`）丢弃暂存时，既不产生临时文件，也不为没人接收的附件花一次 CDN 请求。
+    - **等待一定结束**。`mediaHoldMs`（默认 3 分钟，与 `mergeForcedReleaseMs` 同长）到点就把已暂存的附件单独发出（一张没人提问的图也值得回答），且**实际等待取它与 `mergeForcedReleaseMs` 中更短者**——合并窗口的活性上限永远罩住它；另有 `mergeMaxMsgs` 条数上限与 `inFlight` 保序（上限同为强制放行）。
+    - **只暂存「没有话」的媒体**：同一条消息自带文字说明时立即发送（它已经说明意图，再等只是加延迟）；语音（无转写）不参与；没有可下载引用的媒体不参与（暂存它只可能产出「下载失败」）。
+    - **关闭时逐字回退**：`mediaMergeEnabled=false` 仍是原来的「先冲刷文字、媒体单独一轮」，与 0.12 完全一致——所以默认关闭。
+    - 关闭路径不吞东西：`/media off` 与设置页关闭该开关都会**先发出**已暂存的附件再关闭（那是用户自己发的图）。
+  - **交付方式（`mediaAtRefEnabled`）** —— `false`（默认）沿用「文件已保存到: 路径」，文本文件还把内容整段附在消息里；`true` 时按宿主的 `@路径` 语法交付（复用 `at-refs.ts` 的 `formatFileMention`，与 `dsh-file-reference` grammar 逐字对齐；Windows 反斜杠转 `/`，含空格写成 `@"…"`），由 `dsh-file-reference-local` 的 `FILE_REFERENCE_PROMPT` 要求模型自己调 `read`，因此**文本文件不再内联内容**（`@文件` 是指针，不是内容搬运）。路径含引号/控制字符时退回普通路径写法，绝不产出会被截断成散文的 mention。
+  - **接线**：`/media on|off|at|path`（别名 `/md`），与 `/merge` 同款——parser、dispatcher、卡片 bypass、`LOCAL_COMMAND_NAMES` 去重、`/help`、`config.json` 持久化、`/status` 新增「图片/文件合并」行（含暂存个数与交付方式）、设置页同一份值。
+  - **内部**：`MergeState.entries` 从 `string[]` 改为有序 `MergeEntry[]`（`text` / `media`），flush 不再构造合成的 `WeixinMessage`；`forwardToAgent` 拆成 `promptBlocksFor`（单消息 → blocks）+ `forwardBlocksToAgent`（agent ensure / `/at` mention / 来源标记 / 繁忙投递），批次与单消息共用同一条投递路径。`isHoldableMediaItem` 定义「可暂存媒体」，`findMediaItem` 改为导出。
+
 ### Tests
 
 - 新增 `tests/at-command.test.ts`（55 例）：解析矩阵（`list`/`clear`/`rm`/`s`/`f`、缺参数、非法子命令）、与 18 个既有 parser 的别名冲突守卫、mention 语法往返（中文 / `[]` / 反斜杠 label、`@path` / `@"a b.txt"` / 目录尾斜杠 / 控制字符拒绝）、登记与一次性注入（含「第二条消息不再带 mention」、正文保持在首块以免污染会话标题）、打字合并批次只带一次 mention、关键词解析的两条路径（宿主 `listCandidates` 与无 live agent 时的本地行扫描）与歧义提示、全部拒绝路径（引用自己 / 第 4 个会话 / 第 9 个文件 / 服务缺失 / 找不到路径的候选提示）、工作区**之外**的绝对路径引用（含带 U+202A 的粘贴路径回归）、`/at rm` 与 `/at clear`、TTL 过期与「过期后重新登记是全新一组」、登出清空、`/status` 有/无暂存两态、以及有待处理权限卡时 `/at` 不被吞。
+- 新增 `tests/media-merge.test.ts`（29 例）：图 → 文合成**一轮**且文字在首块、下载只发生在 flush 时、两图 + 一文（两个附件块）、文件同样合并、自带文字说明的图立即发送、语音不暂存、关闭时逐字回退为两轮、等待窗口到点单独发出（fake timers）、`mergeMaxMsgs` 上限、`mediaHoldMs` 被 `mergeForcedReleaseMs` 夹住、下载失败退化为「下载失败」文字且不丢批次、dispose 冲刷暂存、logout 丢弃且**不下载、不留临时文件**、`@` / 路径两种措辞（含「`@` 模式不内联文本内容 / 路径模式仍然内联」两条对照）、`/media` 解析矩阵与 19 个既有 parser 的别名冲突守卫、卡片 bypass / `LOCAL_COMMAND_NAMES` / `/help`、`/media on|off|at|path` 落盘、`/media off` 与设置页关闭都先冲刷、`/status` 两态、以及与打字合并共存的两种组合（开：`文 → 图 → 文` 一轮；关：图仍先冲刷文字）。
+- `tests/client-panel-wiring.test.ts`：`RENDERED_TOGGLES` 加两个开关、数值字段加 `mediaHoldMs`、`GROUPS` 加 `media`、merge 切片终点改到 `id: "media"`，并新增「图片与文件的开关与参数同组、且不泄漏到前一组」「只有附件等待被总开关置灰，交付方式始终可点」两条守卫（现共 69 例）。
+- `tests/config-store.test.ts`：三键默认值、round-trip、字符串/负数/真值串被拒、手改 `config.json` 的坏值被丢弃回落默认（现共 26 例）。
+- `tests/merge-window.test.ts`：两处「在途批次」用例的 spy 从 `forwardToAgent(user, msg)` 改为 `forwardBlocksToAgent(user, blocks)`，断言的行为不变。
 
 ## [0.12.0] - 2026-10-19
 

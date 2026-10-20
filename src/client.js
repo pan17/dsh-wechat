@@ -245,6 +245,8 @@ window.__ModuleLoader__.load({
 				finalOnly: !!form.finalOnly,
 				mergeEnabled: !!form.mergeEnabled,
 				mergeSuffixTokens: !!form.mergeSuffixTokens,
+				mediaMergeEnabled: !!form.mediaMergeEnabled,
+				mediaAtRefEnabled: !!form.mediaAtRefEnabled,
 				allowRemotePermissionEscalation: !!form.allowRemotePermissionEscalation,
 				allowAnyFilePath: !!form.allowAnyFilePath,
 				// Same blank-means-undefined rule as the rate limit: an
@@ -253,6 +255,7 @@ window.__ModuleLoader__.load({
 				mergeSilenceMs: form.mergeSilenceMs.trim() === "" ? undefined : Number(form.mergeSilenceMs),
 				mergeMaxMsgs: form.mergeMaxMsgs.trim() === "" ? undefined : Number(form.mergeMaxMsgs),
 				mergeForcedReleaseMs: form.mergeForcedReleaseMs.trim() === "" ? undefined : Number(form.mergeForcedReleaseMs),
+				mediaHoldMs: form.mediaHoldMs.trim() === "" ? undefined : Number(form.mediaHoldMs),
 				maxOutgoingFileBytes: form.maxOutgoingFileBytes.trim() === "" ? undefined : Number(form.maxOutgoingFileBytes),
 				// An empty string must NOT become 0 (which means
 				// "unlimited") — `Number("")` is 0, so the blank
@@ -334,6 +337,9 @@ window.__ModuleLoader__.load({
 						mergeMaxMsgs: String(r.body.config?.mergeMaxMsgs ?? ""),
 						mergeForcedReleaseMs: String(r.body.config?.mergeForcedReleaseMs ?? ""),
 						mergeSuffixTokens: !!r.body.config?.mergeSuffixTokens,
+						mediaMergeEnabled: !!r.body.config?.mediaMergeEnabled,
+						mediaHoldMs: String(r.body.config?.mediaHoldMs ?? ""),
+						mediaAtRefEnabled: !!r.body.config?.mediaAtRefEnabled,
 						allowRemotePermissionEscalation: !!r.body.config?.allowRemotePermissionEscalation,
 						allowAnyFilePath: !!r.body.config?.allowAnyFilePath,
 						maxOutgoingFileBytes: String(r.body.config?.maxOutgoingFileBytes ?? ""),
@@ -456,6 +462,11 @@ window.__ModuleLoader__.load({
 				: "";
 			const deliverySummary = form
 				? `静默 ${onOff(form.silent)} · 结论 ${onOff(form.finalOnly)} · 决策推送 ${onOff(form.crossSessionNotify)} · 任务提醒 ${onOff(form.notifyTaskEvents)}`
+				: "";
+			const mediaSummary = form
+				? (form.mediaMergeEnabled
+					? `合并 开 · 等待 ${minutes(form.mediaHoldMs)} · ${form.mediaAtRefEnabled ? "@引用" : "路径"}`
+					: `合并 关 · 附件各自一轮 · ${form.mediaAtRefEnabled ? "@引用" : "路径"}`)
 				: "";
 			const connectionSummary = form
 				? `${form.cwd || "未设置目录"} · 卡片 ${minutes(form.cardTimeoutMs)} · 限流 ${form.sendWechatRateLimitPerMinute || "不限"}/分 · ${allowlistSummary(form.allowedUsers)}`
@@ -613,6 +624,36 @@ window.__ModuleLoader__.load({
 									createElement("input", { type: "checkbox", checked: !!form?.mergeSuffixTokens, onChange: (e) => setForm({ ...form, mergeSuffixTokens: e.target.checked }), disabled: !form?.mergeEnabled }),
 									createElement("span", null, "合并后缀 `..` / `!!`"),
 									createElement(HelpTip, { text: "是否识别消息末尾的 `..`（继续追加，暂不发出）与 `!!`（立刻提交）。开启时这两个后缀会从正文里去掉。关闭后它们只是普通文本。" })),
+							),
+						),
+
+						createElement(Group, {
+							id: "media",
+							title: "图片与文件",
+							summary: mediaSummary,
+							desc: "图片/文件是自己一条消息时，先暂存，等你随后发来的那句话，两者分成一轮一起交给 AI；以及附件以 @引用 还是「已保存到路径」的方式交付。默认全部关闭（与升级前完全一致）。",
+							open: isOpen("media"),
+							onToggle: toggleGroup,
+						},
+							createElement("label", { className: "wx_check" },
+								createElement("input", { type: "checkbox", checked: !!form?.mediaMergeEnabled, onChange: (e) => setForm({ ...form, mediaMergeEnabled: e.target.checked }) }),
+								createElement("span", null, "图片/文件与文字合并发送"),
+								createElement(HelpTip, { text: "默认关闭：图片/文件各自一轮，AI 先看到图片、再看到你的问题。开启后，不带文字说明的图片/文件/视频会先暂存，等你下一条文字到达时合成一轮发出去（文字在前、附件在后），AI 一次就拿到「图 + 图要它做什么」。自带文字说明的消息（同一气泡里的图+字）立即发送，不等。语音不参与。等待超过下面「附件等待」仍未等到文字，就先单独发出去，不会一直挂着。微信端也可用 /media on|off 切换（与这里同一个值）。" })),
+							createElement("div", { className: "wx_sub" },
+								form.mediaMergeEnabled
+									? null
+									: createElement("div", { className: "wx_sub_off" }, "开启「图片/文件与文字合并发送」后，下面的等待时间才生效；交付方式一直生效。"),
+								createElement("div", { className: "wx_form" },
+									createElement("label", null,
+										createElement("span", { className: "wx_field_label" }, "附件等待",
+											createElement("code", { className: "wx_key" }, "mediaHoldMs"),
+											createElement(HelpTip, { text: "暂存的图片/文件等待随后那条文字的最长时间（毫秒，默认 180000 = 3 分钟，与「打字合并 → 强制放行」同长）。超时就把已暂存的附件单独发出去——一张图配不上话，也照样值得回答，通道更不能一直挂着。实际等待取它和「强制放行」里更短的那个。" })),
+										createElement("input", { value: form.mediaHoldMs, onChange: set("mediaHoldMs"), placeholder: "180000", inputMode: "numeric", disabled: !form?.mediaMergeEnabled })),
+								),
+								createElement("label", { className: "wx_check" },
+									createElement("input", { type: "checkbox", checked: !!form?.mediaAtRefEnabled, onChange: (e) => setForm({ ...form, mediaAtRefEnabled: e.target.checked }) }),
+									createElement("span", null, "以 @引用 方式交给 AI"),
+									createElement(HelpTip, { text: "关闭（默认）：沿用「文件已保存到: 路径」，文本文件还会把内容整段附在消息里。开启：按宿主自己的 @路径 语法交付（含空格的路径写成 @\"…\"），文件引用提示词会要求 AI 自己按需读取文件，而不是假装读过；因此文本文件的内容不再内联。两种方式都会先把文件存到本机，@引用 只是一个指针。微信端也可用 /media at|path 切换。" })),
 							),
 						),
 

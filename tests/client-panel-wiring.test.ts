@@ -39,6 +39,9 @@ const RENDERED_TOGGLES = [
   "mergeSuffixTokens",
   "allowRemotePermissionEscalation",
   "allowAnyFilePath",
+  // 图片/文件合并 + 附件交付方式.
+  "mediaMergeEnabled",
+  "mediaAtRefEnabled",
 ] as const;
 
 describe("settings panel ↔ host config wiring", () => {
@@ -89,6 +92,8 @@ describe("settings panel ↔ host config wiring", () => {
     "mergeMaxMsgs",
     "mergeForcedReleaseMs",
     "maxOutgoingFileBytes",
+    // 图片/文件合并: the attachment wait.
+    "mediaHoldMs",
   ])(
     "%s is initialised, rendered and saved",
     (key) => {
@@ -143,7 +148,7 @@ describe("settings panel ↔ host config wiring", () => {
  */
 describe("settings panel grouping", () => {
   /** Group ids the panel renders, in source order. */
-  const GROUPS = ["connection", "delivery", "merge", "prompt", "security"] as const;
+  const GROUPS = ["connection", "delivery", "merge", "media", "prompt", "security"] as const;
 
   it.each(GROUPS)("renders a %s group", (id) => {
     expect(client).toContain(`id: "${id}"`);
@@ -166,10 +171,10 @@ describe("settings panel grouping", () => {
     // group's. Every merge key must fall inside, and none may leak into a
     // sibling — that leak is what made the feature hard to find.
     const mergeStart = client.indexOf('id: "merge"');
-    const promptStart = client.indexOf('id: "prompt"');
+    const mediaStart = client.indexOf('id: "media"');
     expect(mergeStart).toBeGreaterThan(-1);
-    expect(promptStart).toBeGreaterThan(mergeStart);
-    const mergeGroup = client.slice(mergeStart, promptStart);
+    expect(mediaStart).toBeGreaterThan(mergeStart);
+    const mergeGroup = client.slice(mergeStart, mediaStart);
 
     for (const key of ["mergeEnabled", "mergeSuffixTokens"]) {
       expect(mergeGroup).toContain(`form?.${key}`);
@@ -187,6 +192,32 @@ describe("settings panel grouping", () => {
     expect(before).not.toContain("value: form.mergeForcedReleaseMs");
   });
 
+  it("the 图片与文件 switch and its parameters share one group, ahead of the prompt group", () => {
+    // Same guard for the attachment feature: its two switches and its only
+    // number must live in ONE place, or "where do I turn this on?" becomes a
+    // hunt through five collapsed groups.
+    const mediaStart = client.indexOf('id: "media"');
+    const promptStart = client.indexOf('id: "prompt"');
+    expect(mediaStart).toBeGreaterThan(-1);
+    expect(promptStart).toBeGreaterThan(mediaStart);
+    const mediaGroup = client.slice(mediaStart, promptStart);
+
+    for (const key of ["mediaMergeEnabled", "mediaAtRefEnabled"]) {
+      expect(mediaGroup).toContain(`form?.${key}`);
+    }
+    expect(mediaGroup).toContain("value: form.mediaHoldMs");
+
+    // Nothing of it may leak into an earlier group.
+    const before = client.slice(0, mediaStart);
+    expect(before).not.toContain("value: form.mediaHoldMs");
+    expect(before).not.toContain("form?.mediaAtRefEnabled");
+
+    // The panel must document the WeChat-side switch, like every other
+    // feature's help text does.
+    expect(mediaGroup).toContain("/media on|off");
+    expect(mediaGroup).toContain("/media at|path");
+  });
+
   it("the merge parameters are inert until the feature is switched on", () => {
     // Disabled, not hidden: the stored values stay visible and are still
     // submitted, so turning the feature off never loses a tuned window.
@@ -194,6 +225,14 @@ describe("settings panel grouping", () => {
       expect(client).toContain(`value: form.${key}`);
     }
     expect(client.match(/disabled: !form\?\.mergeEnabled/g)?.length).toBe(4);
+  });
+
+  it("the attachment wait is inert until 图片/文件合并 is switched on", () => {
+    // `mediaAtRefEnabled` is NOT gated: the delivery style applies to every
+    // attachment, held or not, so it must stay clickable with the hold off.
+    expect(client.match(/disabled: !form\?\.mediaMergeEnabled/g)?.length).toBe(1);
+    expect(client).not.toContain("disabled: !form?.mediaAtRefEnabled");
+    expect(client).toContain("mediaSummary");
   });
 
   it("remembers which groups are expanded, without requiring storage", () => {
