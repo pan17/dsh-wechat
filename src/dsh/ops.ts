@@ -4,9 +4,8 @@
  * checks — no runtime imports of `@deepseek-ai/*` packages.
  */
 
-import type { Agent, AgentSession } from "./types.js";
-import { sessionEvents } from "./types.js";
-import type { SessionProjectionService } from "./types.js";
+import type { Agent, AgentSession, AgentSessionLike, SessionProjectionService } from "./types.js";
+import { modelSelectionFromProjection, sessionEvents } from "./types.js";
 import type { BridgeContext } from "./sessions.js";
 
 /** Nominal id of one registered settings namespace (dsh-settings brand). */
@@ -203,6 +202,31 @@ export interface AgentDefaultModelService {
   currentSelection(): ModelSelection;
   saveSelection(next: ModelSelection): Promise<void>;
 }
+
+/**
+ * Minimal structural surface of the Host `sessionController` service
+ * (`@deepseek-ai/dsh-api-session-controller`). `selectModel` is the exact
+ * Remote operation the GUI model picker calls: it validates the route,
+ * appends the durable `model/selection` event, installs the Session-local
+ * selection, and saves the deployment default in the background. Calling it
+ * from WeChat is what keeps both surfaces on ONE selection instead of the
+ * bridge maintaining a second, request-only override.
+ */
+export interface SessionControllerService {
+  selectModel?(request: {
+    sessionId: string;
+    provider: string;
+    model: string;
+    reasoningEffort?: string;
+  }): Promise<{ selected?: ModelSelection } | undefined>;
+}
+
+/** Outcome of routing one switch through the Host session controller. */
+export type SessionModelSelectionOutcome =
+  | { kind: "host" }
+  /** The deployment composes no session controller (older Host / headless). */
+  | { kind: "unsupported" }
+  | { kind: "error"; message: string };
 
 /** Minimal structural surface of the `permissionPresets` service (dsh-permission-presets). */
 export interface PermissionPresetsService {
@@ -896,6 +920,67 @@ export class DshOps {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * The Session's host-owned model selection, folded from the
+   * `modelSelection` projection (`next` = the durable selection the next
+   * request should use, `lastUsed` = the selection consumed by the latest
+   * request). This is the same pair the GUI picker reads, so `/status` and
+   * `/reasoning status` stay truthful after either surface switches.
+   * Returns `undefined` when the projection registry is not composed or
+   * the Session has no recorded selection yet.
+   */
+  sessionModelSelection(session: AgentSessionLike | undefined): ModelSelection | undefined {
+    if (!session) return undefined;
+    try {
+      const snapshot = this.sessionProjections()?.snapshot(session);
+      const selected = modelSelectionFromProjection(snapshot?.values?.["modelSelection"]);
+      return selected?.provider && selected.model
+        ? {
+            provider: selected.provider,
+            model: selected.model,
+            ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}),
+          }
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Route one model/effort switch through the Host session controller — the
+   * same `session.selectModel` Remote the GUI picker submits. On success the
+   * Host records `model/selection`, installs the selection for the next
+   * prompt assembly, and updates the default, so the GUI and WeChat see the
+   * same value immediately (and a later GUI switch simply replaces it).
+   *
+   * Older hosts or minimal profiles without that service report
+   * `unsupported`; the caller keeps the legacy in-memory override path.
+   * A controller rejection is reported as `error` rather than silently
+   * falling back, matching the GUI's "unavailable model" behavior.
+   */
+  async selectSessionModel(
+    sessionId: string,
+    selection: ModelSelection,
+  ): Promise<SessionModelSelectionOutcome> {
+    const controller = this.get<SessionControllerService>("sessionController");
+    if (!controller || typeof controller.selectModel !== "function") {
+      return { kind: "unsupported" };
+    }
+    try {
+      await controller.selectModel({
+        sessionId,
+        provider: selection.provider,
+        model: selection.model,
+        ...(selection.reasoningEffort !== undefined
+          ? { reasoningEffort: selection.reasoningEffort }
+          : {}),
+      });
+      return { kind: "host" };
+    } catch (err) {
+      return { kind: "error", message: err instanceof Error ? err.message : String(err) };
     }
   }
 

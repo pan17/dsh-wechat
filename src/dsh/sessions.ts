@@ -11,7 +11,17 @@
 import crypto from "node:crypto";
 import { createUserMessage } from "./messages.js";
 import type { BusyEnterBehavior } from "./ops.js";
-import type { Agent, AgentHandle, ContentBlock, CreateAgentOptions, ResumeAgentOptions } from "./types.js";
+import type {
+  Agent,
+  AgentHandle,
+  AgentSessionLike,
+  ContentBlock,
+  CreateAgentOptions,
+  ModelSelectionView,
+  ResumeAgentOptions,
+  SessionProjectionService,
+} from "./types.js";
+import { modelSelectionFromProjection } from "./types.js";
 import type { UserState } from "../state.js";
 
 /** Minimal structural surface of the `agents` registry service. */
@@ -269,33 +279,99 @@ export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void
     }
   }
 
-  // Model selection, GUI-equivalent precedence: the session's own latest
-  // request wins, otherwise the deployment's default model (agentDefaultModel
-  // service — the same fallback the Web surface's `selectionFor` uses).
-  // Without it, agents created/resumed outside the GUI have no model route:
-  // the persona's `{{model}}` variable fails to render and requests cannot
-  // resolve a provider/model. This bridge cannot import `@deepseek-ai/dsh-agent`
-  // at runtime, so the two waterfalls replicate `installModelSelection`'s
-  // cooperative pattern exactly: snapshot the selection into prompt assembly
-  // and apply it to every request config.
-  const logged = live?.session?.requestHeader?.()?.config;
-  const defaults = ctx.get?.<{ currentSelection(): ModelSelection }>(
-    "agentDefaultModel",
-  )?.currentSelection();
-  const selected: ModelSelection | undefined =
-    logged?.provider && logged.model
-      ? {
-          provider: logged.provider,
-          model: logged.model,
-          ...(logged.reasoningEffort ? { reasoningEffort: logged.reasoningEffort } : {}),
-        }
-      : defaults;
-  if (!selected?.provider || !selected.model) return;
+  // DSH 0.2.1 owns per-Session model selection in the Host (the GUI's
+  // `session.selectModel` appends `model/selection` and installs the
+  // selection). When that Remote is composed, the bridge must read the same
+  // durable `modelSelection` projection live: a snapshot captured here would
+  // keep forcing the model that happened to be current when the WeChat agent
+  // resumed — exactly the "GUI switched but WeChat still uses the old model"
+  // bug. On older hosts without the controller, the legacy frozen selection
+  // stays in place, and the bridge's global `agent/request` override (the
+  // `/model switch` fallback) still wins because it is registered earlier.
+  const controller = ctx.get?.<{ selectModel?: unknown }>("sessionController");
+  const hostOwnsSelection = typeof controller?.selectModel === "function";
+
+  if (!hostOwnsSelection) {
+    const logged = live?.session?.requestHeader?.()?.config;
+    const defaults = ctx.get?.<{ currentSelection(): ModelSelectionView }>(
+      "agentDefaultModel",
+    )?.currentSelection();
+    const selected: ModelSelectionView | undefined =
+      logged?.provider && logged.model
+        ? {
+            provider: logged.provider,
+            model: logged.model,
+            ...(logged.reasoningEffort ? { reasoningEffort: logged.reasoningEffort } : {}),
+          }
+        : defaults;
+    if (!selected?.provider || !selected.model) return;
+
+    ctx.on?.("system-prompt/assemble", async (_assembly, _context, next) => {
+      const assembled = (await (next as () => Promise<{
+        variables?: Record<string, unknown>;
+      }>)()) as { variables?: Record<string, unknown> };
+      return {
+        ...assembled,
+        variables: {
+          ...assembled.variables,
+          provider: selected.provider,
+          model: selected.model,
+        },
+      };
+    });
+    ctx.on?.("agent/request", async (_payload, next) => {
+      const resolved = (await (next as () => Promise<Record<string, unknown>>)()) as Record<string, unknown>;
+      return {
+        ...resolved,
+        provider: selected.provider,
+        model: selected.model,
+        ...(selected.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: selected.reasoningEffort }),
+      };
+    });
+    return;
+  }
+
+  const defaultModel = ctx.get?.<{ currentSelection(): ModelSelectionView }>("agentDefaultModel");
+  const projections = ctx.get?.<SessionProjectionService>("sessionProjections");
+  const currentSelection = (): ModelSelectionView | undefined => {
+    const session = live?.session as unknown as AgentSessionLike | undefined;
+    if (session && projections) {
+      try {
+        const projected = modelSelectionFromProjection(
+          projections.snapshot(session)?.values?.["modelSelection"],
+        );
+        if (projected?.provider && projected.model) return projected;
+      } catch {
+        // Projection unavailable for this session; fall through to the log.
+      }
+    }
+    const logged = live?.session?.requestHeader?.()?.config;
+    if (logged?.provider && logged.model) {
+      return {
+        provider: logged.provider,
+        model: logged.model,
+        ...(logged.reasoningEffort ? { reasoningEffort: logged.reasoningEffort } : {}),
+      };
+    }
+    return defaultModel?.currentSelection();
+  };
+
+  // Snapshot the selection at the prompt-assembly boundary and reuse that
+  // exact value for the request it belongs to. This mirrors the host's
+  // `installModelSelection`: a switch that lands mid-step takes effect on the
+  // NEXT step, so the system prompt (`{{model}}`) and the request route can
+  // never describe different models within one step.
+  let assembledSelection: ModelSelectionView | undefined;
 
   ctx.on?.("system-prompt/assemble", async (_assembly, _context, next) => {
+    const selected = currentSelection();
     const assembled = (await (next as () => Promise<{
       variables?: Record<string, unknown>;
     }>)()) as { variables?: Record<string, unknown> };
+    assembledSelection = selected;
+    if (!selected?.provider || !selected.model) return assembled;
     return {
       ...assembled,
       variables: {
@@ -307,8 +383,13 @@ export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void
   });
   ctx.on?.("agent/request", async (_payload, next) => {
     const resolved = (await (next as () => Promise<Record<string, unknown>>)()) as Record<string, unknown>;
+    // Prefer the selection snapshotted with the prompt; only read live when
+    // no assembly ran (defensive: a host without prompt assembly).
+    const selected = assembledSelection ?? currentSelection();
+    if (!selected?.provider || !selected.model) return resolved;
+    const { reasoningEffort: _inherited, ...withoutInheritedEffort } = resolved;
     return {
-      ...resolved,
+      ...withoutInheritedEffort,
       provider: selected.provider,
       model: selected.model,
       ...(selected.reasoningEffort === undefined
@@ -316,11 +397,4 @@ export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void
         : { reasoningEffort: selected.reasoningEffort }),
     };
   });
-}
-
-/** One resolved model selection (dsh-agent-default-model / request header). */
-interface ModelSelection {
-  provider?: string;
-  model?: string;
-  reasoningEffort?: string;
 }

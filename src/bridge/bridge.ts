@@ -38,7 +38,7 @@ import { formatApprovalCard, parseApprovalReply } from "../adapter/approval-form
 import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
 import type { ModelSelection, PinOutcome, SessionHeader, SessionRecord } from "../dsh/ops.js";
-import type { Agent, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
+import type { Agent, AgentSessionLike, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
 import { sessionEvents } from "../dsh/types.js";
 import {
   MAX_OUTBOUND_QUEUE,
@@ -5094,11 +5094,11 @@ export class WeChatDSHBridge {
 
   /**
    * `/reasoning` — view or switch the reasoning effort. The effort rides the
-   * same model selection as the GUI's model picker: the current session's
-   * override or logged config, with the deployment default underneath.
-   * Switching persists via `agentDefaultModel.saveSelection` (same settings
-   * document the GUI edits) and applies to the live agent through the
-   * `agent/request` override.
+   * same model selection as the GUI's model picker. Switching goes through
+   * `sessionController.selectModel` (the exact Remote the GUI submits) so the
+   * durable `model/selection` and the GUI projection update together; on
+   * hosts without that service it falls back to `agentDefaultModel` +
+   * the legacy request override.
    */
   private async handleReasoningCommand(userId: string, cmd: ReasoningCommand): Promise<void> {
     const user = this.ensureBoundUser(userId);
@@ -5181,30 +5181,71 @@ export class WeChatDSHBridge {
           );
           return;
         }
-        // Apply to the live agent (via agent/request) and as the new default.
-        const selection = { provider: active!.provider!, model: active!.model!, reasoningEffort: matched.id };
+        // Route through the Host session controller first: `selectModel` is
+        // the exact Remote the GUI model picker submits, so it records the
+        // durable `model/selection`, installs the selection for the next
+        // step, and updates the default — GUI and WeChat stay on one plan.
+        // Only deployments without that service fall back to the legacy
+        // in-memory request override.
+        const selection = {
+          provider: active!.provider!,
+          model: active!.model!,
+          reasoningEffort: matched.id,
+        };
+        let appliedToGui = false;
+        let saved: boolean;
         if (agent) {
-          this.setModelOverride(agent.id, selection);
+          const applied = await this.ops.selectSessionModel(agent.id, selection);
+          if (applied.kind === "error") {
+            await this.sendReply(userId, `⚠️ 无法切换推理等级: ${applied.message}`);
+            return;
+          }
+          if (applied.kind === "host") {
+            // The Host's selectModel already queues the default save.
+            this.modelOverrides.delete(agent.id);
+            appliedToGui = true;
+            saved = true;
+          } else {
+            this.setModelOverride(agent.id, selection);
+            saved = await this.ops.saveDefaultModel(selection);
+          }
+        } else {
+          saved = await this.ops.saveDefaultModel(selection);
         }
-        const saved = await this.ops.saveDefaultModel(selection);
         const lines = [`✅ 推理等级已切换: ${matched.name}（${matched.id}）`];
-        if (agent) lines.push("（已应用到当前会话，下一步生效）");
+        if (agent && appliedToGui) lines.push("（已同步到 GUI 的模型选择器）");
+        else if (agent) lines.push("（已应用到当前会话，下一步生效）");
         if (!saved) lines.push("⚠️ 无法更新默认（仅当前会话生效）");
         await this.sendReply(userId, lines.join("\n"));
         return;
       }
       case "clear": {
         // Restore the provider/model default: drop the effort from the
-        // override and from the persisted default.
+        // Host-owned selection (and from any legacy override), then clear
+        // the persisted default's effort.
+        const selection = { provider: active!.provider!, model: active!.model! };
+        let appliedToGui = false;
+        let saved: boolean;
         if (agent) {
-          const override = this.modelOverrides.get(agent.id);
-          if (override) {
-            const { reasoningEffort: _dropped, ...rest } = override;
-            this.setModelOverride(agent.id, rest);
+          const applied = await this.ops.selectSessionModel(agent.id, selection);
+          if (applied.kind === "error") {
+            await this.sendReply(userId, `⚠️ 无法恢复推理等级: ${applied.message}`);
+            return;
           }
+          if (applied.kind === "host") {
+            this.modelOverrides.delete(agent.id);
+            appliedToGui = true;
+            saved = true;
+          } else {
+            const override = this.modelOverrides.get(agent.id);
+            if (override) this.setModelOverride(agent.id, selection);
+            saved = await this.ops.saveDefaultModel(selection);
+          }
+        } else {
+          saved = await this.ops.saveDefaultModel(selection);
         }
-        const saved = await this.ops.saveDefaultModel({ provider: active!.provider!, model: active!.model! });
         const lines = ["✅ 推理等级已恢复为模型默认"];
+        if (agent && appliedToGui) lines.push("（已同步到 GUI 的模型选择器）");
         if (!saved) lines.push("⚠️ 无法更新默认（仅当前会话生效）");
         await this.sendReply(userId, lines.join("\n"));
         return;
@@ -5947,7 +5988,7 @@ export class WeChatDSHBridge {
         // default, so `/status` (which reads the override via
         // `resolveEffectiveModel`) keeps showing the effort.
         const existingEffort =
-          (agent ? this.modelOverrides.get(agent.id)?.reasoningEffort : undefined) ??
+          (agent ? this.resolveEffectiveModel(user, agent)?.reasoningEffort : undefined) ??
           this.ops.defaultModelSelection()?.reasoningEffort;
         let preservedEffort: string | undefined;
         let preservedLabel: string | undefined;
@@ -5963,12 +6004,33 @@ export class WeChatDSHBridge {
           preservedEffort !== undefined
             ? { provider: matchedProvider.id, model: matchedModel.id, reasoningEffort: preservedEffort }
             : { provider: matchedProvider.id, model: matchedModel.id };
+        // Host-first as above: one durable selection shared with the GUI.
+        // Without `sessionController` the legacy request override remains
+        // the only way to affect a live agent on older hosts.
+        let appliedToGui = false;
+        let saved: boolean;
         if (agent) {
-          this.setModelOverride(agent.id, selection);
+          const applied = await this.ops.selectSessionModel(agent.id, selection);
+          if (applied.kind === "error") {
+            await this.sendReply(userId, `⚠️ 无法切换模型: ${applied.message}`);
+            return;
+          }
+          if (applied.kind === "host") {
+            // The Host's selectModel already queues the default save; keep
+            // one writer so the profile is not rewritten twice per switch.
+            this.modelOverrides.delete(agent.id);
+            appliedToGui = true;
+            saved = true;
+          } else {
+            this.setModelOverride(agent.id, selection);
+            saved = await this.ops.saveDefaultModel(selection);
+          }
+        } else {
+          saved = await this.ops.saveDefaultModel(selection);
         }
-        const saved = await this.ops.saveDefaultModel(selection);
         const lines = [`✅ 已切换到模型: ${matchedProvider.id}/${matchedModel.id}`];
-        if (agent) lines.push("（已应用到当前会话，下一步生效）");
+        if (agent && appliedToGui) lines.push("（已同步到 GUI 的模型选择器）");
+        else if (agent) lines.push("（已应用到当前会话，下一步生效）");
         if (preservedLabel) {
           lines.push(`（推理等级 ${preservedLabel} 保留，用 /reasoning 调整）`);
         }
@@ -6468,10 +6530,15 @@ export class WeChatDSHBridge {
   }
 
   /**
-   * The model the user's session actually runs on: this session's override
-   * (`/model switch`) > the session's latest logged request config > the
-   * agent's creation options > the deployment default model. Same precedence
-   * as the GUI's `selectionFor`.
+   * The model the user's session actually runs on, in host-equivalent
+   * precedence: a legacy in-memory override (only set when the deployment has
+   * no `sessionController`) > the Session's durable `modelSelection`
+   * projection (`next`, falling back to `lastUsed`) > the latest logged
+   * request config > the agent's creation options > the deployment default.
+   * The projection is the same value the GUI picker shows and
+   * `sessionController.selectModel` installs, so a switch from either surface
+   * is reflected by `/status`, `/model status`, and `/reasoning status`
+   * immediately.
    *
    * `reasoningEffort` follows the same precedence chain, with one defensive
    * branch: when the override carries a model selection but no effort AND
@@ -6502,6 +6569,16 @@ export class WeChatDSHBridge {
       }
       return override;
     }
+    // Host-owned durable selection (`model/selection` event folded into the
+    // `modelSelection` projection). This is the value the GUI picker shows
+    // and `sessionController.selectModel` installs, so reading it here makes
+    // `/status`, `/model status` and `/reasoning status` follow a GUI switch
+    // immediately — while the old request-header read only saw the model
+    // after the next GUI turn had already run.
+    const projected = agent?.session
+      ? this.ops.sessionModelSelection(agent.session as unknown as AgentSessionLike)
+      : undefined;
+    if (projected?.provider && projected.model) return projected;
     const logged = agent?.session?.requestHeader?.()?.config;
     if (logged?.provider && logged.model) return logged;
     if (agent?.options?.provider && agent.options.model) return agent.options;

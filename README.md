@@ -144,9 +144,9 @@ profile 实际注册的所有原生命令；本地命令表里已有的名字自
 | `/workspace (ws) — list [all\|数量] \| status \| switch <编号\|路径> \| add <路径>` | 工作区管理（list 默认显示 20 个、按添加顺序（新加的排最前），`all` 或显式数量看更多；显示各工作区会话数，不含已归档；switch/add 回复会写明恢复的会话名字和完整 id，跳过已归档；该目录无可见会话时提示发送消息将创建） |
 | `/session (s) — list [current] [all\|数量] \| switch [current] <编号> \| pin [编号] \| unpin [编号] \| new \| status` | 会话管理（list 默认显示最近 20 个，`all` 或显式数量看更多，标记当前，不显示 GUI 已归档会话；**置顶会话排在列表最前并标 `📌`**，`pin`/`unpin` 省略编号时作用于当前会话，带编号时按 `/s list` 的行号解析；`list current` 只看当前工作目录——cwd 按宿主 `fs.promises.realpath` 规则归一（尾斜杠/`..`/大小写差异都能匹配），推荐用 `switch current <编号>` 按同一列表切换；紧接着直接 `switch <编号>` 也会复用最近一次列表编号；普通无列表上下文时 `switch <编号>` 对应全量列表；switch 回复同时带会话名字和完整 id；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建） |
 | `/preset (p) — list \| switch <名称\|编号> \| status` | 默认 Preset（写入 DSH 设置，与 GUI 同步；`status` 看全局默认，不是当前会话；当前会话无内容时 `switch` 立即应用） |
-| `/model — list [提供商] \| switch <提供商/模型> \| status` | 模型管理（切换立即作用于当前会话 + 设为默认；当前推理等级若新模型支持则一并保留，否则清空） |
+| `/model — list [提供商] \| switch <提供商/模型> \| status` | 模型管理（切换立即作用于当前会话 + 设为默认；与 GUI 模型选择器同源，走宿主 `sessionController.selectModel`，GUI 里也会立刻显示新模型；当前推理等级若新模型支持则一并保留，否则清空） |
 | `/perm — status \| list \| switch <名称\|编号> \| default [名称\|编号]` | 权限管理（switch 实时切当前会话；default 写 DSH 设置，新会话生效） |
-| `/reasoning — [list \| default \| switch <等级>]` | 推理等级：查看当前/默认与模型支持的等级；`switch <等级>` 切换（实时 + 写默认）；`default` 恢复模型默认 |
+| `/reasoning — [list \| default \| switch <等级>]` | 推理等级：查看当前/默认与模型支持的等级；`switch <等级>` 切换（实时 + 写默认，与 `/model` 一样走宿主 `sessionController.selectModel`，GUI 同步）；`default` 恢复模型默认 |
 | `/enter queue\|steer\|status`（`/busy`） | 繁忙时投递：agent 运行中收到微信消息时排队（`queue`）还是插话进当前轮次（`steer`）；读写 DSH 设置 `ui-conversation.busyEnter`，与 GUI「繁忙时 Enter 键行为」同源同步；空闲会话始终新开一轮 |
 | `/silent on\|off`（`/sl`） | 静默模式：开启后仅在轮次结束发送最后一条助手正文；关闭后思考与工具合并为「执行过程」，正文独立发送；写入 `config.json`，重新扫码后仍保留，设置页可切换。⚠️ 单位是「轮」——一次需求若被拆成多轮（例如目标自动续跑 8 轮），仍会收到 8 条；要按「任务」只收一条请用结论模式（`/final on`） |
 | `/final on\|off\|status`（`/fo`） | 结论模式开关：开启后跨轮次暂存，整条任务停下后只发一条最终结论（优先于 `/silent`）；`off` 会把**当前暂存的内容先交付**再关闭（暂存是 agent 已经产出的结论，关掉不该把它销毁）；`status` 显示模式与暂存条数。写入 `config.json`，重新扫码后仍保留，与设置页「结论模式」同一个值。⚠️ `/f` 是 `/flush` 的别名，**不是** `/final` 的 |

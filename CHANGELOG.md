@@ -29,7 +29,17 @@
   - **接线**：`/media on|off|at|path`（别名 `/md`），与 `/merge` 同款——parser、dispatcher、卡片 bypass、`LOCAL_COMMAND_NAMES` 去重、`/help`、`config.json` 持久化、`/status` 新增「图片/文件合并」行（含暂存个数与交付方式）、设置页同一份值。
   - **内部**：`MergeState.entries` 从 `string[]` 改为有序 `MergeEntry[]`（`text` / `media`），flush 不再构造合成的 `WeixinMessage`；`forwardToAgent` 拆成 `promptBlocksFor`（单消息 → blocks）+ `forwardBlocksToAgent`（agent ensure / `/at` mention / 来源标记 / 繁忙投递），批次与单消息共用同一条投递路径。`isHoldableMediaItem` 定义「可暂存媒体」，`findMediaItem` 改为导出。
 
+### Fixed
+
+- **模型切换与 GUI 不同步（DSH 0.2.1 的 per-session 模型选择）。** 旧实现把 `/model switch` 存成 bridge 内存里的 `modelOverrides`、在 `agent/request` 里覆盖最终请求，并在 `agentSetup` 里冻结会话开始时的模型快照。DSH 0.2.1 把选择改成 Host 所有：GUI 的 `session.selectModel` 追加 `model/selection`、投影为 `modelSelection.next`，`sessionController` 据此安装下一步的 selection。两套状态因此各写各的——2026-10-20 的会话日志就是证据：03:26 GUI 已切到 `opencode-zen/deepseek-v4.1-flash-free`（两条 `model/selection`），03:28 的微信请求头仍是旧的 `auto/deepseek-v4.1-flash`（冻结快照赢）；03:31 微信 `/model switch workbuddy-ai/...` 只改了内存覆盖与默认，03:32 请求头生效但日志里**没有**对应的 `model/selection`，GUI 模型选择器自然看不到。
+  - `/model switch`、`/reasoning switch`、`/reasoning default` 现在优先调用 `ctx.sessionController.selectModel({sessionId, provider, model, reasoningEffort?})`——与 GUI 模型选择器完全同一条 Remote：校验路由、写入 durable `model/selection`、安装下一步 selection、后台保存默认。成功后清掉该会话遗留的 `modelOverrides`；只有未挂载 `sessionController` 的旧宿主才回退到原来的内存覆盖 + `saveDefaultModel`。Host 拒绝（如 `session/model-unavailable`）时直接回复失败原因，不再静默 fallback 成「微信能用、GUI 看不到」的第二套状态。
+  - `agentSetup` 在 `sessionController` 存在时改为**实时读取** `modelSelection` 投影（`next ?? lastUsed` → request header → 默认），并在 `system-prompt/assemble` 处快照、同一 step 的 `agent/request` 复用该快照——与宿主 `installModelSelection` 的 mid-step 语义一致，避免「提示词写 A、请求发 B」。没有 controller 的旧宿主保留冻结路径，全局覆盖仍然生效。
+  - `resolveEffectiveModel`（`/status`、`/model status`、`/reasoning status`）同样优先读 `modelSelection` 投影；GUI 一切换，微信 `/status` 立即显示新模型，不必等下一轮请求头更新。
+
 ### Tests
+
+- 新增 `tests/model-sync.test.ts`（6 例）：`modelSelection` 投影解析（`next` 优先 / `lastUsed` 回退 / 坏值忽略）、`agentSetup` 在投影变化后下一 step 使用新模型、mid-step 切换不拆分提示词与请求路由、投影缺失时回退 request header、`{{model}}` 变量跟随实时选择。
+- `tests/model-reasoning.test.ts` 新增 4 例：`/model switch` 与 `/reasoning switch` 走 `sessionController.selectModel` 且不写 `modelOverrides`、Host 拒绝时明确报错且不落默认、`resolveEffectiveModel` 在请求头过期时优先采用 `modelSelection.next`（现共 17 例）。
 
 - 新增 `tests/at-command.test.ts`（55 例）：解析矩阵（`list`/`clear`/`rm`/`s`/`f`、缺参数、非法子命令）、与 18 个既有 parser 的别名冲突守卫、mention 语法往返（中文 / `[]` / 反斜杠 label、`@path` / `@"a b.txt"` / 目录尾斜杠 / 控制字符拒绝）、登记与一次性注入（含「第二条消息不再带 mention」、正文保持在首块以免污染会话标题）、打字合并批次只带一次 mention、关键词解析的两条路径（宿主 `listCandidates` 与无 live agent 时的本地行扫描）与歧义提示、全部拒绝路径（引用自己 / 第 4 个会话 / 第 9 个文件 / 服务缺失 / 找不到路径的候选提示）、工作区**之外**的绝对路径引用（含带 U+202A 的粘贴路径回归）、`/at rm` 与 `/at clear`、TTL 过期与「过期后重新登记是全新一组」、登出清空、`/status` 有/无暂存两态、以及有待处理权限卡时 `/at` 不被吞。
 - 新增 `tests/media-merge.test.ts`（29 例）：图 → 文合成**一轮**且文字在首块、下载只发生在 flush 时、两图 + 一文（两个附件块）、文件同样合并、自带文字说明的图立即发送、语音不暂存、关闭时逐字回退为两轮、等待窗口到点单独发出（fake timers）、`mergeMaxMsgs` 上限、`mediaHoldMs` 被 `mergeForcedReleaseMs` 夹住、下载失败退化为「下载失败」文字且不丢批次、dispose 冲刷暂存、logout 丢弃且**不下载、不留临时文件**、`@` / 路径两种措辞（含「`@` 模式不内联文本内容 / 路径模式仍然内联」两条对照）、`/media` 解析矩阵与 19 个既有 parser 的别名冲突守卫、卡片 bypass / `LOCAL_COMMAND_NAMES` / `/help`、`/media on|off|at|path` 落盘、`/media off` 与设置页关闭都先冲刷、`/status` 两态、以及与打字合并共存的两种组合（开：`文 → 图 → 文` 一轮；关：图仍先冲刷文字）。

@@ -271,3 +271,50 @@ export interface SessionProjectionService {
 export interface AgentSessionLike {
   readonly seq: number;
 }
+
+/**
+ * One provider/model/effort selection as exposed by the host's
+ * `modelSelection` projection. Unlike {@link ModelSelection} in `ops.ts`
+ * every field is optional because the projection is read through an
+ * unknown-valued `Record<string, unknown>` and may be absent.
+ */
+export interface ModelSelectionView {
+  provider?: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
+/**
+ * Fold the host `modelSelection` projection value into a selection.
+ *
+ * DSH 0.2.1's session controller publishes
+ * `{ lastUsed, next }` (both nullable): `next` is the durable
+ * `model/selection` the following request should use, `lastUsed` is the
+ * selection consumed by the latest recorded request. This is the same
+ * pair the GUI model picker and `session.selectModel` operate on, so
+ * reading it keeps WeChat on the host-owned selection instead of
+ * inventing a second one. Returns `undefined` for absent/malformed
+ * values; callers fall back to the session request header, the agent
+ * options, or the deployment default.
+ */
+export function modelSelectionFromProjection(value: unknown): ModelSelectionView | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const projected = value as { next?: unknown; lastUsed?: unknown };
+  const pick = (candidate: unknown): ModelSelectionView | undefined => {
+    if (!candidate || typeof candidate !== "object") return undefined;
+    const entry = candidate as {
+      provider?: unknown;
+      model?: unknown;
+      reasoningEffort?: unknown;
+    };
+    if (typeof entry.provider !== "string" || typeof entry.model !== "string") return undefined;
+    return {
+      provider: entry.provider,
+      model: entry.model,
+      ...(typeof entry.reasoningEffort === "string"
+        ? { reasoningEffort: entry.reasoningEffort }
+        : {}),
+    };
+  };
+  return pick(projected.next) ?? pick(projected.lastUsed);
+}

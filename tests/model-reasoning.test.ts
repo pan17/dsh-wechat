@@ -59,6 +59,8 @@ function makeBridge(opts: {
   defaultModelSelection?: { provider: string; model: string; reasoningEffort?: string };
   /** Saved selections go here, in order. */
   savedSelections?: Array<{ provider: string; model: string; reasoningEffort?: string }>;
+  /** Extra Host services mounted for one test (e.g. sessionController). */
+  extraServices?: Record<string, unknown>;
 }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-mreason-"));
 
@@ -119,6 +121,7 @@ function makeBridge(opts: {
     agents: agentsService,
     llm: llmService,
     agentDefaultModel: agentDefaultModelService,
+    ...opts.extraServices,
   };
 
   const ctx = {
@@ -415,5 +418,111 @@ describe("applyModelOverride preserves caller's effort", () => {
       ): { provider: string; model: string; reasoningEffort?: string };
     }).applyModelOverride({ provider: "deepseek", model: "deepseek-chat", reasoningEffort: "high" }, "wx-s1");
     expect(out).toEqual({ provider: "openai", model: "gpt-4", reasoningEffort: "low" });
+  });
+});
+
+describe("host-owned model selection (GUI sync)", () => {
+  it("/model switch submits through sessionController and leaves no request override", async () => {
+    const selectModel = vi.fn().mockResolvedValue({
+      selected: { provider: "openai", model: "gpt-4" },
+    });
+    const { bridge, savedSelections } = makeBridge({
+      reasoning: EFFORTS_DS_CHAT,
+      extraServices: { sessionController: { selectModel } },
+    });
+
+    await (bridge as unknown as {
+      handleModelCommand(u: string, c: unknown): Promise<void>;
+    }).handleModelCommand("u1", { kind: "switch", target: "openai/gpt-4" });
+
+    expect(selectModel).toHaveBeenCalledWith({
+      sessionId: "wx-s1",
+      provider: "openai",
+      model: "gpt-4",
+    });
+    expect(
+      (bridge as unknown as { modelOverrides: Map<string, unknown> }).modelOverrides.has("wx-s1"),
+    ).toBe(false);
+    // The Host selection is the sole writer: the bridge must not double-save
+    // the same default (and should not report a false failure if it did not).
+    expect(savedSelections).toEqual([]);
+    expect(lastText()).toContain("已同步到 GUI");
+  });
+
+  it("/model switch reports a Host rejection instead of silently using the legacy override", async () => {
+    const selectModel = vi.fn().mockRejectedValue(new Error("session/model-unavailable: no key"));
+    const { bridge, savedSelections } = makeBridge({
+      reasoning: EFFORTS_DS_CHAT,
+      extraServices: { sessionController: { selectModel } },
+    });
+
+    await (bridge as unknown as {
+      handleModelCommand(u: string, c: unknown): Promise<void>;
+    }).handleModelCommand("u1", { kind: "switch", target: "openai/gpt-4" });
+
+    expect(selectModel).toHaveBeenCalled();
+    expect(
+      (bridge as unknown as { modelOverrides: Map<string, unknown> }).modelOverrides.has("wx-s1"),
+    ).toBe(false);
+    expect(savedSelections).toEqual([]);
+    expect(lastText()).toContain("无法切换模型");
+  });
+
+  it("/reasoning switch submits the effort through the same Host selection", async () => {
+    const selectModel = vi.fn().mockResolvedValue({
+      selected: { provider: "deepseek", model: "deepseek-chat", reasoningEffort: "high" },
+    });
+    const { bridge, savedSelections } = makeBridge({
+      reasoning: EFFORTS_DS_CHAT,
+      extraServices: { sessionController: { selectModel } },
+    });
+
+    await (bridge as unknown as {
+      handleReasoningCommand(u: string, c: unknown): Promise<void>;
+    }).handleReasoningCommand("u1", { kind: "switch", target: "high" });
+
+    expect(selectModel).toHaveBeenCalledWith({
+      sessionId: "wx-s1",
+      provider: "deepseek",
+      model: "deepseek-chat",
+      reasoningEffort: "high",
+    });
+    expect(
+      (bridge as unknown as { modelOverrides: Map<string, unknown> }).modelOverrides.has("wx-s1"),
+    ).toBe(false);
+    expect(savedSelections).toEqual([]);
+  });
+
+  it("resolveEffectiveModel prefers the durable modelSelection projection over a stale request header", () => {
+    const { bridge } = makeBridge({
+      reasoning: EFFORTS_DS_CHAT,
+      extraServices: {
+        sessionProjections: {
+          snapshot: () => ({
+            asOfSeq: 12,
+            values: {
+              modelSelection: {
+                lastUsed: { provider: "deepseek", model: "deepseek-chat" },
+                next: { provider: "openai", model: "gpt-4", reasoningEffort: "high" },
+              },
+            },
+          }),
+        },
+      },
+    });
+    const agent = {
+      ...mockAgent,
+      session: {
+        seq: 12,
+        requestHeader: () => ({ config: { provider: "deepseek", model: "deepseek-chat" } }),
+      },
+    };
+    const resolved = (bridge as unknown as {
+      resolveEffectiveModel(u: unknown, a: unknown): { provider?: string; model?: string; reasoningEffort?: string } | undefined;
+    }).resolveEffectiveModel(
+      (bridge as unknown as { state: { ensureUser: (id: string, cwd: string) => unknown } }).state.ensureUser("u1", "C:\\work"),
+      agent,
+    );
+    expect(resolved).toEqual({ provider: "openai", model: "gpt-4", reasoningEffort: "high" });
   });
 });
