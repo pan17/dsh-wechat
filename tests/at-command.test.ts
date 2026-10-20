@@ -470,10 +470,21 @@ describe("/at mention rendering", () => {
   // relative to the working directory and `/at f` answers 找不到 for a file the
   // user is looking at.
   it("strips invisible formatting marks that break absolute-path detection", () => {
-    expect(path.isAbsolute("\u202aC:\\Users\\me\\a.txt")).toBe(false);
-    const cleaned = normalizeAtTarget("\u202aC:\\Users\\me\\a.txt");
-    expect(cleaned).toBe("C:\\Users\\me\\a.txt");
-    expect(path.isAbsolute(cleaned)).toBe(true);
+    // The reported shape: a `C:\…` path copied out of Explorer. The mark is
+    // what makes it look relative — but only on Windows, where that string IS
+    // an absolute path; on POSIX it is a legal relative filename either way, so
+    // the absolute-ness assertion below is platform-gated rather than dropped.
+    const winPath = "C:\\Users\\me\\a.txt";
+    expect(normalizeAtTarget(`\u202a${winPath}`)).toBe(winPath);
+    if (process.platform === "win32") {
+      expect(path.isAbsolute(`\u202a${winPath}`)).toBe(false);
+      expect(path.isAbsolute(normalizeAtTarget(`\u202a${winPath}`))).toBe(true);
+    }
+    // Same property on a path that is absolute on THIS platform, so the rule is
+    // covered by CI (Linux) too and not only on a Windows dev box.
+    const native = process.platform === "win32" ? winPath : "/tmp/a.txt";
+    expect(path.isAbsolute(`\u202a${native}`)).toBe(false);
+    expect(path.isAbsolute(normalizeAtTarget(`\u202a${native}`))).toBe(true);
     // Marks inside a path are part of a real filename and are preserved.
     expect(normalizeAtTarget("a\u202ab.txt")).toBe("a\u202ab.txt");
     // A trailing zero-width space is dropped too.
@@ -720,10 +731,16 @@ describe("/at file references", () => {
     expect(lastReply()).toContain("test.txt");
   });
 
-  it("refuses a traversal escape", async () => {
+  it("refuses a traversal target that does not exist", async () => {
+    // `/at f` deliberately ALLOWS paths outside the workspace (a reference is a
+    // pointer, not a read), so climbing out is not itself an error — a target
+    // that resolves to nothing is. `../../etc/passwd` cannot test that: on
+    // POSIX it EXISTS, so the command correctly stages it, while on Windows the
+    // same string is a legal relative path that resolves nowhere. Name a target
+    // that exists on neither platform.
     const { bridge } = makeBridge();
     const inbound = asInbound(bridge);
-    await inbound.handleMessage(text("/at f ../../etc/passwd"));
+    await inbound.handleMessage(text("/at f ../../../../../../../../nonexistent-escape-probe.txt"));
     expect(lastReply()).toContain("找不到");
   });
 
