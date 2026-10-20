@@ -272,6 +272,56 @@ export interface SettingsService {
   update(ns: SettingsNamespace, patch: object): Promise<void>;
 }
 
+/** One session-reference discovery candidate (dsh-session-reference). */
+export interface SessionReferenceCandidate {
+  readonly sessionId: string;
+  /** Mention label: the session's latest title, or its id when untitled. */
+  readonly label: string;
+  /** Presentation title (a subagent's durable creation label wins). */
+  readonly displayTitle?: string;
+  readonly cwd?: string;
+  /** True when the candidate shares the requesting agent's working directory. */
+  readonly sameWorkspace?: boolean;
+  readonly createdAt?: number;
+}
+
+/**
+ * Minimal structural surface of `ctx.sessionReferenceResolver`
+ * (`@deepseek-ai/dsh-session-reference`). Only discovery is consumed:
+ * preparation is the HOST's job at `agent/pre-step`, driven purely by the
+ * canonical mention the bridge stages in the message text. `prepare` is
+ * deliberately not called — invoking it out of band would prepare a snapshot
+ * the host never attaches to a message.
+ */
+export interface SessionReferenceResolverService {
+  listCandidates(
+    agent: Agent,
+    query?: string,
+    limit?: number,
+    signal?: AbortSignal,
+  ): Promise<readonly SessionReferenceCandidate[]>;
+}
+
+/** One file-reference candidate (`ctx.fileReferences.list`). */
+export interface FileReferenceCandidate {
+  /** Workspace-relative path; directories carry no trailing slash here. */
+  readonly path: string;
+  readonly kind: "file" | "directory";
+}
+
+/**
+ * Minimal structural surface of `ctx.fileReferences`
+ * (`@deepseek-ai/dsh-file-reference`). Used by `/at f` only to suggest
+ * near-matches for a path that does not exist.
+ */
+export interface FileReferencesService {
+  list(
+    agent: Agent,
+    query: string,
+    signal: AbortSignal,
+  ): Promise<readonly FileReferenceCandidate[]>;
+}
+
 /** Approximate context occupancy (dsh-token-meter `contextPressure` projection). */
 export interface ContextPressureProjection {
   /** Provider-reported prompt tokens of the most recent request. */
@@ -1020,6 +1070,37 @@ export class DshOps {
       console.error(`[dsh-wechat] save busyEnter failed: ${String(err)}`);
       return false;
     }
+  }
+
+  // ─── References (`/at`) ───
+
+  /**
+   * The `ctx.sessionReferenceResolver` service (`@deepseek-ai/dsh-session-
+   * reference`), or `undefined` when the host does not compose it.
+   *
+   * `/at s` needs two things from it: `listCandidates` for discovery and —
+   * more importantly — the guarantee that the mention this bridge stages will
+   * be accepted at `agent/pre-step`. The service is the ONLY consumer of
+   * `dsh-session:` mentions, so its absence means a staged session mention
+   * would be forwarded as literal text and never expanded: the caller must
+   * refuse instead of silently degrading.
+   */
+  sessionReferenceResolver(): SessionReferenceResolverService | undefined {
+    return this.get<SessionReferenceResolverService>("sessionReferenceResolver");
+  }
+
+  /**
+   * The `ctx.fileReferences` discovery seam
+   * (`@deepseek-ai/dsh-file-reference`), or `undefined` when uncomposed.
+   *
+   * `/at f` does not NEED it (a path is valid prompt text on its own — the
+   * provider's job is the model-facing prompt section, which is installed by
+   * whoever mounts the provider). It is used only to suggest near-matches
+   * when the typed path does not exist, so its absence degrades the hint,
+   * never the command.
+   */
+  fileReferences(): FileReferencesService | undefined {
+    return this.get<FileReferencesService>("fileReferences");
   }
 
   // ─── Helpers for cross-session notification recipients ───

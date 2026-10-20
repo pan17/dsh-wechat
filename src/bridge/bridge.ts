@@ -37,7 +37,7 @@ import { formatQuestionForWeChat, parseQuestionReply, buildAnswer } from "../ada
 import { formatApprovalCard, parseApprovalReply } from "../adapter/approval-format.js";
 import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
-import type { ModelSelection, PinOutcome, SessionRecord } from "../dsh/ops.js";
+import type { ModelSelection, PinOutcome, SessionHeader, SessionRecord } from "../dsh/ops.js";
 import type { Agent, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
 import { sessionEvents } from "../dsh/types.js";
 import {
@@ -55,8 +55,10 @@ import { AuditLog } from "../utils/audit.js";
 import {
   detectUnknownSlashCommand,
   formatHelp,
+  isAtCommandAttempt,
   isBypassSlashCommand,
   isHistoryCommandAttempt,
+  parseAtCommand,
   parseCommandName,
   parseHelpCommand,
   parseHistoryCommand,
@@ -85,6 +87,7 @@ import {
   HISTORY_MAX,
   LIST_DEFAULT,
   LOCAL_COMMAND_NAMES,
+  type AtCommand,
   type EnterCommand,
   type FinalCommand,
   type HistoryCommand,
@@ -98,6 +101,14 @@ import {
   type SessionCommand,
   type WorkspaceCommand,
 } from "./slash.js";
+import {
+  buildMentionBlock,
+  formatFileMention,
+  formatSessionMention,
+  hasInvisibleMarks,
+  normalizeAtTarget,
+  type StagedReference,
+} from "./at-refs.js";
 
 /** WeChat gateway continuous-message limit per user interaction window. */
 const MSG_LIMIT_MAX = 10;
@@ -179,6 +190,58 @@ export interface LoginState {
 
 /** Closed approval outcomes the Host waterfall accepts. */
 export type ApprovalOutcome = "allowed-once" | "rejected" | "cancelled" | "unavailable";
+
+/**
+ * `/at` references staged for the next message.
+ *
+ * Kept as two ordered lists rather than one mixed list so the numbering `/at`
+ * prints (sessions first, then files) is stable while either kind is added or
+ * removed, and so the two host-side limits stay independent: the session limit
+ * mirrors `MAX_REFERENCES` in `@deepseek-ai/dsh-session-reference` (a message
+ * citing four sessions is REJECTED there and fails the whole turn), while the
+ * file limit is this bridge's own readability bound.
+ */
+interface PendingRefsState {
+  sessions: StagedSessionRef[];
+  files: StagedFileRef[];
+  /** Last staging/removal time — the TTL is measured from here. */
+  at: number;
+}
+
+/** One staged session reference: the id it names plus its prompt mention. */
+interface StagedSessionRef {
+  sessionId: string;
+  /** Display title used in `/at` and in the mention's label. */
+  label: string;
+  /** `@[label](dsh-session:…)` — the exact token the host parses. */
+  mention: string;
+}
+
+/** One staged file reference: workspace-relative (or absolute) path + mention. */
+interface StagedFileRef {
+  /** Path as shown to the user and sent to the model. */
+  path: string;
+  kind: "file" | "directory";
+  /** `@path` or `@"path with spaces"`. */
+  mention: string;
+}
+
+/**
+ * Maximum sessions staged at once. `@deepseek-ai/dsh-session-reference`
+ * accepts at most `MAX_REFERENCES = 3` per message and THROWS
+ * `SESSION_REFERENCE_TOO_MANY` otherwise — which aborts the agent turn — so
+ * the bridge refuses the fourth reference at `/at` time, where the user can
+ * still act on it.
+ */
+const AT_SESSION_LIMIT = 3;
+/** Maximum files staged at once (readability bound, not a host contract). */
+const AT_FILE_LIMIT = 8;
+/**
+ * How long staged references survive without a message. Long enough for a
+ * user to look something up and type a paragraph, short enough that an
+ * abandoned `/at` cannot ambush an unrelated message an hour later.
+ */
+const AT_TTL_MS = 10 * 60_000;
 
 /**
  * Host `approval/request` waterfall payload (structural). `agent.id` is the
@@ -573,6 +636,14 @@ export class WeChatDSHBridge {
     cwd: string;
     sessionIds: string[];
   }>();
+  /**
+   * `/at` references staged for the NEXT message, per WeChat user (one peer in
+   * practice). In-memory only: a reference is a one-shot intent, and after a
+   * restart the user's next sentence is very likely about something else, so
+   * resurrecting a stale mention would silently attach unrelated context to a
+   * new turn. `/at clear` and a TTL both drop it; delivery consumes it.
+   */
+  private readonly pendingRefs = new Map<string, PendingRefsState>();
   /**
    * Per-session message-source tracking for the dynamic WeChat surface
    * prompt: the most recent user-message origin per session ("wechat" when
@@ -1389,6 +1460,7 @@ export class WeChatDSHBridge {
     // Identity change: a half-typed batch belongs to the peer we no longer
     // serve and must never be handed to whoever binds next.
     this.dropMergedText();
+    this.dropAllPendingRefs();
     this.discardPendingFinal();
     try {
       this.state.clearUsers();
@@ -1422,6 +1494,7 @@ export class WeChatDSHBridge {
     this.wechatMsgCount = 0;
     this.silentBuffers.clear();
     this.dropMergedText();
+    this.dropAllPendingRefs();
     this.discardPendingFinal();
     this.persistOutboundState();
     if (parked > 0) {
@@ -1892,6 +1965,21 @@ export class WeChatDSHBridge {
         await this.handleHistoryCommand(userId, historyCmd, user);
         return;
       }
+      // `/at` is matched on the ATTEMPT: a mistyped subcommand gets usage
+      // instead of being forwarded to the agent as prose (which would look
+      // like the user asking the model to parse their command).
+      const atCmd = parseAtCommand(text);
+      if (atCmd) {
+        await this.handleAtCommand(userId, atCmd);
+        return;
+      }
+      if (isAtCommandAttempt(text)) {
+        await this.sendReply(
+          userId,
+          "⚠️ 用法: /at [s <编号|关键词> | f <路径> | rm <编号> | clear]\n发送 /at 查看已暂存的引用。",
+        );
+        return;
+      }
       // Invalid /history attempt (e.g. /history abc) — show usage instead of forwarding.
       if (isHistoryCommandAttempt(text)) {
         await this.sendReply(
@@ -1938,6 +2026,26 @@ export class WeChatDSHBridge {
     const tempDir = path.join(this.config.storageDir, "tempfile");
     const blocks = await weixinMessageToPrompt(msg, this.config.cdnBaseUrl, (m) => this.log(m), tempDir);
     if (this.interactionStopped) return;
+    // `/at` references staged by the user ride THIS message, APPENDED after
+    // the user's own words.
+    //
+    // Order is deliberate. The host derives a session title from the first
+    // eligible user message (`dsh-session-title` joins every text block of
+    // that message), so a leading `@[标题](dsh-session:InNlc3N…)` would become
+    // the title of a brand-new session — and the deterministic fallback takes
+    // the message's LEADING words, which would be the base64 payload. Trailing
+    // placement keeps the user's own sentence first, which is also how the
+    // mention reads: "总结一下这个会话 @Alpha". Mention parsing is position-
+    // independent on the host side, so nothing depends on the block being
+    // first.
+    //
+    // Consumed only after `followup`/`steer` actually accepted the message:
+    // a failed agent ensure returns above, and losing the staged references
+    // there would make the user re-issue `/at` for a failure that was not
+    // their fault.
+    const staged = this.pendingRefsFor(user.userId);
+    const mentionBlock = staged ? buildMentionBlock(stagedRefList(staged)) : undefined;
+    if (mentionBlock) blocks.push({ type: "text", text: mentionBlock });
     this.markSessionSource(user.sessionId, "wechat");
     // Busy-time delivery follows the DSH `ui-conversation.busyEnter` setting
     // (the GUI's 「繁忙时 Enter 键行为」 row): while the agent is running,
@@ -1949,6 +2057,7 @@ export class WeChatDSHBridge {
     // AgentLoop, so neither mode can lose the message.
     const mode = agent.status === "running" ? this.ops.busyEnter() : "queue";
     this.agents.followup(agent, blocks, mode, (id) => this.markWechatMessage(id));
+    if (staged) this.dropPendingRefs(user.userId);
   }
 
   // ─── Inbound merge window (F1, 打字合并) ───
@@ -4815,6 +4924,585 @@ export class WeChatDSHBridge {
     }
   }
 
+  // ─── References (`/at`) ───────────────────────────────────────────────────
+
+  /**
+   * `/at` — stage a session or file reference for the NEXT message.
+   *
+   * WeChat has no composer, so the GUI's `@` completion is replaced by an
+   * explicit staging step: `/at` records the reference, replies with what is
+   * staged, and `forwardToAgent` prepends the mentions to the next delivered
+   * message. Every rejection below happens BEFORE anything is sent, because
+   * the host's `agent/pre-step` treats a bad mention as fatal for the turn:
+   *
+   *   - a self-reference throws `SESSION_REFERENCE_SELF_REFERENCE`;
+   *   - a fourth session throws `SESSION_REFERENCE_TOO_MANY`;
+   *   - an unreadable target throws `SESSION_REFERENCE_READ_FAILED`.
+   *
+   * Failing at `/at` time costs one reply; failing at send time costs the
+   * user's whole prompt.
+   */
+  private async handleAtCommand(userId: string, cmd: AtCommand): Promise<void> {
+    const user = this.ensureBoundUser(userId);
+    switch (cmd.kind) {
+      case "list":
+        await this.sendReply(userId, this.formatStagedRefs(userId));
+        return;
+      case "clear": {
+        const removed = this.clearPendingRefs(userId);
+        await this.sendReply(
+          userId,
+          removed > 0 ? `🧹 已清空 ${removed} 条引用暂存。` : "📭 当前没有暂存的引用。",
+        );
+        return;
+      }
+      case "remove": {
+        const outcome = this.removePendingRef(userId, cmd.index);
+        await this.sendReply(userId, outcome);
+        return;
+      }
+      case "session":
+        await this.stageSessionRef(userId, user, cmd.target);
+        return;
+      case "file":
+        await this.stageFileRef(userId, user, cmd.target);
+        return;
+    }
+  }
+
+  /** `/at s …` — resolve, validate, and stage one session reference. */
+  private async stageSessionRef(userId: string, user: UserState, target: string): Promise<void> {
+    if (!target) {
+      await this.sendReply(userId, "⚠️ 用法: /at s <编号|关键词>（编号来自 /s list）");
+      return;
+    }
+    // The mention is only meaningful if the host service that expands it is
+    // composed; without it the token would be forwarded as literal text and
+    // the model would see a base64 blob instead of a conversation snapshot.
+    if (!this.ops.sessionReferenceResolver()) {
+      await this.sendReply(
+        userId,
+        "⚠️ 当前 DSH 未挂载会话引用服务（dsh-session-reference），无法引用会话。可以改用 /at f 引用文件。",
+      );
+      return;
+    }
+
+    const state = this.pendingRefsFor(userId);
+    if (state && state.sessions.length >= AT_SESSION_LIMIT) {
+      await this.sendReply(
+        userId,
+        `⚠️ 已暂存 ${AT_SESSION_LIMIT} 个会话引用（宿主单条消息最多 ${AT_SESSION_LIMIT} 个）。`
+        + "先发消息带上它们，或 /at rm <编号> 移除一个。",
+      );
+      return;
+    }
+
+    const resolved = await this.resolveAtSessionTarget(user, target);
+    if (resolved.kind === "error") {
+      await this.sendReply(userId, resolved.message);
+      return;
+    }
+    const sessionId = resolved.sessionId;
+    if (user.sessionId && sessionId === user.sessionId) {
+      await this.sendReply(
+        userId,
+        "⚠️ 不能引用当前会话自己（宿主会以「不能引用自身」终止整轮）。切换会话后引用其它会话。",
+      );
+      return;
+    }
+    if (state?.sessions.some((s) => s.sessionId === sessionId)) {
+      await this.sendReply(
+        userId,
+        `ℹ️ 已暂存该会话引用: ${await this.formatSessionLabel(sessionId, resolved.cwd)}`,
+      );
+      return;
+    }
+
+    // The host's candidate label is already the display title; the local path
+    // carries none, so read it once. Either way the id is the fallback so the
+    // mention is never labelled with an empty string.
+    const title = resolved.label
+      ?? (await this.ops.readSessionTitle(sessionId, resolved.cwd, resolved.header))
+      ?? sessionId.slice(0, 12);
+    const label = cleanSessionTitle(title) || sessionId.slice(0, 12);
+    const mention = formatSessionMention(label, sessionId);
+    const staged = this.stageRef(userId, (current) => {
+      current.sessions.push({ sessionId, label, mention });
+    });
+    if (!staged) {
+      await this.sendReply(userId, `⚠️ 已暂存 ${AT_SESSION_LIMIT} 个会话引用，无法再加入。`);
+      return;
+    }
+    const count = this.pendingRefsFor(userId)?.sessions.length ?? 1;
+    this.audit.record({ event: "at-ref", user: maskUserId(userId), kind: "session" });
+    await this.sendReply(
+      userId,
+      `✅ 已引用会话「${label}」（${sessionId.slice(0, 12)}）· ${count}/${AT_SESSION_LIMIT}`
+      + "\n下一条消息会带上它，发送后自动清空。",
+    );
+  }
+
+  /**
+   * Resolve `/at s <target>` to one session id plus its display label.
+   *
+   * A NUMBER resolves through the SAME rows `/s switch` uses (the latest
+   * `/s list` snapshot first), so a number the user just read always addresses
+   * the row they saw.
+   *
+   * A KEYWORD goes through the host's own `listCandidates` when a live agent
+   * exists: it ranks by working-directory affinity and reads titles from
+   * projections only, so one `/at s 报告` costs no log folds. The local
+   * fallback (filter `/s list` rows by title/cwd/id) covers the case where no
+   * agent is live yet, and is deliberately the SAME field set the host
+   * filters on, so the two paths agree.
+   *
+   * Ambiguity is reported as a list, never guessed: with the host path the
+   * rows are not `/s list` numbers, so the hint points at the label instead of
+   * a number that would address a different session.
+   */
+  private async resolveAtSessionTarget(
+    user: UserState,
+    target: string,
+  ): Promise<
+    | {
+        kind: "ok";
+        sessionId: string;
+        label?: string;
+        cwd?: string;
+        /** The row's header when the id came from `/s list` (title-cache lookup). */
+        header?: SessionHeader;
+      }
+    | { kind: "error"; message: string }
+  > {
+    if (/^\d+$/.test(target)) {
+      const rows = (await this.sessionsFromLastList(user)) ?? await this.listRecentSessions(user);
+      if (rows.length === 0) {
+        return { kind: "error", message: "⚠️ 暂无可引用的会话（发送消息即可创建第一个会话）。" };
+      }
+      const index = parseInt(target, 10);
+      if (!Number.isFinite(index) || index < 1 || index > rows.length) {
+        return {
+          kind: "error",
+          message: `⚠️ 编号超出范围（1-${rows.length}）。发送 /s list 查看编号。`,
+        };
+      }
+      const record = rows[index - 1]!;
+      return {
+        kind: "ok",
+        sessionId: record.header.id,
+        header: record.header,
+        ...(record.header.cwd ? { cwd: record.header.cwd } : {}),
+      };
+    }
+
+    const viaHost = await this.hostAtCandidates(user, target);
+    if (viaHost) {
+      if (viaHost.length === 0) {
+        return {
+          kind: "error",
+          message: `⚠️ 没有会话匹配「${target}」。用 /s list 查看编号后用 /at s <编号>。`,
+        };
+      }
+      if (viaHost.length === 1) {
+        return {
+          kind: "ok",
+          sessionId: viaHost[0]!.sessionId,
+          label: viaHost[0]!.label,
+          ...(viaHost[0]!.cwd ? { cwd: viaHost[0]!.cwd } : {}),
+        };
+      }
+      return { kind: "error", message: this.describeAmbiguousAtSessions(viaHost, "再输入更精确的关键词，或 /s list 后用 /at s <编号>") };
+    }
+
+    const rows = await this.listRecentSessions(user);
+    if (rows.length === 0) {
+      return { kind: "error", message: "⚠️ 暂无可引用的会话（发送消息即可创建第一个会话）。" };
+    }
+    const hits = await this.matchAtSessionRows(rows, target);
+    if (hits.length === 0) {
+      return {
+        kind: "error",
+        message: `⚠️ 没有会话匹配「${target}」。用 /s list 查看编号后用 /at s <编号>。`,
+      };
+    }
+    if (hits.length > 1) {
+      const numbered = hits.map((hit) => ({
+        sessionId: hit.header.id,
+        label: cleanSessionTitle(hit.title ?? hit.header.id.slice(0, 12)),
+        cwd: hit.header.cwd,
+        index: rows.indexOf(hit) + 1,
+      }));
+      return { kind: "error", message: this.describeAmbiguousAtSessions(numbered, "例如 /at s 1") };
+    }
+    const hit = hits[0]!;
+    return {
+      kind: "ok",
+      sessionId: hit.header.id,
+      label: hit.title,
+      ...(hit.header.cwd ? { cwd: hit.header.cwd } : {}),
+    };
+  }
+
+  /**
+   * Keyword discovery through `ctx.sessionReferenceResolver`, or `undefined`
+   * when the host cannot answer (no service, no live agent, or the call threw)
+   * so the caller falls back to the local row scan.
+   */
+  private async hostAtCandidates(
+    user: UserState,
+    target: string,
+  ): Promise<Array<{ sessionId: string; label: string; cwd?: string }> | undefined> {
+    const resolver = this.ops.sessionReferenceResolver();
+    const agent = this.agents.get(user);
+    if (!resolver || !agent) return undefined;
+    try {
+      const candidates = await resolver.listCandidates(agent, target, 10);
+      return candidates.map((candidate) => ({
+        sessionId: candidate.sessionId,
+        label: candidate.displayTitle ?? candidate.label,
+        ...(candidate.cwd ? { cwd: candidate.cwd } : {}),
+      }));
+    } catch (err) {
+      this.log(`/at s candidate lookup failed: ${String(err)}`);
+      return undefined;
+    }
+  }
+
+  /** `/s list` rows whose title, cwd, or id contains `target` (case-insensitive). */
+  private async matchAtSessionRows(
+    rows: SessionRecord[],
+    target: string,
+  ): Promise<Array<SessionRecord & { title?: string }>> {
+    const needle = target.toLocaleLowerCase();
+    const facts = await Promise.all(
+      rows.map((record) => this.ops.readSessionTitle(record.header.id, record.header.cwd, record.header)),
+    );
+    const hits: Array<SessionRecord & { title?: string }> = [];
+    rows.forEach((record, i) => {
+      const title = facts[i];
+      const matches = record.header.id.toLocaleLowerCase().includes(needle)
+        || (record.header.cwd ?? "").toLocaleLowerCase().includes(needle)
+        || (title ?? "").toLocaleLowerCase().includes(needle);
+      if (matches) hits.push({ ...record, ...(title ? { title } : {}) });
+    });
+    return hits;
+  }
+
+  /** Numbered ambiguity reply (one line per candidate, capped). */
+  private describeAmbiguousAtSessions(
+    hits: ReadonlyArray<{ sessionId: string; label: string; cwd?: string; index?: number }>,
+    hint: string,
+  ): string {
+    const lines = ["⚠️ 匹配到多个会话，请指定："];
+    for (const hit of hits.slice(0, 10)) {
+      const prefix = hit.index === undefined ? "•" : `${hit.index}.`;
+      lines.push(`${prefix} ${cleanSessionTitle(hit.label)} — ${hit.cwd ?? "?"}`);
+    }
+    lines.push("", hint);
+    return lines.join("\n");
+  }
+
+  /** `/at f …` — resolve, validate, and stage one file/directory reference. */
+  private async stageFileRef(userId: string, user: UserState, rawTarget: string): Promise<void> {
+    const target = normalizeAtTarget(rawTarget);
+    if (!target) {
+      await this.sendReply(
+        userId,
+        '⚠️ 用法: /at f <路径>（相对当前工作区，或绝对路径；含空格用 /at f "a b.txt"）',
+      );
+      return;
+    }
+    const state = this.pendingRefsFor(userId);
+    if (state && state.files.length >= AT_FILE_LIMIT) {
+      await this.sendReply(
+        userId,
+        `⚠️ 已暂存 ${AT_FILE_LIMIT} 个文件引用。先发消息带上它们，或 /at rm <编号> 移除一个。`,
+      );
+      return;
+    }
+
+    const absolute = await canonicalPath(path.isAbsolute(target) ? target : path.resolve(user.cwd, target));
+    let kind: "file" | "directory";
+    try {
+      const stat = await fs.promises.stat(absolute);
+      kind = stat.isDirectory() ? "directory" : "file";
+    } catch {
+      await this.sendReply(userId, await this.describeMissingAtPath(user, target));
+      return;
+    }
+
+    // Deliberately NOT bounded to the working directory. `@文件` is a pointer,
+    // not a read: the host's own `FILE_REFERENCE_PROMPT` tells the model
+    // "absolute paths identify files or directories on the host", and the
+    // agent's sandbox policy — not this bridge — is what decides whether it can
+    // open the file. Refusing a Desktop path here would break the single most
+    // common use ("read this file I just saved"), unlike `send_wechat`, where
+    // the bridge itself reads the bytes and the boundary protects real content.
+    const display = await this.relativeRefPath(user.cwd, absolute);
+    const mention = formatFileMention({ path: display, kind });
+    if (!mention) {
+      await this.sendReply(
+        userId,
+        "⚠️ 该路径含引号或控制字符，无法安全写成 @引用（会截断成普通文本）。请重命名后再试。",
+      );
+      return;
+    }
+    if (state?.files.some((f) => f.path === display)) {
+      await this.sendReply(userId, `ℹ️ 已暂存该文件引用: ${mention}`);
+      return;
+    }
+
+    const staged = this.stageRef(userId, (current) => {
+      current.files.push({ path: display, kind, mention });
+    });
+    if (!staged) {
+      await this.sendReply(userId, `⚠️ 已暂存 ${AT_FILE_LIMIT} 个文件引用，无法再加入。`);
+      return;
+    }
+    const count = this.pendingRefsFor(userId)?.files.length ?? 1;
+    this.audit.record({ event: "at-ref", user: maskUserId(userId), kind: "file" });
+    await this.sendReply(
+      userId,
+      `✅ 已引用${kind === "directory" ? "目录" : "文件"} ${mention} · ${count}/${AT_FILE_LIMIT}`
+      + "\n下一条消息会带上它，发送后自动清空。",
+    );
+  }
+
+  /**
+   * Why a path could not be resolved, with the nearest candidates when they
+   * can be found.
+   *
+   * Two sources, in this order, because each covers what the other cannot:
+   *
+   *   1. the host's `ctx.fileReferences` provider, when a LIVE agent exists —
+   *      it ranks over the whole indexed workspace, which is exactly the
+   *      "fuzzy basename" query a mistyped path is;
+   *   2. a local listing of the parent directory otherwise. `/at f` is often
+   *      the very first thing a user sends, and no agent exists yet at that
+   *      point (`agents.get` needs a bound session), so depending on the
+   *      provider alone would answer the most common case with no help at all.
+   *
+   * Both are advisory: a miss ends with the resolution rule, never a silent
+   * no-op.
+   */
+  private async describeMissingAtPath(user: UserState, target: string): Promise<string> {
+    const lines = [`⚠️ 找不到: ${target}`];
+    // A path that carried invisible marks is worth naming: the user sees a
+    // correct-looking path in WeChat, so "not found" alone reads as a bug.
+    if (hasInvisibleMarks(target)) {
+      lines.push("（该路径含不可见格式字符，如复制路径时带上的 U+202A；请在微信里重新手打，或先粘贴到记事本再复制）");
+    }
+    const suggestions = await this.suggestAtPathCandidates(user, target);
+    if (suggestions.length > 0) {
+      lines.push("", "相近的候选：");
+      for (const suggestion of suggestions) lines.push(`• ${suggestion}`);
+    }
+    lines.push(
+      "",
+      "相对路径从当前工作区解析，例如 /at f src/index.ts",
+      `绝对路径可直接用，例如 /at f C:\\Users\\me\\Desktop\\a.txt（当前工作区: ${user.cwd}）`,
+    );
+    return lines.join("\n");
+  }
+
+  /** Up to five near-match spellings for a path that does not exist. */
+  private async suggestAtPathCandidates(user: UserState, target: string): Promise<string[]> {
+    const agent = this.agents.get(user);
+    const files = this.ops.fileReferences();
+    if (files && agent) {
+      try {
+        const abort = new AbortController();
+        const candidates = await files.list(agent, target, abort.signal);
+        const rendered = candidates
+          .slice(0, 5)
+          .map((candidate) => formatFileMention({ path: candidate.path, kind: candidate.kind }))
+          .filter((mention): mention is string => mention !== undefined);
+        if (rendered.length > 0) return rendered;
+      } catch (err) {
+        this.log(`/at f candidate lookup failed: ${String(err)}`);
+      }
+    }
+    return this.localAtPathCandidates(user, target);
+  }
+
+  /**
+   * Parent-directory listing fallback: the entries of the directory the target
+   * names (or the target's own parent), filtered by the last path segment.
+   *
+   * Advisory only, and deliberately bounded by a small cap. It lists whatever
+   * directory the caller named — the same place `/at f` itself resolves — since
+   * a suggestion for a mistyped absolute path is only useful if it can name the
+   * directory the user actually meant.
+   */
+  private async localAtPathCandidates(user: UserState, target: string): Promise<string[]> {
+    const absolute = path.isAbsolute(target) ? target : path.resolve(user.cwd, target);
+    const fragment = path.basename(absolute).toLocaleLowerCase();
+    let directory = path.dirname(absolute);
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    } catch {
+      // The parent itself may be what is mistyped; retry one level up.
+      directory = path.dirname(directory);
+      try {
+        entries = await fs.promises.readdir(directory, { withFileTypes: true });
+      } catch {
+        return [];
+      }
+    }
+    const matches = entries
+      .filter((entry) => fragment === "" || entry.name.toLocaleLowerCase().includes(fragment))
+      .slice(0, 5);
+    if (matches.length === 0) return [];
+    const out: string[] = [];
+    for (const entry of matches) {
+      const display = await this.relativeRefPath(user.cwd, path.join(directory, entry.name));
+      const mention = formatFileMention({
+        path: display,
+        kind: entry.isDirectory() ? "directory" : "file",
+      });
+      if (mention) out.push(mention);
+    }
+    return out;
+  }
+
+  /**
+   * The path spelling sent to the model: relative to the working directory
+   * when the target lives under it (short, portable, and what the GUI inserts),
+   * otherwise the absolute path (which `FILE_REFERENCE_PROMPT` explicitly
+   * allows). Always `/`-separated so a mention never depends on the host OS.
+   */
+  private async relativeRefPath(cwd: string, absolute: string): Promise<string> {
+    const canonical = await this.canonicalizePaths([cwd]);
+    const root = canonical.get(cwd) ?? path.resolve(cwd);
+    if (!isPathInside(root, absolute)) return absolute.split(path.sep).join("/");
+    const rel = path.relative(root, absolute);
+    return rel === "" ? "." : rel.split(path.sep).join("/");
+  }
+
+  /**
+   * Read a user's staged references, lazily dropping an expired or empty set.
+   *
+   * The returned object IS the map entry (callers mutate it in place for
+   * `/at rm`); nothing outside this file holds a reference across an await.
+   */
+  private pendingRefsFor(userId: string): PendingRefsState | undefined {
+    const state = this.pendingRefs.get(userId);
+    if (!state) return undefined;
+    if (Date.now() - state.at > AT_TTL_MS) {
+      this.pendingRefs.delete(userId);
+      this.log(`/at: dropped expired staged references for ${maskUserId(userId)}`);
+      return undefined;
+    }
+    if (state.sessions.length === 0 && state.files.length === 0) {
+      this.pendingRefs.delete(userId);
+      return undefined;
+    }
+    return state;
+  }
+
+  /**
+   * Stage one reference, enforcing both limits on the post-mutation state.
+   *
+   * Reads through {@link pendingRefsFor} rather than the raw map: an EXPIRED
+   * set must be dropped, not revived. Pushing into the stale entry would
+   * silently re-attach references the user staged twenty minutes ago to the
+   * new one.
+   */
+  private stageRef(userId: string, mutate: (state: PendingRefsState) => void): boolean {
+    const current = this.pendingRefsFor(userId) ?? { sessions: [], files: [], at: Date.now() };
+    const next: PendingRefsState = {
+      sessions: [...current.sessions],
+      files: [...current.files],
+      at: Date.now(),
+    };
+    mutate(next);
+    if (next.sessions.length > AT_SESSION_LIMIT || next.files.length > AT_FILE_LIMIT) return false;
+    this.pendingRefs.set(userId, next);
+    return true;
+  }
+
+  /** `/at rm <n>` — drop the reference at the same position `/at` printed. */
+  private removePendingRef(userId: string, index: number): string {
+    const staged = this.pendingRefsFor(userId);
+    if (!staged) return "📭 当前没有暂存的引用。";
+    const total = staged.sessions.length + staged.files.length;
+    if (index > total) return `⚠️ 编号超出范围（1-${total}）。发送 /at 查看。`;
+    const removed = this.removeRefAt(staged, index);
+    staged.at = Date.now();
+    if (staged.sessions.length === 0 && staged.files.length === 0) {
+      this.pendingRefs.delete(userId);
+    }
+    return `🗑️ 已移除引用 ${index}: ${removed}`;
+  }
+
+  /** Remove one entry by its printed position (sessions first, then files). */
+  private removeRefAt(state: PendingRefsState, index: number): string {
+    if (index <= state.sessions.length) {
+      const [removed] = state.sessions.splice(index - 1, 1);
+      return removed ? `会话「${removed.label}」` : "";
+    }
+    const [removed] = state.files.splice(index - state.sessions.length - 1, 1);
+    return removed ? `文件 ${removed.mention}` : "";
+  }
+
+  /** Drop every staged reference for one user; returns how many were dropped. */
+  private clearPendingRefs(userId: string): number {
+    const state = this.pendingRefs.get(userId);
+    this.pendingRefs.delete(userId);
+    return state ? state.sessions.length + state.files.length : 0;
+  }
+
+  /** Drop one user's staged references (delivery consumed them). */
+  private dropPendingRefs(userId: string): void {
+    this.pendingRefs.delete(userId);
+  }
+
+  /** Drop every user's staged references (identity change). */
+  private dropAllPendingRefs(): void {
+    this.pendingRefs.clear();
+  }
+
+  /** `/at` reply: the numbered staging table, or the usage text. */
+  private formatStagedRefs(userId: string): string {
+    const staged = this.pendingRefsFor(userId);
+    if (!staged) {
+      return [
+        "📭 当前没有暂存的引用。",
+        "",
+        "用法：",
+        "• /at s <编号|关键词> — 引用其它会话（编号来自 /s list）",
+        "• /at f <路径> — 引用文件或目录（含空格用 /at f \"a b.txt\"）",
+        "• /at — 查看暂存；/at rm <编号> 移除；/at clear 清空",
+        "",
+        "暂存的引用会附加到下一条消息上（最多 3 个会话、8 个文件，10 分钟内有效）。",
+      ].join("\n");
+    }
+    const lines = ["📎 已暂存的引用（下一条消息生效）"];
+    let n = 1;
+    for (const ref of staged.sessions) {
+      lines.push(`${n++}. 会话: ${ref.label}（${ref.sessionId.slice(0, 12)}）`);
+    }
+    for (const ref of staged.files) {
+      lines.push(`${n++}. 文件: ${ref.mention}`);
+    }
+    lines.push(
+      "",
+      `会话 ${staged.sessions.length}/${AT_SESSION_LIMIT} · 文件 ${staged.files.length}/${AT_FILE_LIMIT}`
+      + `，${Math.max(1, Math.round(AT_TTL_MS / 60_000))} 分钟内有效。`,
+      "/at rm <编号> 移除 · /at clear 清空",
+    );
+    return lines.join("\n");
+  }
+
+  /** `/status` row for staged `/at` references (only rendered when non-empty). */
+  private describeStagedRefs(state: PendingRefsState): string {
+    const parts: string[] = [];
+    if (state.sessions.length > 0) parts.push(`会话 ${state.sessions.length}`);
+    if (state.files.length > 0) parts.push(`文件 ${state.files.length}`);
+    return `• 引用暂存: ${this.paintBadge(parts.join(" · "), "positive")}（下一条消息生效，/at 查看）`;
+  }
+
   // ─── History ──────────────────────────────────────────────────────────────
 
   /**
@@ -5308,6 +5996,7 @@ export class WeChatDSHBridge {
     }
 
     const crossEffective = this.shouldNotifyCrossSession(user.userId) ? "on" : "off";
+    const stagedRefs = this.pendingRefsFor(user.userId);
     const presetLines = await this.formatStatusPresetLines(user);
     const pendingLines = this.formatPendingStatusLines(user.userId);
     const agentLabel = agent
@@ -5339,6 +6028,10 @@ export class WeChatDSHBridge {
       // 打字合并 (F1) — shows the live parameters AND the buffered count, so
       // the window is never a black box the user has to guess about.
       `• 打字合并: ${this.mergeEnabled() ? this.paintBadge(this.mergeStatusText(), "positive") : this.paintBadge("off", "neutral")}`,
+      // `/at` staging is only shown while something IS staged: an always-on
+      // "引用暂存: 0" row would be one more line on every `/status` for a
+      // feature most turns never use.
+      ...(stagedRefs ? [this.describeStagedRefs(stagedRefs)] : []),
       // Inbound allowlist (S3): the owner's own id is printed in full here — on
       // purpose, because "never require the user to know their own id" — while
       // logs only ever carry the masked form.
@@ -6127,6 +6820,17 @@ export class WeChatDSHBridge {
     const types = (msg.item_list ?? []).map((i) => i.type).join(",");
     return `[media types: ${types || "none"}]`;
   }
+}
+
+/**
+ * Flatten staged references into the render list `buildMentionBlock` takes
+ * (sessions first, then files — the same order `/at` numbers them).
+ */
+function stagedRefList(state: PendingRefsState): StagedReference[] {
+  return [
+    ...state.sessions.map((s): StagedReference => ({ kind: "session", mention: s.mention })),
+    ...state.files.map((f): StagedReference => ({ kind: "file", mention: f.mention })),
+  ];
 }
 
 /**

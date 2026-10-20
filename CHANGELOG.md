@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`/at` —— 微信端的 `@会话` / `@文件` 引用。** GUI 输入框里打 `@` 会弹补全、选中后插入一个原子引用 chip；微信没有输入框，这个能力此前**完全缺失**：想在微信里让 agent 看看「另一个会话聊了什么」或「某个文件写了什么」，只能手工把会话 id 或路径贴进正文，而会话 id 贴进正文对模型毫无意义（模型看到的是 `session-xxxx`，不是那段对话）。现在 `/at` 补上这条链路，走的仍是宿主自己的引用管线：
+  - `/at s <编号|关键词>` —— 引用**其它会话**。编号与 `/s list` / `/s switch` 完全同源（优先复用最近一次列表快照，否则全量列表）；关键词优先交给宿主自己的 `listCandidates`（按工作目录亲缘排序、标题只读投影，不折日志），没有 live agent 时退回按 title / cwd / id 扫 `/s list` 行，两条路径的匹配字段集刻意一致。多命中时列出候选让人指定而不是猜。登记后下一条消息带宿主规范的 `@[标题](dsh-session:<base64url>)`，`@deepseek-ai/dsh-session-reference` 在 `agent/pre-step` 把它改写成可读的 `@标题` 并紧随一条 `## Referenced sessions` 快照——与 GUI 的 `@会话` 是**同一条链路**，不是复制品。
+  - `/at f <路径>` —— 引用**文件或目录**。相对路径从当前工作区解析，也接受绝对路径（工作区之外同样可用：`@文件` 是给模型的指针，不是 bridge 自己去读，宿主 `FILE_REFERENCE_PROMPT` 明确写了「绝对路径指代宿主机上的文件或目录」）；目录自动带尾斜杠，含空格的路径自动写成 `@"a b.txt"`（也可直接 `/at f "a b.txt"`）。模型看到的是 `@路径` 文本，`dsh-file-reference-local` 的提示词负责让它调用 `read` 而不是假装读过。路径两端的不可见格式字符会被剥掉（从资源管理器复制常带 U+202A，而 `trim()` 不处理它们，一个前导 U+202A 就足以让 `path.isAbsolute()` 返回 false，把 `C:\…` 当成相对路径解析）；中文输入法的弯引号 `“…”` 与 ASCII `"…"` 同样接受。
+  - `/at` 查看暂存（编号列表 + 上限）、`/at rm <编号>` 移除、`/at clear` 清空；`/status` 在**有暂存时**多一行「引用暂存」，没有则一行不加。
+  - **暂存式而非立即发送**：命令只登记，引用落在**下一条**投递给 agent 的消息上（打字合并开启时落在合并后的那一批），投递成功即清空。这样路径里的空格、正文从哪开始都不需要额外分隔符，也不会出现「引用发出去、正文还没想好」。引用块**跟在正文之后**：宿主 `dsh-session-title` 用首条用户消息的**开头**生成会话标题（确定性 fallback 取前几个词），前置的 `@[标题](dsh-session:InNlc3N…)` 会把新会话标题写成 base64；而宿主的 mention 解析与位置无关，放后面不影响展开。
+  - **可预见的失败全部挡在 `/at` 阶段**，因为宿主的引用失败是**整轮终止**：引用自己（`SESSION_REFERENCE_SELF_REFERENCE`）、第 4 个会话（`SESSION_REFERENCE_TOO_MANY`，上限与宿主 `MAX_REFERENCES = 3` 对齐）、宿主未挂载 `dsh-session-reference`（mention 会被当普通文本转发，模型只看到 base64 串）——三种情况都在登记时拒绝并说明原因，代价是一条回复而不是用户整段 prompt。路径含引号/控制字符的路径同样当场拒绝；找不到路径时给出相近候选（优先用 `ctx.fileReferences`，没有 live agent 时退回目录列举）。
+  - 暂存只在内存里，**不写 `state.json`**：一条引用是「这一次」的意图，重启后大概率已不是同一件事；另有 10 分钟 TTL，登出 / 重新扫码 / 换绑整表清空（引用属于上一个对端）。agent 创建/恢复失败时**不清空**，重发正文即可，不必重新 `/at`。
+  - 接线与既有本地命令一致：`parseAtCommand` / `isAtCommandAttempt`、卡片 bypass（有待处理卡时 `/at` 照常执行，且参数写错也是回用法而不是被当成卡片答案）、`LOCAL_COMMAND_NAMES` 去重（同名原生命令抢不走）、`/help` 与设置页「指令帮助」同源。
+- **`src/bridge/at-refs.ts`** —— mention 渲染层（纯函数，零依赖）：`encodeSessionReferenceUri` / `formatSessionMention` / `formatFileMention` / `buildMentionBlock` / `normalizeAtTarget` / `hasInvisibleMarks`。与宿主 `dsh-session-reference` 的 URI 编解码、`dsh-file-reference` 的 grammar 逐字对齐；唯一有意的差异是目录**闭合引号**（宿主在补全过程中输出未闭合的 `@"dir/` 以保持菜单下钻，微信没有菜单，发出去的是成品文本）。
+
+### Tests
+
+- 新增 `tests/at-command.test.ts`（55 例）：解析矩阵（`list`/`clear`/`rm`/`s`/`f`、缺参数、非法子命令）、与 18 个既有 parser 的别名冲突守卫、mention 语法往返（中文 / `[]` / 反斜杠 label、`@path` / `@"a b.txt"` / 目录尾斜杠 / 控制字符拒绝）、登记与一次性注入（含「第二条消息不再带 mention」、正文保持在首块以免污染会话标题）、打字合并批次只带一次 mention、关键词解析的两条路径（宿主 `listCandidates` 与无 live agent 时的本地行扫描）与歧义提示、全部拒绝路径（引用自己 / 第 4 个会话 / 第 9 个文件 / 服务缺失 / 找不到路径的候选提示）、工作区**之外**的绝对路径引用（含带 U+202A 的粘贴路径回归）、`/at rm` 与 `/at clear`、TTL 过期与「过期后重新登记是全新一组」、登出清空、`/status` 有/无暂存两态、以及有待处理权限卡时 `/at` 不被吞。
+
 ## [0.12.0] - 2026-10-19
 
 ### Compatibility

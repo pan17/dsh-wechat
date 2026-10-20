@@ -606,6 +606,62 @@ export const HISTORY_MAX = 20;
 
 export type HistoryCommand = { kind: "history"; count: number; includeSystem: boolean };
 
+// ─── /at: reference another session or a file ───────────────────────────────
+
+/**
+ * `/at` (引用) — the WeChat stand-in for the GUI composer's `@` completion.
+ *
+ * WeChat has no composer attachment surface, so a reference cannot be
+ * inserted at a caret. Instead `/at` STAGES a reference and the next message
+ * delivered to the agent carries it: the model then sees the same tokens the
+ * GUI would have produced (`@[标题](dsh-session:…)` for a session, `@path` /
+ * `@"path with spaces"` for a file).
+ *
+ *   /at                      → list what is staged
+ *   /at s <编号|关键词>       → stage another session (by /s list row or a substring)
+ *   /at f <路径>              → stage a file or directory
+ *   /at rm <编号>             → drop one staged reference
+ *   /at clear                → drop every staged reference
+ *
+ * `target` is the raw rest-of-line: a path may contain spaces, and the caller
+ * strips one pair of surrounding quotes (the `@"…"` spelling the GUI shows).
+ */
+export type AtCommand =
+  | { kind: "list" }
+  | { kind: "clear" }
+  | { kind: "remove"; index: number }
+  | { kind: "session"; target: string }
+  | { kind: "file"; target: string };
+
+export function parseAtCommand(text: string): AtCommand | null {
+  const trimmed = text.trim();
+  const m = trimmed.match(/^\/at(?:\s+(.*))?$/i);
+  if (!m) return null;
+  const rest = (m[1] ?? "").trim();
+  if (!rest || /^(?:list|ls)$/i.test(rest)) return { kind: "list" };
+  if (/^(?:clear|reset)$/i.test(rest)) return { kind: "clear" };
+  const remove = rest.match(/^(?:rm|remove)\s+(\d+)$/i);
+  if (remove) {
+    const index = parseInt(remove[1]!, 10);
+    return Number.isFinite(index) && index > 0 ? { kind: "remove", index } : null;
+  }
+  const sub = rest.match(/^(s|session|f|file)(?:\s+([\s\S]*))?$/i);
+  if (!sub) return null;
+  const target = (sub[2] ?? "").trim();
+  return sub[1]!.toLowerCase().startsWith("s")
+    ? { kind: "session", target }
+    : { kind: "file", target };
+}
+
+/**
+ * True if text looks like an `/at` attempt (including an invalid argument),
+ * used to decide whether to show usage instead of forwarding to the agent —
+ * the same contract as {@link isHistoryCommandAttempt}.
+ */
+export function isAtCommandAttempt(text: string): boolean {
+  return /^\s*\/at\b/i.test(text);
+}
+
 /**
  * Parse `/history [all] [N]` — view recent conversation history.
  *   /history            → 5 human+assistant turns (default)
@@ -699,6 +755,12 @@ export function isBypassSlashCommand(text: string): boolean {
     parseEnterCommand(text) !== null ||
     parseNotifyCommand(text) !== null ||
     parseHistoryCommand(text) !== null ||
+    // `/at` bypasses on the ATTEMPT, not just a valid parse: a mistyped
+    // `/at s` is never a plausible answer to a permission/question card, and
+    // swallowing it as one would both drop the user's intent and leave the
+    // card's own semantics untouched. `/history` keeps the stricter
+    // valid-parse rule it has always had.
+    isAtCommandAttempt(text) ||
     parseStopCommand(text) !== null
   );
 }
@@ -741,6 +803,7 @@ export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "flush",
   "f",
   "history",
+  "at",
   "rp",
   "reject-permission",
   "rq",
@@ -773,6 +836,7 @@ export function formatHelp(
     "• /surface on|off|status (wxprompt) — 微信渠道提示词注入开关（默认关；正文在设置页编辑）",
     "• /notify on|off|status (watch) — 跨会话决策推送：权限/提问卡整卡（默认关闭）；/notify tasks on|off 跨会话任务完成提醒",
     "• /history [all] [数量] — 查看最近历史（默认 5 条，最多 20 条；默认只看你和助手，all 含压缩/注入等系统消息）；有待处理卡时会完整重发",
+    "• /at — 引用其它会话或文件，附加到下一条消息：/at s <编号|关键词>（会话）、/at f <路径>（文件/目录）、/at 查看、/at rm <编号>、/at clear",
     "• /stop — 中断当前任务",
     "• /next — 继续发送因微信限制被缓存的消息",
     "• /rq — 关闭当前会话的待处理卡；其它会话用 P1=/rq",
