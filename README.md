@@ -10,7 +10,7 @@
 
 ## 功能
 
-微信与 DSH 双向同步：文字、图片、文件、语音直接发给 agent，回复与执行过程推回微信，审批卡和提问卡两端同弹、谁先答谁生效；`/at` 可引用其它会话或文件，把几条消息或「截图 + 问题」合成一轮，静默模式与结论模式控制推送频率；会话、工作区、Preset、模型、权限都能在微信里用 slash 命令管理，与 GUI 同源；另有秘密脱敏、文件范围限制、入站白名单与审计日志等边界，以及内嵌在 DSH 设置里的扫码登录与配置页。
+微信与 DSH 双向同步：文字、图片、文件、语音直接发给 agent，回复与执行过程推回微信，审批卡和提问卡两端同弹、谁先答谁生效；`/at` 可引用其它会话或文件，把几条消息或「截图 + 问题」合成一轮，静默模式与结论模式控制推送频率；会话、工作区、Preset、模型、权限都能在微信里用 slash 命令管理，与 GUI 同源；另有秘密脱敏、文件范围限制、入站白名单与审计日志等边界，以及内嵌在 DSH 设置里的扫码登录、配置页与**指令帮助**（每条指令一句说明，点开看全部例子、点一下复制）。
 
 ## 安装
 
@@ -31,10 +31,11 @@ dsh plugin --profile desktop list --depth 0    # 查看已装版本
 
 | 命令 | 说明 |
 |---|---|
-| `/help`（`/h`、`/?`） | 帮助，含当前 profile 已注册的 DSH 原生命令 |
+| `/help`（`/h`、`/?`） | 命令一览，含当前 profile 已注册的 DSH 原生命令 |
+| `/help <命令>` | 该命令的全部例子，如 `/help s`、`/help merge` |
 | `/status` | 工作区、会话、模型、上下文、权限、各开关状态 |
 | `/workspace`（`/ws`） | `list` / `status` / `switch <编号\|路径>` / `add <路径>` |
-| `/session`（`/s`） | `list` / `switch` / `pin` / `unpin` / `new` / `status` |
+| `/session`（`/s`） | `list [current]` / `switch [current]` / `pin` / `unpin` / `new` / `status` |
 | `/preset`（`/p`） | `list` / `switch <名称\|编号>` / `status` — 默认 Preset，与 GUI 同步 |
 | `/model` | `list` / `switch <提供商/模型>` / `status` |
 | `/perm` | `status` / `list` / `switch <名称\|编号>` / `default [名称\|编号]` |

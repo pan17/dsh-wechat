@@ -540,7 +540,8 @@ describe("/media is wired exactly like /merge", () => {
     expect(isBypassSlashCommand("/md at")).toBe(true);
     expect(LOCAL_COMMAND_NAMES.has("media")).toBe(true);
     expect(LOCAL_COMMAND_NAMES.has("md")).toBe(true);
-    expect(formatHelp()).toContain("/media on|off|at|path (md)");
+    expect(formatHelp()).toContain("/media (md)");
+    expect(formatHelp()).toContain("/md at");
   });
 
   it("/media on/off/at/path persist to config.json and switch the live config", async () => {

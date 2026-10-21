@@ -53,8 +53,10 @@ import { EDITABLE_KEYS, type ConfigStore, type EditableConfig } from "../config-
 import { maskSecrets, maskUserId } from "../utils/redact.js";
 import { AuditLog } from "../utils/audit.js";
 import {
+  commandUsageHint,
   detectUnknownSlashCommand,
   formatHelp,
+  helpTopicBlock,
   isAtCommandAttempt,
   isBypassSlashCommand,
   isHistoryCommandAttempt,
@@ -1873,8 +1875,26 @@ export class WeChatDSHBridge {
       // cannot leak through the slash parser.
       if (await this.tryNativeCommand(user, userId, text)) return;
 
-      if (parseHelpCommand(text)) {
-        // Augment /help with whatever the host's `ctx.commands` has
+      const help = parseHelpCommand(text);
+      if (help) {
+        if (typeof help === "object" && "topic" in help) {
+          // `/help <命令>` — that command's full example list. Wording and
+          // examples come from `src/help-catalog.ts`, the same source the
+          // settings panel renders.
+          await this.sendReply(userId, helpTopicBlock(help.topic) ?? formatHelp());
+          return;
+        }
+        if (typeof help === "object") {
+          // `/help <不存在的名字>` — still a help request, so answer it as
+          // help: say the name is not a command, then print the listing. This
+          // used to fall through to "未知命令 /help", which is the one reply
+          // guaranteed to be wrong (the user IS asking for help).
+          await this.sendReply(
+            userId,
+            `⚠️ 没有 /${help.unknown} 这条命令，下面是全部命令：\n\n${formatHelp(await this.listNativeCommandsForHelp(user))}`,
+          );
+          return;
+        }        // Augment /help with whatever the host's `ctx.commands` has
         // registered so users see the full command surface — not just
         // the local whitelist. Native descriptors that overlap with
         // local entries are de-duplicated inside `formatHelp`.
@@ -2018,10 +2038,19 @@ export class WeChatDSHBridge {
         return;
       }
 
-      // Unrecognized slash command — hint, then forward to the agent.
-      const slashHint = detectUnknownSlashCommand(text);
-      if (slashHint) {
-        await this.sendReply(userId, `⚠️ 未知命令 ${slashHint}，已作为文本转发给 agent。发送 /help 查看可用命令。`);
+      // A documented command whose ARGUMENT did not parse gets its usage line,
+      // not "未知命令": `/model foo` names a command `/help` prints, so calling
+      // it unknown contradicts the listing. The text still goes to the agent —
+      // this is a hint, not a refusal.
+      const usageHint = commandUsageHint(text);
+      if (usageHint) {
+        await this.sendReply(userId, usageHint);
+      } else {
+        // Unrecognized slash command — hint, then forward to the agent.
+        const slashHint = detectUnknownSlashCommand(text);
+        if (slashHint) {
+          await this.sendReply(userId, `⚠️ 未知命令 ${slashHint}，已作为文本转发给 agent。发送 /help 查看可用命令。`);
+        }
       }
     }
 

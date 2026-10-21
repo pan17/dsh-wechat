@@ -38,10 +38,43 @@
 
   展开状态记在浏览器 localStorage（`dsh-wechat/settings-open`），不进 `config.json`；存储不可用时退化为「能展开但不记忆」，不会报错。
 - **保存** — 底部 `保存配置` 一次提交全部字段；有改动未保存时按钮旁显示 `● 有未保存的修改`。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` / `finalOnlyIdleMs` / `finalOnlyCeilingMs` 仍可写 `~/.dsh-wechat/config.json` 或插件行 `config:`，设置页保存不会覆盖它们。网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
-- **帮助** — 卡片标题行的 **指令帮助** 按钮展开本地命令表（与微信 `/help` 同源）；DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出
+- **指令帮助** — 卡片标题行的 **指令帮助** 按钮展开一份说明书：顶部一句说明 → 搜索框 + 全部展开/收起 → 6 个按用途分的组（常用 / 会话与项目 / 模型与权限 / 输出节奏 / 引用与回看 / 待处理卡片）→ 21 条指令，每条一句简短说明 + 行尾 **?**。**?** 悬浮出前 2 条示例并提示「共 N 条示例，展开查看全部」；点整行（或直接点 ?）展开该指令的**全部**示例，每条示例可点击复制。展开状态记在 `dsh-wechat/help-open`，不进 `config.json`。同一份文案也渲染成微信 `/help`（见下一节），DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出。文案要求**简单但不口语**：说清做什么，不写语气词与比喻
 - **已知限制** — 页面底部的告警盒，同样可折叠（默认收起），列出 iLink 的 10 条窗口与 24 小时互动窗口
 
 与宿主通信走插件自己的 HTTP API（`/wechat/api/status|help|config|relogin|logout`），客户端零 `@deepseek-ai` 依赖。
+
+### 帮助文案的单一来源（`src/help-catalog.ts`）
+
+`src/help-catalog.ts` 是**所有用户可见帮助文案的唯一来源**，同一套字符串同时喂给两个消费方：
+
+- **设置页「指令帮助」** —— 经 `/wechat/api/help` 的 `catalog` 字段送到浏览器，渲染成 6 个分组、21 条命令、每条命令的**全部**示例（行尾 `?` 悬浮出前 2 条，展开看全部，示例可点击复制）；
+- **微信 `/help`** —— 由 `bridge/slash.ts` 渲染，两级：
+  - `/help` → **一览**（44 行 / 1514 字）：代码块里每条命令一行 `/命令 (简写)  说明`，多子命令的命令下一行列出全部子命令（`/s list`、`/s list current`、`/s switch`…，有简写的一律用简写；`list current` / `switch current` 是独立形式，必须单独列出）；
+  - `/help <命令名或简写>` → **该条的例子块**：`# /命令 — 说明` + `也可以写成：…` + 代码块里每条示例一行 `示例  说明`。`/help s` 与 `/help session` 输出完全相同。
+
+**一套措辞，简单但不口语**：`summary` / `note` 是两端共用的唯一文案，所以它们必须同时满足两种场景——面板里要好懂，微信等宽表格里不能是絮絮叨叨的散文。写作要求：说清「做什么」，不写语气词与比喻（写「立即发送暂存的结论」，不写「别憋了，现在就把暂存的结论发给我」），`summary` ≤ 40 字、`note` ≤ 30 字。历史上这两端曾各用一套字段（面板白话 + 微信 `terse`），后来合并——维护两份同义文案只会漂移。
+
+**为什么用代码块**：微信气泡不会横向滚动，长行只能折行，而折行会落在反引号中间，把一条可复制的命令劈成两半（`…（编号看 /` + `s list）`）。代码块是客户端那个**可横向滑动**的等宽框，所以表格整体放进 ``` 里，并按显示宽度对齐（中文算 2 列，见 `charWidth` / `padTo`）。
+
+改文案只需改这一个文件。约束由 `tests/help-catalog.test.ts` + `tests/help-topic.test.ts` 强制：
+
+1. **与 `/help` 同步** — catalog 的命令集合必须等于一览里 `/xxx` 行的集合，漏写/多写都红；
+2. **示例要全** — 每个 `subcommands` 关键字至少有一条示例用到它，且**每条命令的每个 `subcommands` 都必须出现在一览里**（`/session` 因此必须写满 list / list current / switch / switch current / pin / unpin / new / status），这是「例子不完整」的结构性防线；`subcommands` 是**拼写关键字**，所以 `list current`、`switch current` 这类两段形式单独占一项，不会被 `list` 吞掉；
+3. **示例必须可执行** — `kind: "command"` 的每行都要过 `isBypassSlashCommand`（`/rq` `/rp` 用各自 parser、`P1=/rq` 用 `parsePnCardReply`），否则用户复制出去的命令会被当成聊天转给 agent；
+4. **示例必须进得了 `/help <命令>`** — 每条 `examples[].line` 与它的 `note` 都要逐字出现在该条的例子块里（面板看到什么，微信就看到什么）；
+5. **别名只放简写** — `s` / `ws` / `p` / `sl` / `fo` / `f` / `mg` / `md` / `h` / `?` 可以进 `aliases`；`permission` / `busy` / `watch` / `notice` / `wxprompt` 这类「换个说法」**不进**（parser 照常接受，但 `/notify (watch, notice)` 会被读成三条命令）。测试直接断言别名必须比命令名短、且不是另一条命令的全名；
+6. **文案纪律** — `summary` ≤ 40 字、`note` ≤ 30 字、不含 `waterfall`/`runtime context`/`mention`/`base64` 等术语、示例行不含 `<…>` 占位符；
+7. **一条消息装得下** — 一览 ≤ 2000 字 / ≤ 55 行、单个例子块 ≤ 550 字（微信单条 4000 字上限，拆分会让帮助变两段）；
+8. **表格真的在代码块里** — 每个渲染结果的 ``` 围栏必须成对且非空，保证折行问题不会悄悄回来。
+
+`..` / `!!` 是消息后缀而非命令，用 `kind: "text"` 标注；测试限定只有 `/merge`（两个后缀）与 `/next`（任意消息都会冲刷缓存）可以出现 text 示例。
+
+Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部分语法，所以测试还会断言**一览与每个例子块过完过滤器后一字不变** —— 否则用户看到的是被吃掉的标记。
+
+`/help` 后面的一切都是**命令名**，所以解析不到的一律仍是帮助请求：`/help fuck`、`/help nope`、乃至整句 `/help me write a test` 都回「⚠️ 没有 /xxx 这条命令」+ 完整一览，**不转发**。理由：`/help` 是「查帮助」这个动词，以它开头的行不是聊天；把它转发出去，用户就会看到「未知命令 /help」——他明明在求助。`man` 对不存在的页也是报错 + 自己的用法，不是把词忽略掉。bare 命令（`/s`、`/silent`、`/merge`…）的语义**完全不变**，展开例子只有 `/help <命令>` 一个入口。
+
+**「未知命令」只留给真的未知命令**：一览里印着的名字永远不能回「未知命令 /model」——那等于告诉用户帮助在骗他。所以每个管理命令的裸形式都有确定行为（`/s` `/ws` `/p` `/model` `/perm` 报状态，与 `/reasoning` `/enter` `/notify` `/surface` 一致），参数写错则回该条的 `usage` 行（`commandUsageHint`），`/help <任意文字>` 回「没有这条命令」+ 一览，三者都不再落到未知命令分支。`detectUnknownSlashCommand` 现在跳过所有 `LOCAL_COMMAND_NAMES` 里的名字，只管真未知的（`/nope`），文案与转发行为不变。
+
 
 ## 配置参考
 
@@ -95,7 +128,7 @@
 
 所以：**DSH 加任何新的 `/xxx` 命令 bundle，微信端无需改动即可识别**——只要它是按 DSH 命令注册契约挂上去的。例如装有 `dsh-plan-mode` 时微信发 `/plan off` 收到原生回执 "Plan mode off."；装有 `dsh-command-goal` 时 `/goal <目标>` 收到原生 "Goal created ..."；装有 `dsh-command-compact` 时 `/compact` 收到 "Compacted N history items (~M tokens)."——与 GUI 同款回执，由原生 handler 自己算、自己发。
 
-`/help` 在末尾加一段 `── DSH 原生命令（当前 profile 已注册）──`，列出当前 profile 实际注册的所有原生命令；本地命令表里已有的名字自动去重，不会重复出现。
+`/help` 在末尾加一段 `── DSH 原生命令（当前 profile 已注册）──`，列出当前 profile 实际注册的所有原生命令；本地命令表里已有的名字自动去重，不会重复出现。这一段保持纯文本 `• /name  [hint] — desc` 格式（由宿主描述符生成，不是 catalog 文案），`/help <命令>` 的例子块里不出现它。
 
 ### 本地命令的语义细节
 

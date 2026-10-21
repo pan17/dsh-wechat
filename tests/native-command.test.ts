@@ -576,7 +576,7 @@ describe("/help discovery of native commands", () => {
     expect(text).toContain("/plan  [off|message] — Enter or leave plan mode");
     expect(text).toContain("/goal  [<objective>|clear|edit|pause|resume] — set or view the goal for a long-running task");
     // Local entries stay authoritative — no native duplicates for /status etc.
-    expect(text).toContain("/status — 当前会话");
+    expect(text).toMatch(/^\/status\s/m);
   });
 
   it("de-duplicates names that still live in the local whitelist (e.g. /status from a third-party plugin)", async () => {
@@ -601,7 +601,7 @@ describe("/help discovery of native commands", () => {
     );
 
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
-    const statusLocalMatches = text.match(/• \/status/g);
+    const statusLocalMatches = text.match(/^\/status\s/gm);
     expect(statusLocalMatches?.length).toBe(1);
     const nativeSection = text.split("── DSH 原生命令")[1] ?? "";
     expect(nativeSection).not.toMatch(/\/status/);

@@ -11,6 +11,7 @@
 
 import { WeChatDSHBridge } from "./bridge/bridge.js";
 import { formatHelp } from "./bridge/slash.js";
+import { helpCatalog } from "./help-catalog.js";
 import { ConfigStore, type EditableConfig } from "./config-store.js";
 import { defaultConfig, type WeChatDSHConfig } from "./config.js";
 import { qrSvgFor } from "./qr.js";
@@ -384,7 +385,12 @@ if (typeof context.inject === "function") {
         kind: "exact",
         path: "/wechat/api/help",
         handler: (_req, res) => {
-          sendJson(res, 200, { ok: true, text: formatHelp() });
+          // `text` stays the verbatim `/help` reply (the WeChat side and any
+          // older client keep working); `catalog` is the settings page's
+          // plain-language view of the same command set. Both come from this
+          // install, so they cannot disagree about which commands exist —
+          // `tests/help-catalog.test.ts` pins the two sets together.
+          sendJson(res, 200, { ok: true, text: formatHelp(), catalog: helpCatalog() });
         },
       });
       webServer.register({

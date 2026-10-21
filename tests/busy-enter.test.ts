@@ -62,7 +62,7 @@ describe("parseEnterCommand", () => {
     expect(isBypassSlashCommand("/enter queue")).toBe(true);
     expect(isBypassSlashCommand("/busy steer")).toBe(true);
     expect(isBypassSlashCommand("/enter bogus")).toBe(false);
-    expect(formatHelp()).toContain("/enter (busy)");
+    expect(formatHelp()).toContain("/enter ");
   });
 });
 

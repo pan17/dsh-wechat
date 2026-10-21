@@ -38,7 +38,13 @@ describe("slash parsers", () => {
     expect(parseHelpCommand("/help")).toBe(true);
     expect(parseHelpCommand("/h")).toBe(true);
     expect(parseHelpCommand("/?")).toBe(true);
-    expect(parseHelpCommand("/help me")).toBe(false);
+    expect(parseHelpCommand("/help s")).toEqual({ topic: "s" });
+    // Everything after `/help` is a command name, so an unknown one — a word
+    // OR a whole sentence — is still a help request and gets "没有这条命令"
+    // plus the listing. Forwarding it would answer a help request with
+    // "未知命令 /help", the one reply guaranteed to be wrong.
+    expect(parseHelpCommand("/help me")).toEqual({ unknown: "me" });
+    expect(parseHelpCommand("/help me write a test")).toEqual({ unknown: "me write a test" });
     expect(parseHelpCommand("help")).toBe(false);
   });
 
@@ -93,7 +99,12 @@ describe("slash parsers", () => {
   });
 
   it("detectUnknownSlashCommand", () => {
-    expect(detectUnknownSlashCommand("/workspace list")).toBe("/workspace");
+    // A name this plugin owns is never "unknown", even with arguments: the
+    // owning handler answers with its usage line instead.
+    expect(detectUnknownSlashCommand("/workspace list")).toBeNull();
+    expect(detectUnknownSlashCommand("/model foo")).toBeNull();
+    expect(detectUnknownSlashCommand("/nope")).toBe("/nope");
+    expect(detectUnknownSlashCommand("/frobnicate 1")).toBe("/frobnicate");
     expect(detectUnknownSlashCommand("normal text")).toBeNull();
   });
 
@@ -104,7 +115,10 @@ describe("slash parsers", () => {
     expect(parseWorkspaceCommand("/ws switch F:\\work")).toEqual({ kind: "switch", target: "F:\\work" });
     expect(parseWorkspaceCommand("/workspace add C:\\repo")).toEqual({ kind: "add", path: "C:\\repo" });
     expect(parseWorkspaceCommand("/workspace switch")).toBeNull();
-    expect(parseWorkspaceCommand("/workspace")).toBeNull();
+    // Bare `/workspace` reports status: answering "未知命令" for a name the
+    // `/help` listing prints two lines above is the worst possible reply.
+    expect(parseWorkspaceCommand("/workspace")).toEqual({ kind: "status" });
+    expect(parseWorkspaceCommand("/ws")).toEqual({ kind: "status" });
   });
 
   it("parseWorkspaceCommand accepts a list window", () => {
@@ -131,7 +145,9 @@ describe("slash parsers", () => {
     expect(parseSessionCommand("/s switch current 3")).toEqual({ kind: "switch", index: 3, scope: "current" });
     expect(parseSessionCommand("/s switch current")).toBeNull();
     expect(parseSessionCommand("/s switch abc")).toBeNull();
-    expect(parseSessionCommand("/session")).toBeNull();
+    // Bare `/s` reports status rather than falling through to "未知命令".
+    expect(parseSessionCommand("/session")).toEqual({ kind: "status" });
+    expect(parseSessionCommand("/s")).toEqual({ kind: "status" });
   });
 
   it("parseSessionCommand accepts a list window on either side of current", () => {
@@ -169,7 +185,9 @@ describe("slash parsers", () => {
     // Legacy aliases still parse.
     expect(parsePresetCommand("/agent list")).toEqual({ kind: "list" });
     expect(parsePresetCommand("/a switch build")).toEqual({ kind: "switch", target: "build" });
-    expect(parsePresetCommand("/preset")).toBeNull();
+    // Bare `/p` reports status instead of "未知命令 /p".
+    expect(parsePresetCommand("/preset")).toEqual({ kind: "status" });
+    expect(parsePresetCommand("/p")).toEqual({ kind: "status" });
   });
 
   it("parseModelCommand", () => {
@@ -185,7 +203,9 @@ describe("slash parsers", () => {
     // forwarding `/model` as an unknown command.
     expect(parseModelCommand("/model switch deepseek")).toEqual({ kind: "switch", target: "deepseek" });
     expect(parseModelCommand("/model switch")).toEqual({ kind: "switch", target: "" });
-    expect(parseModelCommand("/model")).toBeNull();
+    // Bare `/model` reports status: it is the single most likely thing a user
+    // types, and it used to be answered with "未知命令 /model".
+    expect(parseModelCommand("/model")).toEqual({ kind: "status" });
   });
 
   it("splitProviderModelTarget keeps slashes inside the model id", () => {
@@ -225,7 +245,9 @@ describe("slash parsers", () => {
     expect(parsePermCommand("/perm default danger-full-access")).toEqual({ kind: "default", target: "danger-full-access" });
     expect(parsePermCommand("/permission list")).toEqual({ kind: "list" });
     expect(parsePermCommand("/perm switch")).toBeNull();
-    expect(parsePermCommand("/perm")).toBeNull();
+    // Bare `/perm` reports status instead of "未知命令 /perm".
+    expect(parsePermCommand("/perm")).toEqual({ kind: "status" });
+    expect(parsePermCommand("/permission")).toEqual({ kind: "status" });
     expect(parsePermCommand("/perm unknown-sub 1")).toBeNull();
   });
 

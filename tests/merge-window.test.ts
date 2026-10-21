@@ -34,6 +34,7 @@ import { defaultConfig } from "../src/config.js";
 import { MessageType } from "../src/weixin/types.js";
 import {
   formatHelp,
+  helpTopicBlock,
   isBypassSlashCommand,
   LOCAL_COMMAND_NAMES,
   parseCommandName,
@@ -491,8 +492,11 @@ describe("/merge is wired exactly like /silent (and collides with nothing)", () 
     expect(LOCAL_COMMAND_NAMES.has("merge")).toBe(true);
     expect(LOCAL_COMMAND_NAMES.has("mg")).toBe(true);
     const help = formatHelp();
-    expect(help).toContain("/merge on|off|status (mg)");
-    expect(help).toContain("`..`");
-    expect(help).toContain("`!!`");
+    expect(help).toContain("/merge (mg)");
+    // The `..` / `!!` suffixes live in /merge's example block, which is where
+    // a reader looking up the command will actually land.
+    const block = helpTopicBlock("merge") ?? "";
+    expect(block).toContain("..");
+    expect(block).toContain("!!");
   });
 });

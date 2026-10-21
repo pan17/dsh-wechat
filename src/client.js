@@ -27,6 +27,8 @@ window.__ModuleLoader__.load({
 
 		/** localStorage key holding the set of expanded group ids. */
 		const OPEN_KEY = "dsh-wechat/settings-open";
+		/** localStorage key holding whether the 指令帮助 sheet was left open. */
+		const HELP_OPEN_KEY = "dsh-wechat/help-open";
 
 		const css = `
 .wx_section{display:flex;flex-direction:column;gap:16px;padding:0 24px 24px}
@@ -73,7 +75,7 @@ window.__ModuleLoader__.load({
 .wx_toggles .wx_check span{min-width:0}
 .wx_help{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:14px;height:14px;border-radius:50%;background:rgba(128,128,128,.22);color:var(--dsw-alias-label-secondary,#888);font-size:10px;font-weight:600;cursor:help;margin-left:6px;vertical-align:middle;position:relative;user-select:none;line-height:1}
 .wx_help:hover,.wx_help:focus{background:rgba(128,128,128,.42);outline:none;color:inherit}
-.wx_help_float{position:fixed;z-index:10000;padding:6px 10px;background:rgba(20,20,20,.92);color:#fff;font-size:11px;font-weight:400;white-space:normal;width:max-content;max-width:min(260px,calc(100vw - 16px));border-radius:6px;line-height:1.5;text-align:left;pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.28)}
+.wx_help_float{position:fixed;z-index:10000;padding:6px 10px;background:rgba(20,20,20,.92);color:#fff;font-size:11px;font-weight:400;white-space:pre-wrap;width:max-content;max-width:min(340px,calc(100vw - 16px));border-radius:6px;line-height:1.5;text-align:left;pointer-events:none;overflow-wrap:anywhere;box-shadow:0 4px 16px rgba(0,0,0,.28)}
 .wx_divider{height:1px;background:rgba(128,128,128,.2);margin:2px 0}
 .wx_groups{display:flex;flex-direction:column;gap:2px}
 .wx_group{border-bottom:1px solid rgba(128,128,128,.14);padding:2px 0}
@@ -92,6 +94,35 @@ window.__ModuleLoader__.load({
 .wx_limits ol{margin:0;padding-left:20px;font-size:12px;color:var(--dsw-alias-label-secondary,#888);line-height:1.6}
 .wx_limits li{margin-bottom:4px}
 .wx_help_panel{max-height:360px;overflow:auto;white-space:pre-wrap;font-size:12px;line-height:1.55;padding:10px 12px;border:1px solid rgba(128,128,128,.25);border-radius:8px;background:rgba(128,128,128,.06)}
+.wx_help_sheet{display:flex;flex-direction:column;gap:10px;max-height:440px;overflow:auto;padding:10px 12px;border:1px solid rgba(128,128,128,.25);border-radius:8px;background:rgba(128,128,128,.04)}
+.wx_help_intro{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#888)}
+.wx_help_tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;padding:8px 0;background:linear-gradient(rgba(128,128,128,.04),rgba(128,128,128,.04)),var(--dsw-alias-bg-layer-1,#fff);z-index:1}
+.wx_help_search{font:inherit;font-size:12px;padding:5px 9px;border-radius:999px;border:1px solid rgba(128,128,128,.4);background:transparent;color:inherit;flex:1 1 150px;min-width:0}
+.wx_help_toggle{cursor:pointer;font:inherit;font-size:11px;padding:4px 10px;border-radius:999px;border:1px solid rgba(128,128,128,.4);background:transparent;color:inherit;white-space:nowrap}
+.wx_help_toggle:hover{background:rgba(128,128,128,.12)}
+.wx_help_empty{font-size:12px;padding:10px 2px;color:var(--dsw-alias-label-secondary,#888)}
+.wx_help_retry{cursor:pointer;font:inherit;font-size:12px;padding:4px 10px;border-radius:8px;border:1px solid rgba(128,128,128,.5);background:transparent;color:inherit;margin-top:6px}
+.wx_help_footer{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary,#888);border-top:1px solid rgba(128,128,128,.18);padding-top:8px}
+.wx_cmd_group{display:flex;flex-direction:column;gap:2px}
+.wx_cmd_group_title{font-size:12px;font-weight:700;margin-top:4px}
+.wx_cmd_group_blurb{font-size:11px;color:var(--dsw-alias-label-secondary,#888);margin-bottom:2px}
+.wx_cmd{border-bottom:1px solid rgba(128,128,128,.12)}
+.wx_cmd:last-child{border-bottom:none}
+.wx_cmd_head{display:flex;align-items:baseline;gap:6px;width:100%;font:inherit;font-size:12px;color:inherit;padding:7px 2px;cursor:pointer;text-align:left;flex-wrap:wrap}
+.wx_cmd_head:hover{opacity:.85}
+.wx_cmd_open{display:inline-flex;align-items:center;gap:5px;font:inherit;color:inherit;background:none;border:none;padding:0;cursor:pointer}
+.wx_cmd_open:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#1976d2);outline-offset:2px;border-radius:6px}
+.wx_cmd_name{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-weight:700;flex:0 0 auto}
+.wx_cmd_alias{font-size:11px;color:var(--dsw-alias-label-secondary,#888);flex:0 0 auto}
+.wx_cmd_sum{flex:1 1 140px;min-width:0;font-size:12px;line-height:1.5}
+.wx_cmd_body{display:flex;flex-direction:column;gap:6px;padding:0 2px 10px 12px}
+.wx_cmd_usage{font-size:11px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--dsw-alias-label-secondary,#888);line-height:1.5;overflow-wrap:anywhere}
+.wx_cmd_example{display:flex;flex-direction:column;gap:1px}
+.wx_cmd_example_line{cursor:pointer;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;line-height:1.5;padding:3px 7px;border-radius:6px;border:1px solid rgba(128,128,128,.24);background:rgba(128,128,128,.08);color:inherit;text-align:left;overflow-wrap:anywhere;width:100%;box-sizing:border-box}
+.wx_cmd_example_line:hover{background:rgba(128,128,128,.18)}
+.wx_cmd_example_note{font-size:11px;color:var(--dsw-alias-label-secondary,#888);line-height:1.5;padding-left:2px}
+.wx_cmd_more{font-size:11px;color:var(--dsw-alias-label-secondary,#888)}
+.wx_cmd_copied{font-size:11px;color:#2e7d32}
 @media (max-width:560px){.wx_form{grid-template-columns:1fr}.wx_toggles{grid-template-columns:1fr}}`;
 		if (typeof document !== "undefined") {
 			let tag = document.querySelector("style[data-plugin-css=\"dsh-wechat/section\"]");
@@ -112,27 +143,46 @@ window.__ModuleLoader__.load({
 			failed: "登录失败",
 		};
 
-		/** Expanded group ids, read once per mount. Storage failures are non-fatal. */
-		function loadOpenGroups() {
+		/** Read one JSON value from localStorage. Storage failures are non-fatal. */
+		function readStore(key) {
 			try {
-				if (typeof window === "undefined" || !window.localStorage) return {};
-				const raw = window.localStorage.getItem(OPEN_KEY);
-				if (!raw) return {};
-				const parsed = JSON.parse(raw);
-				return parsed && typeof parsed === "object" ? parsed : {};
+				if (typeof window === "undefined" || !window.localStorage) return null;
+				const raw = window.localStorage.getItem(key);
+				if (!raw) return null;
+				return JSON.parse(raw);
 			} catch (e) {
-				return {};
+				return null;
 			}
 		}
 
-		function storeOpenGroups(next) {
+		function writeStore(key, value) {
 			try {
 				if (typeof window === "undefined" || !window.localStorage) return;
-				window.localStorage.setItem(OPEN_KEY, JSON.stringify(next));
+				window.localStorage.setItem(key, JSON.stringify(value));
 			} catch (e) {
-				// Private mode / quota: the group still toggles, it just does not
+				// Private mode / quota: the control still works, it just does not
 				// remember across reloads.
 			}
+		}
+
+		/** Expanded group ids, read once per mount. */
+		function loadOpenGroups() {
+			const parsed = readStore(OPEN_KEY);
+			return parsed && typeof parsed === "object" ? parsed : {};
+		}
+
+		function storeOpenGroups(next) {
+			writeStore(OPEN_KEY, next);
+		}
+
+		/** Whether 指令帮助 was left expanded; a settings page that forgets this
+		 * re-collapses under the user every time they come back. */
+		function loadHelpOpen() {
+			return readStore(HELP_OPEN_KEY) === true;
+		}
+
+		function storeHelpOpen(open) {
+			writeStore(HELP_OPEN_KEY, !!open);
 		}
 
 		// Small "?" badge. Tooltips are portaled to document.body so the
@@ -169,8 +219,21 @@ window.__ModuleLoader__.load({
 			float.style.top = top + "px";
 			float.style.left = left + "px";
 		}
+		/**
+		 * The "?" badge.
+		 *
+		 * `text` is both the tooltip body and (by default) the accessible name.
+		 * A command row passes a short `label` instead: its tooltip is a
+		 * multi-line example list, and announcing all of it as the button name
+		 * would turn one control into a paragraph for a screen reader.
+		 *
+		 * `onActivate` makes a click do something as well as hover: a touch
+		 * screen has no hover, and a "?" that does nothing when tapped is worse
+		 * than no "?" at all.
+		 */
 		function HelpTip(props) {
 			const text = props.text;
+			const label = props.label || text;
 			react.useEffect(() => () => removeHelpFloat(), []);
 			const show = (e) => placeHelpFloat(e.currentTarget, text);
 			const hide = () => removeHelpFloat();
@@ -178,14 +241,213 @@ window.__ModuleLoader__.load({
 				className: "wx_help",
 				role: "button",
 				tabIndex: 0,
-				"aria-label": text,
+				"aria-label": label,
+				title: label,
 				onMouseDown: (e) => e.stopPropagation(),
-				onClick: (e) => e.stopPropagation(),
+				onClick: (e) => {
+					e.stopPropagation();
+					if (props.onActivate) props.onActivate(e);
+				},
 				onMouseEnter: show,
 				onMouseLeave: hide,
 				onFocus: show,
 				onBlur: hide,
 			}, "?");
+		}
+
+		/**
+		 * The tooltip body for one command row: the first two examples plus a
+		 * count, because the full list can run to eleven lines and a hover
+		 * bubble that tall is unreadable (and gets flipped off-screen).
+		 */
+		function tooltipFor(entry) {
+			const shown = entry.examples.slice(0, 2);
+			const lines = shown.map((example) => example.line + "  —  " + example.note);
+			if (entry.examples.length > shown.length) {
+				lines.push("共 " + entry.examples.length + " 条示例，展开查看全部");
+			}
+			return lines.join("\n");
+		}
+
+		/** Copy helper: clipboard API, then the legacy path, then select the text. */
+		function copyText(text, node) {
+			const fallbackSelect = () => {
+				try {
+					const range = document.createRange();
+					range.selectNodeContents(node);
+					const selection = window.getSelection();
+					if (!selection) return;
+					selection.removeAllRanges();
+					selection.addRange(range);
+				} catch (e) {
+					// Nothing left to try; the text is visible and selectable by hand.
+				}
+			};
+			try {
+				if (navigator.clipboard && navigator.clipboard.writeText) {
+					navigator.clipboard.writeText(text).catch(fallbackSelect);
+					return;
+				}
+			} catch (e) {
+				// Fall through to the legacy path.
+			}
+			try {
+				const area = document.createElement("textarea");
+				area.value = text;
+				area.style.position = "fixed";
+				area.style.opacity = "0";
+				document.body.appendChild(area);
+				area.select();
+				document.execCommand("copy");
+				area.remove();
+			} catch (e) {
+				fallbackSelect();
+			}
+		}
+
+		/** One command row: header (click to expand) + the full example list. */
+		function CommandRow(props) {
+			const entry = props.entry;
+			const open = !!props.open;
+			const [copied, setCopied] = react.useState("");
+			const bodyId = "wx_cmd_" + entry.id;
+			const copy = (example) => (e) => {
+				e.stopPropagation();
+				copyText(example.line, e.currentTarget);
+				setCopied(example.line);
+			};
+			const examples = entry.examples.map((example, i) =>
+				createElement("div", { className: "wx_cmd_example", key: entry.id + "_" + i },
+					createElement("button", {
+						type: "button",
+						className: "wx_cmd_example_line",
+						onClick: copy(example),
+						title: "点击复制这条",
+					}, example.line),
+					createElement("div", { className: "wx_cmd_example_note" },
+						example.note,
+						copied === example.line ? createElement("span", { className: "wx_cmd_copied" }, " · 已复制") : null,
+					),
+				),
+			);
+			return createElement("div", { className: "wx_cmd" },
+				createElement("div", {
+					className: "wx_cmd_head",
+					onClick: () => props.onToggle(entry.id),
+				},
+					createElement("button", {
+						type: "button",
+						className: "wx_cmd_open",
+						onClick: (e) => {
+							e.stopPropagation();
+							props.onToggle(entry.id);
+						},
+						"aria-expanded": open,
+						"aria-controls": bodyId,
+						title: open ? "收起示例" : "展开全部示例",
+					},
+						createElement("span", { className: "wx_disclosure_chevron" + (open ? " open" : "") }),
+						createElement("span", { className: "wx_cmd_name" }, entry.command),
+					),
+					entry.aliases.length > 0
+						? createElement("span", { className: "wx_cmd_alias" }, "(" + entry.aliases.join(", ") + ")")
+						: null,
+					createElement("span", { className: "wx_cmd_sum" }, entry.summary),
+					createElement(HelpTip, {
+						text: tooltipFor(entry),
+						label: "查看 " + entry.command + " 的用法示例",
+						onActivate: () => props.onToggle(entry.id),
+					}),
+				),
+				open
+					? createElement("div", { className: "wx_cmd_body", id: bodyId },
+						entry.usage ? createElement("div", { className: "wx_cmd_usage" }, entry.usage) : null,
+						...examples,
+					)
+					: null,
+			);
+		}
+
+		/**
+		 * The 指令帮助 sheet.
+		 *
+		 * Renders the host's plain-language catalog (`/wechat/api/help` →
+		 * `catalog`) grouped by what the user is trying to do. The old
+		 * behaviour — dumping `formatHelp()`'s grammar table — stays as the
+		 * fallback for a host that predates the catalog.
+		 */
+		function HelpSheet(props) {
+			const catalog = props.catalog;
+			const [query, setQuery] = react.useState("");
+			const [expanded, setExpanded] = react.useState({});
+			const [allOpen, setAllOpen] = react.useState(false);
+			const needle = query.trim().toLowerCase().replace(/^\//, "");
+			const matches = (entry) => {
+				if (!needle) return true;
+				const haystack = [
+					entry.command,
+					entry.aliases.join(" "),
+					entry.summary,
+					entry.usage,
+					entry.examples.map((example) => example.line + " " + example.note).join(" "),
+				].join(" ").toLowerCase();
+				return haystack.includes(needle);
+			};
+			const groups = catalog.groups
+				.map((group) => ({
+					group,
+					entries: catalog.commands.filter((entry) => entry.group === group.id && matches(entry)),
+				}))
+				.filter((bucket) => bucket.entries.length > 0);
+			const isOpen = (id) => (allOpen ? true : !!expanded[id]);
+			const toggle = (id) => {
+				if (allOpen) {
+					// Leaving "all open" keeps the row the user just clicked open,
+					// so the click still feels like it did something.
+					setAllOpen(false);
+					setExpanded((prev) => ({ ...prev, [id]: true }));
+					return;
+				}
+				setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+			};
+			return createElement("div", { className: "wx_help_sheet" },
+				createElement("div", { className: "wx_help_intro" }, catalog.intro),
+				createElement("div", { className: "wx_help_tools" },
+					createElement("input", {
+						className: "wx_help_search",
+						value: query,
+						onChange: (e) => setQuery(e.target.value),
+						placeholder: "搜索指令，如「模型」「会话」「/merge」",
+						"aria-label": "搜索指令",
+					}),
+					createElement("button", {
+						type: "button",
+						className: "wx_help_toggle",
+						onClick: () => {
+							setAllOpen(!allOpen);
+							setExpanded({});
+						},
+					}, allOpen ? "全部收起" : "全部展开"),
+				),
+				groups.length === 0
+					? createElement("div", { className: "wx_help_empty" }, "没有找到包含「" + query.trim() + "」的指令。换个说法试试，或者清空搜索框。")
+					: null,
+				groups.map((bucket) =>
+					createElement("div", { className: "wx_cmd_group", key: bucket.group.id },
+						createElement("div", { className: "wx_cmd_group_title" }, bucket.group.title),
+						createElement("div", { className: "wx_cmd_group_blurb" }, bucket.group.blurb),
+						bucket.entries.map((entry) =>
+							createElement(CommandRow, {
+								key: entry.id,
+								entry: entry,
+								open: isOpen(entry.id),
+								onToggle: toggle,
+							}),
+						),
+					),
+				),
+				createElement("div", { className: "wx_help_footer" }, catalog.footer),
+			);
 		}
 
 		/**
@@ -302,9 +564,14 @@ window.__ModuleLoader__.load({
 			// Editable form state (initialized from status.config).
 			const [form, setForm] = react.useState(null);
 			const [openGroups, setOpenGroups] = react.useState(loadOpenGroups);
-			const [helpOpen, setHelpOpen] = react.useState(false);
+			const [helpOpen, setHelpOpen] = react.useState(loadHelpOpen);
+			// `helpText` is the verbatim `/help` reply (the fallback panel);
+			// `helpCatalog` is the plain-language view the sheet renders when
+			// the host is new enough to send one.
 			const [helpText, setHelpText] = react.useState("");
+			const [helpCatalog, setHelpCatalog] = react.useState(null);
 			const [helpBusy, setHelpBusy] = react.useState(false);
+			const [helpError, setHelpError] = react.useState("");
 			// Serialized payload the host last confirmed; `null` until the form
 			// is filled. Refs do not re-render, so `dirty` is recomputed from
 			// it on every render the form state triggers.
@@ -433,26 +700,47 @@ window.__ModuleLoader__.load({
 			const isOpen = (id) => !!openGroups[id];
 			const dirty = !!form && baselineRef.current !== null && JSON.stringify(payloadOf(form)) !== baselineRef.current;
 
-			const toggleHelp = async () => {
-				if (helpOpen) {
-					setHelpOpen(false);
-					return;
-				}
-				setHelpOpen(true);
-				if (helpText) return;
+			/**
+			 * Fetch the help payload once, then reuse it.
+			 *
+			 * The host answers with `{ text, catalog }`: `catalog` drives the
+			 * sheet, `text` is the verbatim `/help` reply kept as the fallback
+			 * for a host that predates the catalog. A failed request keeps the
+			 * error so the panel can offer a retry instead of silently showing
+			 * an empty box.
+			 */
+			const loadHelp = react.useCallback(async () => {
 				setHelpBusy(true);
+				setHelpError("");
 				try {
 					const r = await api("/help");
-					if (r.ok && typeof r.body.text === "string" && r.body.text) {
-						setHelpText(r.body.text);
+					const body = r.body || {};
+					if (r.ok && body.catalog && Array.isArray(body.catalog.commands)) {
+						setHelpCatalog(body.catalog);
+						if (typeof body.text === "string") setHelpText(body.text);
+					} else if (r.ok && typeof body.text === "string" && body.text) {
+						setHelpText(body.text);
 					} else {
-						setHelpText(r.body.message || `无法加载命令帮助 (HTTP ${r.status})`);
+						setHelpError(body.message || `无法加载命令帮助 (HTTP ${r.status})`);
 					}
 				} catch (e) {
-					setHelpText(String(e));
+					setHelpError(String(e));
 				}
 				setHelpBusy(false);
+			}, []);
+
+			const toggleHelp = () => {
+				const next = !helpOpen;
+				setHelpOpen(next);
+				storeHelpOpen(next);
+				if (next && !helpCatalog && !helpText) loadHelp();
 			};
+
+			// The sheet's open state survives a reload, so a page that mounts
+			// already-open has to fetch without waiting for a click.
+			react.useEffect(() => {
+				if (helpOpen && !helpCatalog && !helpText && !helpBusy && !helpError) loadHelp();
+			}, [helpOpen, helpCatalog, helpText, helpBusy, helpError, loadHelp]);
 
 			// ── Collapsed-group summaries (derived from live form state) ──
 			const mergeSummary = form
@@ -485,6 +773,27 @@ window.__ModuleLoader__.load({
 				})()
 				: "";
 
+			/**
+			 * The expanded help area.
+			 *
+			 * Three states, in priority order: the plain-language sheet (host
+			 * sent a catalog), the verbatim `/help` text (older host), and a
+			 * loading/error box with a retry. The text fallback is deliberately
+			 * kept — a settings page that renders nothing is indistinguishable
+			 * from a broken plugin.
+			 */
+			const renderHelp = () => {
+				if (helpCatalog) return createElement(HelpSheet, { catalog: helpCatalog });
+				if (helpText) return createElement("div", { className: "wx_help_panel" }, helpText);
+				if (helpBusy) return createElement("div", { className: "wx_help_panel" }, "正在加载命令帮助…");
+				return createElement("div", { className: "wx_help_panel" },
+					helpError || "暂无命令说明",
+					createElement("div", null,
+						createElement("button", { type: "button", className: "wx_help_retry", onClick: loadHelp }, "重试"),
+					),
+				);
+			};
+
 			return createElement("div", { className: "wx_section" },
 				createElement("div", { className: "wx_card" },
 					// ── Status block: login state, QR, session actions ──
@@ -505,7 +814,7 @@ window.__ModuleLoader__.load({
 							),
 						),
 					),
-					helpOpen ? createElement("div", { className: "wx_help_panel" }, helpBusy ? "正在加载命令帮助…" : (helpText || "暂无命令说明")) : null,
+					helpOpen ? renderHelp() : null,
 					status?.botId ? createElement("div", { className: "wx_meta" }, `Bot: ${status.botId}`) : null,
 					status?.userCount ? createElement("div", { className: "wx_meta" }, `已绑定微信用户: ${status.userCount}`) : null,
 					status?.error ? createElement("div", { className: "wx_err" }, status.error) : null,
@@ -531,7 +840,7 @@ window.__ModuleLoader__.load({
 							id: "connection",
 							title: "连接与默认行为",
 							summary: connectionSummary,
-							desc: "新会话在哪个目录启动、提问/权限卡等多久、agent 主动推送的节流上限，以及谁能驱动这个 bot。",
+							desc: "这里决定：新会话在哪个文件夹干活、等你点确认的卡片放多久、它主动给你发消息一天能发多少条，以及谁能用微信指挥它。",
 							open: isOpen("connection"),
 							onToggle: toggleGroup,
 						},
@@ -539,22 +848,22 @@ window.__ModuleLoader__.load({
 								createElement("label", { className: "wide" },
 									createElement("span", { className: "wx_field_label" }, "工作目录",
 										createElement("code", { className: "wx_key" }, "cwd"),
-										createElement(HelpTip, { text: "新会话的工作目录。仅影响未通过 /workspace 或 /session switch 显式切过工作区的用户；显式切过的保留原样。" })),
+										createElement(HelpTip, { text: "微信里新开的会话，默认在哪个文件夹干活。已经用 /workspace 或 /session switch 切过项目的不受影响，仍用你切的。" })),
 									createElement("input", { value: form.cwd, onChange: set("cwd"), placeholder: "F:\\work" })),
 								createElement("label", null,
 									createElement("span", { className: "wx_field_label" }, "卡片超时",
 										createElement("code", { className: "wx_key" }, "cardTimeoutMs"),
-										createElement(HelpTip, { text: "提问 / 权限卡软超时（毫秒），默认 1800000（30 分钟）。超时未答复的卡会被自动撤回。" })),
+										createElement(HelpTip, { text: "等你点确认的卡片最多等多久，单位毫秒。默认 1800000 = 30 分钟；超时还没回复，这张卡会自动撤回。改成 1800000 就是一小时。" })),
 									createElement("input", { value: form.cardTimeoutMs, onChange: set("cardTimeoutMs"), placeholder: "1800000", inputMode: "numeric" })),
 								createElement("label", null,
 									createElement("span", { className: "wx_field_label" }, "推送限流",
 										createElement("code", { className: "wx_key" }, "sendWechatRateLimitPerMinute"),
-										createElement(HelpTip, { text: "agent 主动推送（send_wechat 工具）每分钟上限，默认 10，0 = 不限。超限时工具会明确返回失败并告知模型，而不是继续刷屏。留空 = 保持原值。" })),
+										createElement(HelpTip, { text: "它主动给你发消息（send_wechat 工具）每分钟最多几条，默认 10，填 0 = 不限。超了就当场失败并告诉它别刷屏，而不是继续轰炸你。留空 = 保持原来的值。" })),
 									createElement("input", { value: form.sendWechatRateLimitPerMinute, onChange: set("sendWechatRateLimitPerMinute"), placeholder: "10", inputMode: "numeric" })),
 								createElement("label", { className: "wide" },
 									createElement("span", { className: "wx_field_label" }, "入站白名单",
 										createElement("code", { className: "wx_key" }, "allowedUsers"),
-										createElement(HelpTip, { text: "入站白名单：每行一个微信 user id（也可用逗号分隔）。留空 = 现有行为（首个给你发消息的人成为绑定对端）。填了就只处理名单内的 id，其余在去重/建会话/命令分发之前被拦下并记日志，绝不回复。升级时若本机已有绑定用户，会自动把该用户写入这里并在微信里提示一次（可在 /status 查看自己的 id）。" })),
+										createElement(HelpTip, { text: "只允许这些人用微信指挥你的 AI，一行一个微信号（用逗号分开也行）。留空 = 谁先给它发消息谁绑定。填了之后，名单外的人发什么都被忽略，也不回复。自己的微信号可以发 /status 看。" })),
 									createElement("textarea", { value: form.allowedUsers, onChange: set("allowedUsers"), placeholder: "（留空 = 不限制）" })),
 							),
 						),
@@ -563,7 +872,7 @@ window.__ModuleLoader__.load({
 							id: "delivery",
 							title: "消息推送",
 							summary: deliverySummary,
-							desc: "决定哪些内容会出现在微信里。「结论模式」开启后优先于「静默」。",
+							desc: "决定微信里出现多少内容、什么时候出现。想安静一点，先关「静默」不够就开「结论模式」。",
 							open: isOpen("delivery"),
 							onToggle: toggleGroup,
 						},
@@ -571,19 +880,19 @@ window.__ModuleLoader__.load({
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.crossSessionNotify, onChange: (e) => setForm({ ...form, crossSessionNotify: e.target.checked }) }),
 									createElement("span", null, "跨会话决策推送"),
-									createElement(HelpTip, { text: "任意会话的权限 / 提问卡整卡推到微信，可直接回复拍板。默认关闭。" })),
+									createElement(HelpTip, { text: "别的会话（不是你现在聊的这个）需要你拍板的权限卡、提问卡，也整张推到微信，你可以直接回复。默认关闭。" })),
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.notifyTaskEvents, onChange: (e) => setForm({ ...form, notifyTaskEvents: e.target.checked }) }),
 									createElement("span", null, "跨会话任务完成提醒"),
-									createElement(HelpTip, { text: "跨会话任务完成或报错时通过微信提醒。独立于决策推送，默认关闭。" })),
+									createElement(HelpTip, { text: "别的会话的任务做完或者报错了，也用微信提醒你一声。跟上面的决策推送互相独立，默认关闭。" })),
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.silent, onChange: (e) => setForm({ ...form, silent: e.target.checked }) }),
 									createElement("span", null, "静默"),
-									createElement(HelpTip, { text: "开启后每轮只发送最后一条助手正文。关闭后，思考与工具调用/结果合并为一条「执行过程」，按桌面端单行条目显示，收到下一段正文首个流式片段时立即推送，正文完成后单独发送；提问/审批卡或轮次结束也会发送待发过程。" })),
+									createElement(HelpTip, { text: "打开后每轮只发它最后那段回复。关掉后，思考过程和工具调用会合成一条「执行过程」一起发过来，能看到它每一步在干什么。微信端也能用 /silent on|off 切换，和这里同一个值。" })),
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.finalOnly, onChange: (e) => setForm({ ...form, finalOnly: e.target.checked }) }),
 									createElement("span", null, "结论模式"),
-									createElement(HelpTip, { text: "只回最终结论：跨轮次的中间过程一律暂存，整条任务彻底停下来后只发一条最终结论（自动续跑再多轮也只发一条）。权限卡、提问卡、报错始终立即推送，不会被压住。默认静默 45 秒后交付，最长 10 分钟必发一次；想看当前进度可随时在微信发 /flush。开启后优先于「静默」。微信端也可用 /final on|off 切换（与这里同一个值）。" })),
+									createElement(HelpTip, { text: "整件事彻底做完，只发一条最终结论；中间自动续跑再多轮也只发一条。权限卡、提问卡、报错照样立刻发，不会被压住。它停手 45 秒后交付，最长 10 分钟一定发一次；等不及就发 /flush 立刻取回。打开后比「静默」更强。微信端也能用 /final on|off 切换，和这里同一个值。" })),
 							),
 						),
 
@@ -591,14 +900,14 @@ window.__ModuleLoader__.load({
 							id: "merge",
 							title: "打字合并",
 							summary: mergeSummary,
-							desc: "一句话分几段发时，把连续几条消息合并成一轮，避免每条消息各烧掉一轮对话。默认关闭：开启后每条消息要多等一个静默窗口。",
+							desc: "一句话分几段发的时候，把连着几条合成一轮，免得每一段都单独跑一轮。默认关闭：打开后每条消息会多等几秒。",
 							open: isOpen("merge"),
 							onToggle: toggleGroup,
 						},
 							createElement("label", { className: "wx_check" },
 								createElement("input", { type: "checkbox", checked: !!form?.mergeEnabled, onChange: (e) => setForm({ ...form, mergeEnabled: e.target.checked }) }),
 								createElement("span", null, "打字合并"),
-								createElement(HelpTip, { text: "默认关闭：每条微信消息各自一轮。开启后连续几条消息会在静默窗口内合并成一轮（一句话分几段发不再烧掉几轮），代价是每条消息多等几秒。消息末尾 `..` 表示还要接着说，`!!` 表示立刻提交；图片/文件不参与合并。微信端也可用 /merge on|off 切换（与这里同一个值）。" })),
+								createElement(HelpTip, { text: "默认关闭：每条微信消息各自跑一轮。打开后，你连着发的几条会等你停手几秒再合成一轮（一句话分几段发不用跑好几轮）。消息末尾加 `..` 表示还要接着说，加 `!!` 表示马上提交；图片和文件不参与合并。微信端也能用 /merge on|off 切换，和这里同一个值。" })),
 							createElement("div", { className: "wx_sub" },
 								form.mergeEnabled
 									? null
@@ -607,23 +916,23 @@ window.__ModuleLoader__.load({
 									createElement("label", null,
 										createElement("span", { className: "wx_field_label" }, "静默窗口",
 											createElement("code", { className: "wx_key" }, "mergeSilenceMs"),
-											createElement(HelpTip, { text: "打字合并的静默窗口（毫秒，默认 3000）：连续几条微信消息在这个间隔内到达时合并成一轮；0 = 关闭窗口（每条消息各自一轮，等同 /merge off）。" })),
+											createElement(HelpTip, { text: "你停手多久之后就把已发的几条合成一轮，单位毫秒，默认 3000 = 3 秒。填 0 等于关掉合并（每条消息各自一轮，和 /merge off 一样）。" })),
 										createElement("input", { value: form.mergeSilenceMs, onChange: set("mergeSilenceMs"), placeholder: "3000", inputMode: "numeric", disabled: !form?.mergeEnabled })),
 									createElement("label", null,
 										createElement("span", { className: "wx_field_label" }, "条数上限",
 											createElement("code", { className: "wx_key" }, "mergeMaxMsgs"),
-											createElement(HelpTip, { text: "打字合并的硬上限（默认 10 条）：达到即立刻合并发出，防止缓冲区无界增长。" })),
+											createElement(HelpTip, { text: "一批最多攒几条，默认 10 条。攒够就立刻发出去，防止一直堆着不发。" })),
 										createElement("input", { value: form.mergeMaxMsgs, onChange: set("mergeMaxMsgs"), placeholder: "10", inputMode: "numeric", disabled: !form?.mergeEnabled })),
 									createElement("label", null,
 										createElement("span", { className: "wx_field_label" }, "强制放行",
 											createElement("code", { className: "wx_key" }, "mergeForcedReleaseMs"),
-											createElement(HelpTip, { text: "打字合并的强制放行上限（毫秒，默认 180000 = 3 分钟）：无论窗口、`..` 暂挂还是上一批仍在投递，到点一定发出——宁可两句话一轮，也不让通道卡死。" })),
+											createElement(HelpTip, { text: "最多憋多久，单位毫秒，默认 180000 = 3 分钟。到点不管怎样都发出去，宁可分成两轮，也不会让你的消息一直卡着。" })),
 										createElement("input", { value: form.mergeForcedReleaseMs, onChange: set("mergeForcedReleaseMs"), placeholder: "180000", inputMode: "numeric", disabled: !form?.mergeEnabled })),
 								),
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.mergeSuffixTokens, onChange: (e) => setForm({ ...form, mergeSuffixTokens: e.target.checked }), disabled: !form?.mergeEnabled }),
 									createElement("span", null, "合并后缀 `..` / `!!`"),
-									createElement(HelpTip, { text: "是否识别消息末尾的 `..`（继续追加，暂不发出）与 `!!`（立刻提交）。开启时这两个后缀会从正文里去掉。关闭后它们只是普通文本。" })),
+									createElement(HelpTip, { text: "要不要认消息末尾的 `..`（继续追加，先别发）和 `!!`（马上提交）。打开时这两个符号会从正文里去掉；关掉后它们只是普通文字。" })),
 							),
 						),
 
@@ -631,14 +940,14 @@ window.__ModuleLoader__.load({
 							id: "media",
 							title: "图片与文件",
 							summary: mediaSummary,
-							desc: "图片/文件是自己一条消息时，先暂存，等你随后发来的那句话，两者分成一轮一起交给 AI；以及附件以 @引用 还是「已保存到路径」的方式交付。默认全部关闭（与升级前完全一致）。",
+							desc: "图片或文件与随后一条文字合并为同一轮；并决定附件的呈现方式：可点击的 @引用，或一行文件路径。两者默认关闭。",
 							open: isOpen("media"),
 							onToggle: toggleGroup,
 						},
 							createElement("label", { className: "wx_check" },
 								createElement("input", { type: "checkbox", checked: !!form?.mediaMergeEnabled, onChange: (e) => setForm({ ...form, mediaMergeEnabled: e.target.checked }) }),
 								createElement("span", null, "图片/文件与文字合并发送"),
-								createElement(HelpTip, { text: "默认关闭：图片/文件各自一轮，AI 先看到图片、再看到你的问题。开启后，不带文字说明的图片/文件/视频会先暂存，等你下一条文字到达时合成一轮发出去（文字在前、附件在后），AI 一次就拿到「图 + 图要它做什么」。自带文字说明的消息（同一气泡里的图+字）立即发送，不等。语音不参与。等待超过下面「附件等待」仍未等到文字，就先单独发出去，不会一直挂着。微信端也可用 /media on|off 切换（与这里同一个值）。" })),
+								createElement(HelpTip, { text: "默认关闭：图是图、话是话，分两轮跑，AI 先看到图再看到你的问题。打开后，没配文字的图片/文件/视频会先等一等，等你下一条文字到达时合成一轮发出去，AI 一次就同时拿到图和「图要它做什么」。图下面自带文字时照旧立刻发；语音不参与；等太久（见下面「附件等待」）就先单独发出去，不会一直挂着。微信端也能用 /media on|off 切换，和这里同一个值。" })),
 							createElement("div", { className: "wx_sub" },
 								form.mediaMergeEnabled
 									? null
@@ -647,13 +956,13 @@ window.__ModuleLoader__.load({
 									createElement("label", null,
 										createElement("span", { className: "wx_field_label" }, "附件等待",
 											createElement("code", { className: "wx_key" }, "mediaHoldMs"),
-											createElement(HelpTip, { text: "暂存的图片/文件等待随后那条文字的最长时间（毫秒，默认 180000 = 3 分钟，与「打字合并 → 强制放行」同长）。超时就把已暂存的附件单独发出去——一张图配不上话，也照样值得回答，通道更不能一直挂着。实际等待取它和「强制放行」里更短的那个。" })),
+											createElement(HelpTip, { text: "图片/文件最多等你多久，单位毫秒，默认 180000 = 3 分钟。等到还没等来那句话就先单独发出去——没人提问的图也值得看一眼，通道更不能一直挂着。实际等待取它和「打字合并 → 强制放行」里更短的那个。" })),
 										createElement("input", { value: form.mediaHoldMs, onChange: set("mediaHoldMs"), placeholder: "180000", inputMode: "numeric", disabled: !form?.mediaMergeEnabled })),
 								),
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.mediaAtRefEnabled, onChange: (e) => setForm({ ...form, mediaAtRefEnabled: e.target.checked }) }),
 									createElement("span", null, "以 @引用 方式交给 AI"),
-									createElement(HelpTip, { text: "关闭（默认）：沿用「文件已保存到: 路径」的纯路径写法，任何宿主上都能正常阅读。开启：按宿主自己的 @路径 语法交付（含空格的路径写成 @\"…\"），消息里就是一个可点开的引用，与拖文件进输入框同款——但这依赖宿主挂载了文件引用插件，没挂载时只会显示成一行裸 @C:/…。两种都只是**指针**——文件内容不会出现在消息里，AI 需要时会自己读取该路径（所以对话里不会重复出现文件正文，几 MB 的日志也不会被整段塞进上下文）。两种方式都会先把文件存到本机。微信端也可用 /media at|path 切换。" })),
+									createElement(HelpTip, { text: "关闭（默认）：附件写作「文件已保存到: 路径」一行普通路径，任何环境均可正常阅读。打开：写作 @路径（路径含空格时加引号），在桌面端是可点击的引用，但需要宿主挂载文件引用功能；未挂载时只会显示一行 @C:/…。两种写法都只告知 AI 文件位置，不会把文件内容写入对话，大文件同样如此。文件均先保存到本机。微信端可用 /media at|path 切换。" })),
 							),
 						),
 
@@ -661,19 +970,19 @@ window.__ModuleLoader__.load({
 							id: "prompt",
 							title: "微信渠道提示词",
 							summary: promptSummary,
-							desc: "仅在最近一条用户消息来自微信时注入到 agent 的 runtime context；GUI 发消息时自动隐藏。",
+							desc: "给 AI 加一句「你现在是在微信里跟人聊天」的说明，它回话会更短、更像聊天。只在微信发来的那一轮生效，在桌面端打字时自动不生效。",
 							open: isOpen("prompt"),
 							onToggle: toggleGroup,
 						},
 							createElement("label", { className: "wx_check" },
 								createElement("input", { type: "checkbox", checked: !!form?.surfacePromptEnabled, onChange: (e) => setForm({ ...form, surfacePromptEnabled: e.target.checked }) }),
 								createElement("span", null, "微信渠道提示词"),
-								createElement(HelpTip, { text: "开启后，最近一条用户消息来自微信时会把下方提示词注入 agent 的 runtime context；GUI 发消息时自动隐藏。也可用微信 /surface on|off 切换。" })),
+								createElement(HelpTip, { text: "打开后，微信发来的那一轮会带上下面这段话，让它知道自己在微信里跟你聊天；在桌面端打字时不会带上。微信端也能用 /surface on|off 切换。" })),
 							createElement("div", { className: "wx_form" },
 								createElement("label", { className: "wide" },
 									createElement("span", { className: "wx_field_label" }, "提示词正文",
 										createElement("code", { className: "wx_key" }, "surfacePrompt"),
-										createElement(HelpTip, { text: "仅在设置页编辑。微信消息驱动会话时注入到 runtime context；留空等于关闭注入。" })),
+										createElement(HelpTip, { text: "只在这个页面里改。微信发消息时这段文字会一起带给 AI；留空就等于不注入。" })),
 									createElement("textarea", {
 										value: form.surfacePrompt,
 										onChange: set("surfacePrompt"),
@@ -687,7 +996,7 @@ window.__ModuleLoader__.load({
 							id: "security",
 							title: "安全边界",
 							summary: securitySummary,
-							desc: "默认全部收紧。打开下面任何一项，都等于让一条微信消息（或一次 agent 调用）获得更大的本机权限。",
+							desc: "默认全部关着，也就是权限最小的状态。下面任何一项打开，都等于让一条微信消息获得更大的本机权限，请确认你真的需要。",
 							open: isOpen("security"),
 							onToggle: toggleGroup,
 						},
@@ -695,17 +1004,17 @@ window.__ModuleLoader__.load({
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.allowRemotePermissionEscalation, onChange: (e) => setForm({ ...form, allowRemotePermissionEscalation: e.target.checked }) }),
 									createElement("span", null, "允许微信放宽全局默认权限"),
-									createElement(HelpTip, { text: "默认关闭：微信里的 /perm default 只能写入不放宽权限的预设；danger-full-access 或审批为 never 的预设会被拒绝（全局默认写入 DSH 设置，对所有新会话生效，与微信无关，属于提权，请在本机设置页操作）。会话级 /perm switch 不受影响。仅在确实需要远程改全局默认时才开启。" })),
+									createElement(HelpTip, { text: "默认关闭：在微信里发 /perm default 只能把默认权限调严，不能调松（danger-full-access 这种放开的会被拒绝）。因为那个默认值是对所有新会话生效的，跟微信无关，属于提权，只该在本机设置页点。当前会话的 /perm switch 不受影响。确实需要远程改全局默认时才打开。" })),
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.allowAnyFilePath, onChange: (e) => setForm({ ...form, allowAnyFilePath: e.target.checked }) }),
 									createElement("span", null, "允许 send_wechat 发送任意路径"),
-									createElement(HelpTip, { text: "默认关闭：send_wechat 只能发送调用会话工作目录或已注册工作区内的文件，其余路径一律拒绝（否则该工具就是任意文件读取原语）。仅在确实需要时才开启。" })),
+									createElement(HelpTip, { text: "默认关闭：AI 只能把你当前项目里的文件发到微信，别处的一律拒绝。打开后它能把电脑上任意文件发给你——只在你确实需要时才打开。" })),
 							),
 							createElement("div", { className: "wx_form" },
 								createElement("label", null,
 									createElement("span", { className: "wx_field_label" }, "外发文件上限",
 										createElement("code", { className: "wx_key" }, "maxOutgoingFileBytes"),
-										createElement(HelpTip, { text: "send_wechat 发送文件的字节上限（默认 20971520 = 20 MiB）。超过的文件在读取之前就被拒绝。" })),
+										createElement(HelpTip, { text: "它发文件给你时的大小上限，单位字节，默认 20971520 = 20 MiB。超了就直接拒绝，不会先读进内存。" })),
 									createElement("input", { value: form.maxOutgoingFileBytes, onChange: set("maxOutgoingFileBytes"), placeholder: "20971520", inputMode: "numeric" })),
 							),
 						),
