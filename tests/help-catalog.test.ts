@@ -465,6 +465,16 @@ describe("settings panel wiring for the help sheet", () => {
     expect(client).toContain("onActivate");
   });
 
+  it("shows the tooltip exactly once, never as a native title bubble too", () => {
+    // `title` + the portaled `wx_help_float` put the same sentence on screen
+    // twice, overlapping (the native bubble sits right under the cursor).
+    // The ? badge must carry its accessible name on `aria-label` only.
+    const badge = client.slice(client.indexOf("function HelpTip"));
+    const head = badge.slice(0, badge.indexOf('}, "?");'));
+    expect(head).toContain('"aria-label": label');
+    expect(head).not.toMatch(/^\s*title:/m);
+  });
+
   it("filters by name, alias, summary and example text", () => {
     expect(client).toContain("entry.aliases.join");
     expect(client).toContain("entry.summary");

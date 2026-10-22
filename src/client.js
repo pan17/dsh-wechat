@@ -242,7 +242,9 @@ window.__ModuleLoader__.load({
 				role: "button",
 				tabIndex: 0,
 				"aria-label": label,
-				title: label,
+				// No `title`: the browser's native tooltip would open next to
+				// (and on top of) the portaled bubble, so every hover showed
+				// the same text twice. `aria-label` still names the control.
 				onMouseDown: (e) => e.stopPropagation(),
 				onClick: (e) => {
 					e.stopPropagation();
@@ -829,7 +831,7 @@ window.__ModuleLoader__.load({
 					createElement("div", { className: "wx_row" },
 						createElement("button", { className: "wx_btn", onClick: () => run("/relogin"), disabled: busy !== "" }, busy === "/relogin" ? "…" : "重新扫码"),
 						createElement("button", { className: "wx_btn danger", onClick: () => { if (confirm("确定退出微信登录？")) run("/logout"); }, disabled: busy !== "" }, busy === "/logout" ? "…" : "退出登录"),
-						createElement("span", { className: "wx_meta" }, "重新扫码会清除本地 token；退出后需重新扫码"),
+						createElement("span", { className: "wx_meta" }, "新安装或者更新本插件后，建议重启DSH再使用"),
 					),
 
 					createElement("div", { className: "wx_divider" }),
