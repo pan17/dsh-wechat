@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,7 +19,16 @@ jobs:
           # session.jsonl.zstd artifacts. GitHub-hosted runners default to
           # Node 24 now and that build does not ship the Zstd API surface.
           node-version: 22
-          cache: npm
+      # Explicit cache + `restore-keys`, matching release.yml. setup-node's
+      # `cache: npm` keys strictly on `hashFiles(lockfile)`, so any lockfile
+      # edit — a version bump is enough — forces a cold install. The prefix
+      # fallback keeps a key change to a partial hit.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
       - run: npm ci
       - run: npm run build
       - run: npm test
