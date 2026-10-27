@@ -178,10 +178,24 @@ function buildBaseInfo(): BaseInfo {
   return { channel_version: CHANNEL_VERSION };
 }
 
+/** What the user sees when the request never reached the gateway. */
+const NETWORK_ERROR_MESSAGE = "网络异常，无法连接微信服务器，请检查网络后重试";
+
 async function apiGet<T>(baseUrl: string, path: string, token?: string): Promise<T> {
   const url = `${baseUrl.replace(/\/$/, "")}/${path}`;
-  const res = await fetch(url, { headers: buildHeaders({ token }) });
-  const text = await res.text();
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(url, { headers: buildHeaders({ token }) });
+    // Reading the body is the same network operation: a connection that dies
+    // mid-body never delivered the server's answer either.
+    text = await res.text();
+  } catch (err) {
+    // Was a bare "TypeError: fetch failed" / "terminated"; the original error
+    // stays on `cause` for logs. An HTTP status is the server answering, so it
+    // keeps its own text below instead.
+    throw new Error(NETWORK_ERROR_MESSAGE, { cause: err });
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
   return JSON.parse(text) as T;
 }
