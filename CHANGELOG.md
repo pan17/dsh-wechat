@@ -5,11 +5,57 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`/fork`：按轮次分叉当前会话。** 这是 GUI 聊天页「轮次尾巴 → 分叉」按钮的微信入口：
+
+  ```
+  /fork                      # 每轮一行：提问简写 → 该轮最终回复简写，显示「共 37 轮」
+  /fork list                 # 同上
+  /fork list 50              # 最近 50 轮
+  /fork list all             # 全部轮次
+  /fork show 3               # 第 3 轮的完整提问与完整回复
+  /fork switch 3             # 从第 3 轮末尾分叉，并把微信绑定切到新会话
+  ```
+
+  **和 GUI 走的是同一条链路，不是仿制品**：`switch` 直调宿主 `ctx.sessionController.fork({ sessionId, atSeq })`——就是 GUI 的 `forkAt()` 最终调到的那个方法；`atSeq` 传的是该轮 **`turn/end` 事件的 seq**，也正是 GUI 分叉按钮传的值。所以切出来的子会话是**一等会话**（自己的 Agent、`parentSession` header、同一工作区成员资格），`/s list` 和 GUI 侧边栏都看得到。
+
+  轮次折叠逐字对齐宿主的 `turnOutline` 投影：`turn/start` 锚定一轮，该轮**第一条**人类提示词是提问（同轮后续 steering 不覆盖），每条助手消息覆盖草稿、`turn/end` 提交为该轮回复，注入类系统消息不进轮次。区别只在于这里保留**全文**并额外记下 `turn/end` 的 seq——投影只给 50/120 字预览，既满足不了 `show` 的「完整」，也拿不到 GUI 的切点。
+
+  编号是列表行号（与 `/s list` 一致），窗口只影响显示不影响解析：`/fork show 25` 在只显示 20 行时照样能到第 25 轮。`list` 的窗口语法直接复用 `/s list` 的 `parseListLimit()`，所以 `all` / 数字 / `all 5` 行为逐字相同；详情因此单独占 `show`——`list 5` 永远是「看 5 行」，不会和「看第 5 轮」混淆。
+
+  两个边界：**只允许从已结束的轮次分叉**（进行中的轮次标 `（进行中）` 并拒绝 `switch`）；**比 GUI 宽一点**——GUI 的分叉按钮在「该轮没有助手文字」时是灰的（按钮挂在助手气泡上的 UI 约束），微信照常允许，因为「从一轮被打断的地方重来」正是这个功能最有用的场景。分叉成功后自动切到新会话（等价于 GUI 自动打开它），原会话仍在 `/s list` 里；失败一律**不改绑定**，按宿主错误码（`session/not-found` / `session/fork-unavailable` / `session/migration-required` / 宿主无 `fork`）回中文原因。标题按宿主 `increasedForkTitle()` 递增一次（`标题` → `标题 (1)`），否则父子会话会同名。
+
+  新增 `tests/fork-command.test.ts`（38 条）：解析与窗口语法、五种非法形式、`isBypassSlashCommand` 与 `LOCAL_COMMAND_NAMES` 接线、别名碰撞守卫、折叠的八种形状、冷会话回退、两种渲染，以及「传的 `atSeq` 恰好等于该轮 `turn/end`」「失败不改绑定」「打错只回用法、零转发」。`/help` 一览因此多两行（实测 1954 字 / 56 行），行数上限随之从 55 抬到 56；`/history` 那条只有一个 `all` 开关的子命令行顺手删掉（`usage` 与示例里都写着，`/skill list` 一直是同样处理）。
+
 ### Changed
+
+- **`/history` 改成按轮次回看，与 `/fork` 共用同一套折叠。**
+
+  ```
+  /history                      # 最近 5 轮：提问 → 该轮最终回复，末轮全文
+  /history list 10              # 最近 10 轮
+  /history list all             # 全部轮次
+  /history show 3               # 第 3 轮的完整提问与完整回复
+  ```
+
+  每轮只留「该轮第一条人类提示词 + 该轮最终回复」，**过程中间的助手消息不再出现**——旧版一条助手消息一行，一有工具调用就被撑成十几行，读起来像日志而不像对话。窗口永远以最新一轮结尾，所以最后一轮整块打印完整提问与完整回复（旧版只保证「最近一条助手回复不截断」），前面的行按 30/50 字加 `…`；`show` 同样不截断，超长输出走 `splitText` + `/next`。轮次来自 `ops.readSessionTurns()`，与 `/fork` 逐字同源，所以两个命令的编号永远一致，`/history show 3` 和 `/fork show 3` 是同一轮。
+
+  **两处破坏性变化**：`/history all` 不再是「含系统消息」（现在是「全部轮次」，与 `/fork list all` 同义）；裸数量 `/history 10` 不再接受，改写 `/history list 10`。两者都按「打错的本地命令」回用法提示，**不转发给 agent**。20 条上限一并取消——窗口由 `list <数量>` / `list all` 显式指定，与 `/s list`、`/fork list` 同一个 `parseListLimit()`。
+
+  压缩检查点 / 插件上下文 / goal 续跑这类注入消息**不再有任何展示入口**（`all` 现在是窗口关键字）。这与 GUI 侧边栏一致：`turnOutline` 只列 `source.kind === "user"`，它们不是你说过的话。内部随之删掉 `DshOps.getSessionHistory()` 与扁平的 `HistoryEntry`——`/history` 是它们唯一的消费者。
+
+  三份测试（`tests/history-command.test.ts` 解析、`tests/history-truncation.test.ts` 渲染与桥接、`tests/history-provenance.test.ts` 注入消息不进提问 + 冷会话读 `readSession` 而非压缩后的 surface）钉住以上行为；`/help` 一览仍是实测 1954 字 / 56 行（`/history` 不印子命令行，否则会顶过 2000 字上限）。
+
+- **`/history` 与 `/fork` 的每一行都带两个时间。** 提问取人类 `user/message` 的事件时间（`promptTime`），回复取 `turn/end`（`replyTime`）；以前只有一个时间、而且被 `turn/end` 覆盖，所以「👤 你 · 50 分钟前」印的其实是**回复**的时刻——一轮跑了 19 分钟，用户那句话就被写成 19 分钟之后。现在简写行两边都带（`👤 50 分钟前 · 提问… → 🤖 31 分钟前 · 回复…`），详情与末轮整块同样是 `👤 你 · 时间` / `🤖 助手 · 时间` 各一行。时间放在文字**前面**：预览以 `…` 结尾，后面再挂时间会读成句子的一部分。进行中的轮次没有回复时间，那一侧直接省略，不打印「未知时间」。
 
 - **「已知限制」补上第三条：出站语音气泡不可渲染。** 设置页底部的告警盒（摘要随之变成「3 条微信平台限制」）与 README 新增的「已知限制」一节都写明：bot 发的语音条会被微信客户端整条丢弃——服务端返回成功、审计也记成已发送，手机端却连占位都没有，所以音频一律当普通文件发；入站语音不受影响，微信会自动转成文字，DSH 端无需再配语音处理。issue #17 的 8 组实验结论一并记进 `docs/DEVELOPMENT.md` 的「已知边界」，并注明**不要**把 `.silk` 或音频扩展名加进 `mediaTypeForFile()` 的 VOICE 分支：那不会报错，只会静默丢消息。README 开头「收发语音」的措辞也相应改为「语音自动转文字」，不再暗示能发出语音条。
 
 ### Fixed
+
+- **`/history` 与 `/fork` 的输出在桌面微信里不再黏成一段。** 微信一旦把这条消息当 markdown 渲染（回复里出现一个 `**加粗**`、一个表格或一个行内代码就够），单个换行就是**软换行**、渲染成**空格**：`🤖 助手` 黏在回复上、`看全文: /history show 2` 黏在回复最后一行。现在块与块之间统一用空行（段落分隔在「纯文本」和「markdown」两种渲染下都成立），`/history list`、`/history show`、`/fork list`、`/fork show` 一起改；代价是每块多一行。
+
+- **启动日志里的扫码页地址不再写死 `3080`。** 插件的路由挂在 DSH 自己的 web 服务上，端口在 listen 时才确定（3080 只是「该端口空闲」时的默认值），而日志印的是固定字符串——端口一变，那行地址就打不开。现在调宿主 `webServer.getOrigin()` 取实际绑定的 origin，取不到（尚未 listen）时退回打印 `<DSH 地址>/wechat/qr`；README 里同样写死的地址一并删掉，只留「设置 → WeChat」这条主路径。
 
 - **扫码登录失败时不再只显示一句 `fetch failed`。** 拿二维码或轮询扫码状态时，只要请求没走到微信服务器（DNS 失败、连接被拒绝、超时、连接中断），报错统一为「网络异常，无法连接微信服务器，请检查网络后重试」，原始错误仍挂在 `cause` 上供排查。服务器有明确答复的 HTTP 错误照旧显示 `HTTP <状态码>: <响应内容>`。
 

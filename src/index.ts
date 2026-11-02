@@ -332,6 +332,9 @@ if (typeof context.inject === "function") {
           path: string;
           handler: (req: unknown, res: unknown) => void;
         }): unknown;
+        /** Real bound origin (protocol + host + port). Declared optional so an
+         *  older host that lacks it still gets the routes. */
+        getOrigin?(): string;
       }>("webServer");
       if (!webServer) return;
 
@@ -477,7 +480,20 @@ if (typeof context.inject === "function") {
           }
         },
       });
-      console.log("[dsh-wechat] Settings UI available: 设置 → WeChat；扫码页 http://127.0.0.1:3080/wechat/qr");
+      // The port is chosen at listen time (3080 only when free), so print the
+      // origin the server actually bound instead of a hardcoded guess. The
+      // same address serves the GUI, so this is the URL the user already has.
+      let origin = "";
+      try {
+        origin = webServer.getOrigin?.() ?? "";
+      } catch {
+        origin = ""; // not listening yet — the path alone is still actionable
+      }
+      console.log(
+        origin
+          ? `[dsh-wechat] Settings UI available: 设置 → WeChat；扫码页 ${origin}/wechat/qr`
+          : "[dsh-wechat] Settings UI available: 设置 → WeChat；扫码页 <DSH 地址>/wechat/qr",
+      );
     });
   } else {
     console.log("[dsh-wechat] ctx.inject unavailable; QR page disabled (login QR is logged)");

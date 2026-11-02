@@ -164,6 +164,11 @@ describe("isMistypedLocalCommand / commandUsageHint", () => {
       "/media onn",
       "/surface onn",
       "/history abc",
+      // The old `/history` grammar (bare count / `all` = system messages) is
+      // gone; both must reach the usage reply rather than be reinterpreted.
+      "/history 10",
+      "/history all 10",
+      "/history switch 2",
       "/stop now",
     ]) {
       expect(isMistypedLocalCommand(line), line).toBe(true);
@@ -240,7 +245,8 @@ describe("isMistypedLocalCommand / commandUsageHint", () => {
       "/session", "/s list", "/s list current 50", "/s switch 3", "/s pin", "/s new",
       "/preset switch build", "/p list", "/model", "/model switch deepseek/deepseek-chat",
       "/perm default read-only", "/reasoning switch high", "/enter queue",
-      "/history", "/history all 10", "/at", "/at s 2", "/at f src/index.ts",
+      "/history", "/history list all", "/history list 10", "/history show 2",
+      "/at", "/at s 2", "/at f src/index.ts",
     ]) {
       expect(isMistypedLocalCommand(line), line).toBe(false);
       expect(commandUsageHint(line), line).toBeNull();

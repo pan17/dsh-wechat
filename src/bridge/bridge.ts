@@ -37,7 +37,15 @@ import { formatQuestionForWeChat, parseQuestionReply, buildAnswer } from "../ada
 import { formatApprovalCard, parseApprovalReply } from "../adapter/approval-format.js";
 import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
-import type { ModelSelection, PinOutcome, SessionHeader, SessionRecord, SkillEntry } from "../dsh/ops.js";
+import type {
+  ForkOutcome,
+  ModelSelection,
+  PinOutcome,
+  SessionHeader,
+  SessionRecord,
+  SessionTurn,
+  SkillEntry,
+} from "../dsh/ops.js";
 import type { Agent, AgentSessionLike, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
 import {
   MAX_OUTBOUND_QUEUE,
@@ -58,14 +66,18 @@ import {
   helpTopicBlock,
   isAtCommandAttempt,
   isBypassSlashCommand,
-  isHistoryCommandAttempt,
   isSkillCommandAttempt,
   parseAtCommand,
   parseCommandName,
+  parseForkCommand,
   parseHelpCommand,
   parseHistoryCommand,
   parseSkillCommand,
   renderBackgroundJobsSection,
+  renderForkDetail,
+  renderForkList,
+  renderHistoryDetail,
+  renderHistoryList,
   renderProjectionSection,
   parseEnterCommand,
   parseFinalCommand,
@@ -90,13 +102,13 @@ import {
   parseStatusCommand,
   parseStopCommand,
   parseWorkspaceCommand,
-  HISTORY_MAX,
   LIST_DEFAULT,
   LOCAL_COMMAND_NAMES,
   type AtCommand,
   type BackgroundJobView,
   type EnterCommand,
   type FinalCommand,
+  type ForkCommand,
   type HistoryCommand,
   type MergeCommand,
   type MediaCommand,
@@ -2077,6 +2089,12 @@ export class WeChatDSHBridge {
         return;
       }
 
+      const forkCmd = parseForkCommand(text);
+      if (forkCmd) {
+        await this.handleForkCommand(userId, forkCmd);
+        return;
+      }
+
       const pCmd = parsePresetCommand(text);
       if (pCmd) {
         await this.handlePresetCommand(userId, pCmd);
@@ -2124,14 +2142,6 @@ export class WeChatDSHBridge {
         await this.sendReply(
           userId,
           "⚠️ 用法: /at [s <编号|关键词> | f <路径> | rm <编号> | clear]\n发送 /at 查看已暂存的引用。这条消息没有转发给 agent。",
-        );
-        return;
-      }
-      // Invalid /history attempt (e.g. /history abc) — show usage instead of forwarding.
-      if (isHistoryCommandAttempt(text)) {
-        await this.sendReply(
-          userId,
-          `⚠️ 用法: /history [all] [数量]（1-${HISTORY_MAX}，默认 5）例如 /history 10 或 /history all。这条消息没有转发给 agent。`,
         );
         return;
       }
@@ -5106,6 +5116,160 @@ export class WeChatDSHBridge {
     }
   }
 
+  // ─── /fork ────────────────────────────────────────────────────────────────
+
+  /**
+   * `/fork` — 按轮次分叉当前会话（GUI 聊天页「轮次尾巴 → 分叉」的微信入口）。
+   *
+   * Three forms, all addressed by the FULL-list row number so a window never
+   * changes what a number means (the `/s list` rule):
+   *   - `list [all|数量]`  → the turn list, newest 20 by default;
+   *   - `show <编号>`      → that turn's full prompt and full reply;
+   *   - `switch <编号>`    → fork at that turn's closing event.
+   *
+   * The turn fold (`ops.readSessionTurns`) mirrors the host's `turnOutline`
+   * projection, and `switch` calls the same `sessionController.fork` the GUI
+   * calls with the same boundary (that turn's `turn/end` seq), so a WeChat fork
+   * and a GUI fork of the same turn produce equivalent children.
+   */
+  private async handleForkCommand(userId: string, cmd: ForkCommand): Promise<void> {
+    const user = this.ensureBoundUser(userId);
+    if (!user.sessionId) {
+      await this.sendReply(userId, "💬 暂无会话。先发一条消息，再用 /fork 查看轮次。");
+      return;
+    }
+    const turns = await this.ops.readSessionTurns(user.sessionId);
+    if (turns.length === 0) {
+      await this.sendReply(
+        userId,
+        "🔀 这个会话还没有已记录的轮次（或日志暂不可读）。发一条消息后再试。",
+      );
+      return;
+    }
+    switch (cmd.kind) {
+      case "list": {
+        await this.sendReply(
+          userId,
+          renderForkList(turns, {
+            ...(cmd.all ? { all: true } : {}),
+            ...(cmd.limit !== undefined ? { limit: cmd.limit } : {}),
+          }),
+        );
+        return;
+      }
+      case "show": {
+        const turn = this.resolveTurn(turns, cmd.index);
+        if (!turn) {
+          await this.sendReply(userId, this.turnRangeText("/fork", cmd.index, turns.length));
+          return;
+        }
+        await this.sendReply(userId, renderForkDetail(turn, cmd.index));
+        return;
+      }
+      case "switch": {
+        await this.handleForkSwitch(user, userId, cmd.index, turns);
+        return;
+      }
+    }
+  }
+
+  /**
+   * One turn by its full-list row number, or `undefined` when out of range.
+   *
+   * Shared by `/fork show`, `/fork switch` and `/history show`: the three read
+   * the same list, so they must resolve a number the same way.
+   */
+  private resolveTurn(turns: readonly SessionTurn[], index: number): SessionTurn | undefined {
+    return index >= 1 && index <= turns.length ? turns[index - 1] : undefined;
+  }
+
+  /**
+   * Out-of-range reply for a turn number.
+   *
+   * `command` is the command that PRINTS the numbers the user should re-read:
+   * pointing a `/history show` reader at `/fork` would send them to a list with
+   * a different window (20 rows instead of 5).
+   */
+  private turnRangeText(command: string, index: number, total: number): string {
+    return `⚠️ 没有第 ${index} 轮（共 ${total} 轮）。发 ${command} 查看编号。`;
+  }
+
+  /**
+   * `/fork switch <编号>` — fork at that turn's closing event and rebind
+   * WeChat to the child, which is what the GUI does when it opens the child
+   * it just created.
+   *
+   * Every refusal happens BEFORE the host call, so a failed fork never leaves
+   * the binding pointing somewhere unexpected.
+   */
+  private async handleForkSwitch(
+    user: UserState,
+    userId: string,
+    index: number,
+    turns: readonly SessionTurn[],
+  ): Promise<void> {
+    const turn = this.resolveTurn(turns, index);
+    if (!turn) {
+      await this.sendReply(userId, this.turnRangeText("/fork", index, turns.length));
+      return;
+    }
+    if (turn.endSeq === undefined) {
+      await this.sendReply(userId, `⚠️ 第 ${index} 轮还在进行中，结束后再分叉。`);
+      return;
+    }
+    const sourceId = user.sessionId;
+    // Read the parent's title BEFORE forking: the seed copies its
+    // `session/title` event into the child, so the child needs a distinct one
+    // or every list shows two identically named sessions.
+    const sourceTitle = (await this.ops.readSessionTitle(sourceId, user.cwd))?.trim();
+    const outcome = await this.ops.forkSession(sourceId, turn.endSeq);
+    if (outcome.kind !== "ok") {
+      await this.sendReply(userId, this.forkFailureText(index, outcome));
+      return;
+    }
+    const childId = outcome.sessionId;
+    if (sourceTitle) {
+      // Cosmetic only: a rename failure leaves a usable child with an
+      // inherited title, which is not worth failing the fork over.
+      await this.ops.renameSession(childId, increasedForkTitle(sourceTitle));
+    }
+    // The child is a new row at the top of `/s list`, so the numbered snapshot
+    // the user last read no longer describes the list. Old-session stream
+    // buffers are dropped for the same reason `/s switch` drops them.
+    this.lastSessionListByUser.delete(user.userId);
+    this.clearSessionOutput(sourceId);
+    user.sessionId = childId;
+    this.state.update(user.userId, { sessionId: childId });
+    this.trackWatchedSession(user.userId, childId);
+    // The host created the child's Agent inside `fork`, so this normally hits
+    // the live path; it still covers a deployment that only persisted it.
+    const { agent } = await this.agents.ensure(user);
+    const label = await this.formatSessionLabel(childId, user.cwd);
+    const profile = await this.formatSessionProfileLine(user, agent);
+    await this.sendReply(
+      userId,
+      agent
+        ? `✅ 已从第 ${index} 轮分叉：${label} — ${user.cwd}\n${profile}\n之后的微信消息发给新会话；原会话仍在 /s list 里。`
+        : `⚠️ 已从第 ${index} 轮分叉：${label} — ${user.cwd}，但新会话无法加载（日志可能不可读）。发送 /s new 新建，或换一条会话。\n${profile}`,
+    );
+  }
+
+  /** Word one fork failure without leaking an unmasked host message. */
+  private forkFailureText(index: number, outcome: Exclude<ForkOutcome, { kind: "ok" }>): string {
+    switch (outcome.kind) {
+      case "unsupported":
+        return "⚠️ 当前 DSH 版本不支持分叉（部署里没有 sessionController.fork）。";
+      case "not-found":
+        return "⚠️ 源会话已不存在（可能已被删除），无法分叉。";
+      case "unavailable":
+        return `⚠️ 第 ${index} 轮的事件已不在会话日志里，无法分叉。`;
+      case "migration-required":
+        return "⚠️ 这个会话的日志需要先在 DSH 桌面端打开一次（完成迁移）才能分叉。";
+      case "error":
+        return `⚠️ 分叉失败：${maskSecrets(outcome.message)}`;
+    }
+  }
+
   /**
    * Handle `/s pin [编号]` and `/s unpin [编号]`.
    *
@@ -6301,60 +6465,44 @@ export class WeChatDSHBridge {
   // ─── History ──────────────────────────────────────────────────────────────
 
   /**
-   * `/history [all] [N]` — show the most recent N conversation entries of
-   * the current session (default 5, max 20). Default lists only human and
-   * assistant turns; `all` also includes synthesized system injections
-   * (compaction checkpoints, plugin context, goal rounds). Each entry is
-   * Each entry is its own block (`角色 · 时间` then the original body),
-   * oldest→newest, so it reads closer to a live WeChat message than a dump.
+   * `/history` — 按轮次回看当前会话（GUI 侧边栏「这一轮说了什么」的微信入口）。
+   *
+   * Two forms, addressed by the FULL-list row number so a window never changes
+   * what a number means (the `/s list` rule):
+   *   - `list [all|数量]` → 每轮一行，默认最近 5 轮，末轮全文；
+   *   - `show <编号>`     → that turn's full prompt and full reply.
+   *
+   * The turns come from `ops.readSessionTurns()` — the SAME fold `/fork` uses —
+   * so `/history show 3` and `/fork show 3` print the same turn, and neither
+   * can drift from the other. Reading is the only thing `/history` does; the
+   * fork itself stays on `/fork switch`.
    */
   private async handleHistoryCommand(userId: string, cmd: HistoryCommand, user: UserState): Promise<void> {
     if (!user.sessionId) {
-      await this.sendReply(userId, "💬 暂无会话，发送消息后可查看历史（/history [1-20]）");
+      await this.sendReply(userId, "💬 暂无会话，发送消息后可查看历史（/history）。");
       return;
     }
-    const count = Math.max(1, Math.min(cmd.count, HISTORY_MAX));
-    let entries: Array<{ role: "user" | "assistant" | "system"; text: string; time: number }>;
-    try {
-      entries = await this.ops.getSessionHistory(user.sessionId, count, {
-        includeSystem: cmd.includeSystem,
-      });
-    } catch (err) {
-      console.warn(`[dsh-wechat] getSessionHistory failed: ${String(err)}`);
-      await this.sendReply(userId, `⚠️ 读取历史失败：${maskSecrets(String(err))}`);
-      return;
-    }
-    if (entries.length === 0) {
-      await this.sendReply(userId, "📜 暂无历史消息。");
+    const turns = await this.ops.readSessionTurns(user.sessionId);
+    if (turns.length === 0) {
+      // `readSessionTurns` folds the durable log and returns `[]` both for a
+      // fresh session and for a log it cannot read; the wording covers both
+      // rather than claiming the session is empty.
+      await this.sendReply(userId, "📜 暂无历史消息（或日志暂时读不到）。");
+    } else if (cmd.kind === "list") {
+      await this.sendReply(
+        userId,
+        renderHistoryList(turns, {
+          ...(cmd.all ? { all: true } : {}),
+          ...(cmd.limit !== undefined ? { limit: cmd.limit } : {}),
+        }),
+      );
     } else {
-      const HISTORY_TEXT_LIMIT = 800;
-      // The most recent assistant reply is the one the reader is most
-      // likely to want to read end-to-end — keep it untruncated so the
-      // answer to "what did the model just say" doesn't cut off at 800
-      // chars. Earlier entries still cap at HISTORY_TEXT_LIMIT; a long
-      // assistant reply flows into the next WeChat chunk via splitText.
-      let lastAssistantIdx = -1;
-      for (let i = entries.length - 1; i >= 0; i--) {
-        if (entries[i]!.role === "assistant") {
-          lastAssistantIdx = i;
-          break;
-        }
+      const turn = this.resolveTurn(turns, cmd.index);
+      if (!turn) {
+        await this.sendReply(userId, this.turnRangeText("/history", cmd.index, turns.length));
+        return;
       }
-      const lines: string[] = [`📜 最近 ${entries.length} 条历史${entries.length >= HISTORY_MAX && count >= HISTORY_MAX ? "（最多展示 20 条）" : ""}`];
-      entries.forEach((e, i) => {
-        const roleLabel =
-          e.role === "user" ? "👤 你" : e.role === "system" ? "⚙️ 系统" : "🤖 助手";
-        const when = e.time ? this.formatRelativeTime(e.time) : "未知时间";
-        const keepFull = i === lastAssistantIdx;
-        const body = keepFull
-          ? e.text
-          : e.text.length > HISTORY_TEXT_LIMIT
-            ? e.text.slice(0, HISTORY_TEXT_LIMIT - 1) + "…"
-            : e.text;
-        lines.push(`${roleLabel} · ${when}\n${body.trimEnd()}`);
-      });
-      lines.push(`提示: /history all 含系统消息；/history [1-${HISTORY_MAX}] 换条数（默认 5）`);
-      await this.sendReply(userId, lines.join("\n\n"));
+      await this.sendReply(userId, renderHistoryDetail(turn, cmd.index));
     }
     await this.resendPendingCardsForHistory(userId);
   }
@@ -7830,6 +7978,30 @@ function cleanSessionTitle(title: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 28);
+}
+
+/**
+ * Increment a trailing fork number, preserving half-width or full-width
+ * parentheses; an unnumbered title starts at ` (1)`.
+ *
+ * Byte-for-byte the host client's own `increasedForkTitle`
+ * (`@deepseek-ai/dsh-api-session-controller`, the function `sessions.fork`
+ * applies when the GUI passes `increaseTitle: true`). Replicated rather than
+ * imported because the bridge carries no runtime `@deepseek-ai/*` dependency —
+ * and replicated EXACTLY so a WeChat fork names its child the same way a GUI
+ * fork does. Without it the child inherits the parent's `session/title` event
+ * through the fork seed and the two read as duplicates in every list.
+ */
+function increasedForkTitle(title: string): string {
+  const ascii = /^(.*?)\((\d+)\)$/u.exec(title);
+  if (ascii?.[1] !== undefined && ascii[2] !== undefined) {
+    return `${ascii[1]}(${BigInt(ascii[2]) + 1n})`;
+  }
+  const fullWidth = /^(.*?)（(\d+)）$/u.exec(title);
+  if (fullWidth?.[1] !== undefined && fullWidth[2] !== undefined) {
+    return `${fullWidth[1]}（${BigInt(fullWidth[2]) + 1n}）`;
+  }
+  return `${title} (1)`;
 }
 
 /**

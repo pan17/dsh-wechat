@@ -289,13 +289,18 @@ describe("help catalog ↔ /help drift guard", () => {
     // 4000 chars is the per-message cap; a help reply split across two
     // messages is unreadable. These bounds also stop the listing from
     // creeping back into a manual.
+    //
+    // The line bound moved 55 → 56 when `/fork` landed (24 commands, measured
+    // 1954 chars / 56 lines). It is a budget, not a target: adding a command
+    // must fit under the 2000-char ceiling, and the char bound is what really
+    // keeps the listing in one bubble.
     const help = formatHelp([
       { name: "plan", description: "Enter or leave plan mode", input: { hint: "[off|message]" } },
       { name: "goal", description: "set or view the goal for a long-running task" },
       { name: "compact", description: "Compact older conversation history" },
     ]);
     expect(Array.from(help).length).toBeLessThanOrEqual(2000);
-    expect(help.split("\n").length).toBeLessThanOrEqual(55);
+    expect(help.split("\n").length).toBeLessThanOrEqual(56);
     for (const entry of catalog.commands) {
       const block = helpTopicBlock(entry.command)!;
       expect(Array.from(block).length, `${entry.command} block`).toBeLessThanOrEqual(550);

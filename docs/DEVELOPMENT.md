@@ -47,9 +47,9 @@
 
 `src/help-catalog.ts` 是**所有用户可见帮助文案的唯一来源**，同一套字符串同时喂给两个消费方：
 
-- **设置页「指令帮助」** —— 经 `/wechat/api/help` 的 `catalog` 字段送到浏览器，渲染成 6 个分组、23 条命令、每条命令的**全部**示例（行尾 `?` 悬浮出前 2 条，展开看全部，示例可点击复制）；
+- **设置页「指令帮助」** —— 经 `/wechat/api/help` 的 `catalog` 字段送到浏览器，渲染成 6 个分组、24 条命令、每条命令的**全部**示例（行尾 `?` 悬浮出前 2 条，展开看全部，示例可点击复制）；
 - **微信 `/help`** —— 由 `bridge/slash.ts` 渲染，两级：
-  - `/help` → **一览**（53 行 / 1745 字）：代码块里每条命令一行 `/命令 (简写)  说明`，多子命令的命令下一行列出全部子命令（`/s list`、`/s list current`、`/s switch`…，有简写的一律用简写；`list current` / `switch current` 是独立形式，必须单独列出）；
+  - `/help` → **一览**（56 行 / 1954 字）：代码块里每条命令一行 `/命令 (简写)  说明`，多子命令的命令下一行列出全部子命令（`/s list`、`/s list current`、`/s switch`…，有简写的一律用简写；`list current` / `switch current` 是独立形式，必须单独列出）；
   - `/help <命令名或简写>` → **该条的例子块**：`# /命令 — 说明` + `也可以写成：…` + 代码块里每条示例一行 `示例  说明`。`/help s` 与 `/help session` 输出完全相同。
 
 **一套措辞，简单但不口语**：`summary` / `note` 是两端共用的唯一文案，所以它们必须同时满足两种场景——面板里要好懂，微信等宽表格里不能是絮絮叨叨的散文。写作要求：说清「做什么」，不写语气词与比喻（写「立即发送暂存的结论」，不写「别憋了，现在就把暂存的结论发给我」），`summary` ≤ 40 字、`note` ≤ 30 字。历史上这两端曾各用一套字段（面板白话 + 微信 `terse`），后来合并——维护两份同义文案只会漂移。
@@ -64,7 +64,7 @@
 4. **示例必须进得了 `/help <命令>`** — 每条 `examples[].line` 与它的 `note` 都要逐字出现在该条的例子块里（面板看到什么，微信就看到什么）；
 5. **别名只放简写** — `s` / `ws` / `p` / `sl` / `fo` / `f` / `mg` / `md` / `h` / `?` 可以进 `aliases`；`permission` / `busy` / `watch` / `notice` / `wxprompt` 这类「换个说法」**不进**（parser 照常接受，但 `/notify (watch, notice)` 会被读成三条命令）。测试直接断言别名必须比命令名短、且不是另一条命令的全名；
 6. **文案纪律** — `summary` ≤ 40 字、`note` ≤ 30 字、不含 `waterfall`/`runtime context`/`mention`/`base64` 等术语、示例行不含 `<…>` 占位符；
-7. **一条消息装得下** — 一览 ≤ 2000 字 / ≤ 55 行、单个例子块 ≤ 550 字（微信单条 4000 字上限，拆分会让帮助变两段）；
+7. **一条消息装得下** — 一览 ≤ 2000 字 / ≤ 56 行、单个例子块 ≤ 550 字（微信单条 4000 字上限，拆分会让帮助变两段）。行数上限随 `/fork` 从 55 抬到 56（实测 1954 字 / 56 行），真正卡住体积的仍是 2000 字那条；`/history` 因此不印子命令行——`list` 是默认形式、`show` 写在 `usage` 与示例里，而那一行（约 55 字）会把 1954 字顶过 2000 字上限；
 8. **表格真的在代码块里** — 每个渲染结果的 ``` 围栏必须成对且非空，保证折行问题不会悄悄回来。
 
 `..` / `!!` 是消息后缀而非命令，用 `kind: "text"` 标注；测试限定只有 `/merge`（两个后缀）与 `/next`（任意消息都会冲刷缓存）可以出现 text 示例。
@@ -170,6 +170,7 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 | `/status` | 工作区、会话、Agent、待处理(当前)/待处理(跨会话)、当前会话 Preset、模型、上下文、权限、新会话默认 Preset、静默、结论模式、繁忙投递、跨会话决策推送、跨会话任务完成提醒；末尾「会话级状态」按 `statusMode`（默认 `brief`）显示——`brief` 只出 `[模式]`（plan / goal / subagent / todos）与 `[后台任务]`，`full` 另加 `[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类），DSH 加新 plugin 自动出现。`[后台任务]` 读宿主 `ctx.jobs`（`job_list` 那套），**只统计当前绑定会话名下的后台任务**（`list(sessionId)` 的 owner fence + `owner === sessionId` 二次过滤，别的会话与无主任务都不算），输出总数与运行中明细（`running`/`stopping` 都算运行中，最多列 5 条，其余合成「另有 N 个运行中」）；**一个任务都没有时整段不出现**（不留 `共 0 个` 占位），有任务但都不在跑时只出一行 `⚪ 共 N 个`；服务缺失、未绑定会话或读取抛错时同样整段省略，`/status` 永不因此失败。`/status brief\|full` 切换并持久化到 `config.json` |
 | `/workspace (ws)` | `list` 默认显示 20 个、按添加顺序（新加的排最前），`all` 或显式数量看更多；显示各工作区会话数，不含已归档；switch/add 回复会写明恢复的会话名字和完整 id，跳过已归档，并附一行 `• 预设: … · 模型: … · 思考等级: …`（见 `/session` 的说明）；该目录无可见会话时提示发送消息将创建（没有会话可描述，该行省略） |
 | `/session (s)` | `list` 默认最近 20 个，`all` 或显式数量看更多，标记当前，不显示 GUI 已归档会话；**置顶会话排在列表最前并标 `📌`**，`pin`/`unpin` 省略编号时作用于当前会话，带编号时按 `/s list` 的行号解析；`list current` 只看当前工作目录——cwd 按宿主 `fs.promises.realpath` 规则归一（尾斜杠/`..`/大小写差异都能匹配），推荐用 `switch current <编号>` 按同一列表切换；紧接着直接 `switch <编号>` 也会复用最近一次列表编号；普通无列表上下文时 `switch <编号>` 对应全量列表；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建。**`switch` / `new` 的回复固定多一行 `• 预设: X · 模型: provider/model · 思考等级: Y`**：切换/新建改变的正是这三项，直接答在回复里，省掉再发 `/status`（或 `/preset status` + `/model status` + `/reasoning status`）。预设取该会话的 live 值（与 `/status`「当前会话 Preset」同源，`agent-preset/selected` 事件优先），无记录时回落部署默认（新建会话必然落到这里）；模型走 `/status` 同一条优先级链（本会话 override > `modelSelection` projection > 最近请求记录 > Agent 创建参数 > 部署默认）；思考等级取该模型适配器自己的名称（`high` 显示为 `/reasoning list` 里的中文名），未设置时写「默认」而不是留空。三段各自独立降级——预设名缺失、宿主没有 `llm` 服务、等级名查不到，都不会让整行消失或让回复失败 |
+| `/fork` | 见下方「`/fork` 按轮次分叉」 |
 | `/preset (p)` | `switch <名称\|编号>` 切**当前会话**（走宿主 `agentPresets.select`，会话第一条消息前才允许，已开始的会话明确拒绝并提示 `/s new`）；`default [名称\|编号]` 改**新会话默认**（写 DSH 设置、与 GUI 同步，裸形式只读）；`status` 分两行报「新会话默认」与「当前会话」 |
 | `/model` | 切换立即作用于当前会话 + 设为默认；与 GUI 模型选择器同源，走宿主 `sessionController.selectModel`，GUI 里也会立刻显示新模型；当前推理等级若新模型支持则一并保留，否则清空 |
 | `/perm` | `switch` 实时切当前会话；`default` 写 DSH 设置，新会话生效 |
@@ -182,12 +183,66 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 | `/flush`（`/f`） | 立即取回结论模式暂存的最终结论，不必等静默期；没有暂存内容时提示为空 |
 | `/surface`（`/wxprompt`） | 微信渠道提示词注入开关（默认关）；正文在设置页编辑，不在微信改 |
 | `/notify`（`/watch`） | 跨会话决策推送总闸，默认关闭；`/notify tasks on\|off` 单独开关跨会话任务完成/报错提醒 |
-| `/history` | 默认 5 条、最多 20 条；默认只看你和助手，`all` 含压缩检查点/插件注入等系统消息；当前可回答的提问/权限卡会完整重发（决策推送开启时含其它会话） |
+| `/history` | 见下方「`/history` 按轮次回看」：默认最近 5 轮，末轮全文、其余简写，`show <编号>` 看全文；当前可回答的提问/权限卡会完整重发（决策推送开启时含其它会话） |
 | `/at` | 见下方「`/at` 引用」 |
 | `/skill` | 见下方「`/skill` 查看技能」 |
 | `/stop` | 中断当前任务 |
 | `/next` | 继续发送因微信限制被缓存的消息 |
 | `/rq` | 关闭当前会话的待处理卡（提问+权限）；其它会话用 `P1=/rq` |
+
+### `/fork` 按轮次分叉
+
+```
+/fork                      # 同 /fork list
+/fork list [all|数量]       # 每轮一行，默认最近 20 行，并显示「共 N 轮」「显示 20/37」
+/fork show <编号>           # 第 N 轮的完整提问与完整回复
+/fork switch <编号>         # 从第 N 轮末尾分叉，并把微信绑定切到新会话
+```
+
+**它是 GUI 聊天页「轮次尾巴 → 分叉」按钮的微信入口，不是仿制品。** 三个点逐字对齐宿主实现，`tests/fork-command.test.ts` 把每一条都钉住：
+
+1. **同一个服务**。GUI 的 `forkAt(seq)` 调 `ctx.sessions.fork({sessionId, atSeq, increaseTitle: true})` → Remote `session.fork` → 宿主 `ctx.sessionController.fork(request)`；bridge 直调同一个 `ctx.get("sessionController").fork({ sessionId, atSeq })`（和 `/model` 直调 `selectModel` 是同一套做法）。子会话因此是**一等会话**：自己的 Agent、`parentSession` header、同一工作区成员资格，`/s list` 与 GUI 侧边栏都看得到。
+2. **同一个切点**。GUI 传的是 `turn-tail` 节点的 `data.seq`，也就是该轮 `turn/end` 事件的 seq；`/fork switch N` 传的正是这个值，所以切出来的历史完全一样。**不是** `latestCompletedPrefixBoundary`——那个是省略 `atSeq` 时宿主自己的兜底，会把切点推到下一个 `turn/start` 之前，不是用户点的那一轮。
+3. **同一套轮次折叠**（`ops.readSessionTurns`）。`turn/start` 锚定一轮（`data.turn` 递增才新建）；该轮**第一条**人类 `user/message` 是提问，同轮后续的 steering 不覆盖；每条 `assistant/message` 覆盖草稿，`turn/end` 提交为该轮回复；注入类 user 消息（`plugin` / `goal` / `session-reference`）不进轮次。这就是宿主 `dsh-session-turn-outline` 的 `turnOutline` 折叠规则，只是这里保留**全文**、额外记下 `turn/end` 的 seq（投影只给 50/120 字预览，既满足不了 `show` 的「完整」，也拿不到 GUI 的切点），并分别记下提问与回复的事件时间（`promptTime` / `replyTime`）。
+
+**编号是列表行号（1…N），与 `/s list` 一致**；窗口只影响显示，不影响解析（`/fork show 25` 在只显示 20 行时照样能到第 25 轮）。`list` 的窗口语法直接复用 `/s list` 的 `parseListLimit()`，所以 `all` / 数字 / `all 5` 行为逐字相同；详情因此单独占 `show`——`list 5` 永远是「看 5 行」，不会和「看第 5 轮」混淆。
+
+**标题递增**：fork 种子会复制 `session/title` 事件，不处理就会出现两个同名会话。所以分叉成功后按宿主客户端自己的 `increasedForkTitle()`（`标题` → `标题 (1)`、`标题(2)` → `标题(3)`，全角括号同理）改名一次；改名失败不影响分叉。
+
+**两个刻意的取舍**：
+
+- **只允许从「已结束」的轮次分叉**（`turn/end` 存在），进行中的轮次在列表里标 `（进行中）` 并拒绝 `switch`——没有切点就没有分叉。
+- **比 GUI 宽一点**：GUI 的分叉按钮在「该轮没有助手文字」或「收尾助手之后还有工具事件」时是**灰的**（`branchUnavailable`，纯粹是按钮挂在助手气泡上的 UI 约束），微信这边照常允许。宿主接受任意存在的 seq，而从一轮被中断的地方重来正是这个功能最有用的场景之一。这是**唯一**一处与 GUI 的行为差异，且方向是「更宽松」。
+
+分叉成功后自动把微信绑定切到子会话（等价于 GUI 分叉后自动打开它），原会话仍在 `/s list` 里可切回；`lastSessionListByUser` 快照随之作废（子会话插到了列表最前）。失败（`session/not-found`、`session/fork-unavailable`、`session/migration-required`、宿主缺失 `fork`）一律**不改绑定**，按宿主错误码回中文原因。
+
+`tests/fork-command.test.ts`（38 条）覆盖：解析与窗口语法、五种非法形式、`isBypassSlashCommand` 与 `LOCAL_COMMAND_NAMES` 接线、别名碰撞守卫、折叠的八种形状（含 steering、注入消息、纯图片、非递增 `turn/start`、无 seq、中断轮次）、冷会话回退 `readSession`、两种渲染、以及桥接的「传的 `atSeq` 恰好等于该轮 `turn/end`」「失败不改绑定」「打错只回用法、零转发」。
+
+### `/history` 按轮次回看
+
+```
+/history                      # 同 /history list
+/history list [all|数量]       # 每轮一行，默认最近 5 轮，末轮全文
+/history show <编号>           # 第 N 轮的完整提问与完整回复
+```
+
+**它是 `/fork` 的只读版本，共用同一份数据。** 轮次来自 `ops.readSessionTurns()`——和 `/fork` 逐字同一个折叠，所以 `/history show 3` 与 `/fork show 3` 打印的是同一轮，两个命令的编号也永远一致（不会各自漂移）。区别只在渲染与用途：`/history` 不提供 `switch`，分叉仍是 `/fork switch`。
+
+**每轮只留「提问 + 该轮最终回复」。** 过程中间的助手消息（工具调用前后的碎句）不进列表——那不是这一轮说了什么，而是它怎么说的。旧版 `/history` 是消息流水（一条助手消息一行），一有工具调用就被撑成十几行，所以这里改成按轮次折叠。
+
+**末轮全文、其余简写**：窗口永远以最新一轮结尾，所以列表最后一轮（`index === total`）整块打印完整提问与完整回复，前面的行按 30/50 字加 `…`。这与旧版「最近一条助手回复不截断」是同一个意图，只是把提问也一起给全。`show` 同样不截断，超长输出走 `splitText`（4000 字/条）+ `/next` 队列。
+
+**提问和回复各带各的时间。** `SessionTurn` 记两个时钟：`promptTime` 取那条人类 `user/message` 的事件时间，`replyTime` 取 `turn/end`。以前只有一个 `time`（而且被 `turn/end` 覆盖），所以「👤 你 · 50 分钟前」印的其实是**回复**的时刻——一轮跑了 19 分钟，用户那句话就被写成 19 分钟之后（实测差值 19 分钟）。简写行两边都带（`👤 50 分钟前 · 提问… → 🤖 31 分钟前 · 回复…`），时间放在文字**前面**：预览以 `…` 结尾，后面再挂时间会读成句子的一部分。没有时间的一侧（进行中的轮次没有 `replyTime`）直接省略，**不**打印「未知时间」——那是把「不知道」当成信息印出来。
+
+**块与块之间必须是空行，不能是单个换行。** 微信一旦把这条消息当 markdown 渲染（回复里出现一个 `**加粗**`、一个表格或一个行内代码就够），单个换行就是**软换行**，渲染成**空格**：`🤖 助手` 黏在回复上、`看全文: …` 黏在回复最后一行（桌面微信实测；同一段回复里的空行却正常分段，这正是软换行的定义）。空行在两种渲染下都是段落分隔，所以 `/history list`、`/fork list`、`/fork show` 的每个块之间统一用 `BLOCK_SEPARATOR`（`\n\n`），代价是每块多一行，换来的是「回复里有没有 markdown」都不影响版式。`tests/history-truncation.test.ts` 用「`🤖 助手` / `看全文` 前面绝不能是单个换行」把这条钉住。
+
+**注入消息没有展示入口了。** 压缩检查点、插件上下文、goal 续跑都是 user 角色，旧版用 `/history all` 才能看到它们；现在它们连 `all` 都看不到——`all` 是 `list` 的窗口关键字（全部轮次），与 `/fork list all` 同义。这与 GUI 侧边栏（`turnOutline` 只列 `source.kind === "user"`）一致：它们不是你说过的话。
+
+**两处破坏性变化**：`/history all` 不再是「含系统消息」；裸数量 `/history 10` 不再接受（写 `/history list 10`）。两者都按「打错的本地命令」回用法提示，不转发给 agent。20 条上限也一并取消——窗口由 `list <数量>` / `list all` 显式指定，与 `/s list`、`/fork list` 同一个 `parseListLimit()`。
+
+`/help` 一览不给 `/history` 印子命令行：那一行约 55 字，会把一览从实测 1954 字顶过 2000 字上限。`list` 是默认形式，`show` 写在 `usage`、四条示例里，而且**每次 `/history` 列表末尾都印着 `看全文: /history show N`**——提示在需要的那一刻到达。
+
+`tests/history-command.test.ts`（解析）、`tests/history-truncation.test.ts`（渲染与桥接）、`tests/history-provenance.test.ts`（注入消息不进提问、冷会话读 `readSession` 而非压缩后的 surface）三份测试钉住以上全部行为。
 
 ### `/at` 引用
 
@@ -231,7 +286,7 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 
 ## 已知边界
 
-- `/s list` 与 `/workspace list` 默认各显示 20 行，行末会提示「显示 20/N，看更多: … all（或 … <数量>）」；`all` 不设上限。会话或工作区很多时，回复会按 `textChunkLimit`（4000 字）拆成多条消息，超出微信 10 条/窗口额度的部分进入 `/next` FIFO 缓存（上限 100 条），需在微信端主动发消息或发 `/next` 继续发送。
+- `/s list`、`/workspace list` 与 `/fork list` 默认各显示 20 行，行末会提示「显示 20/N，看更多: … all（或 … <数量>）」（`/fork list` 是「看更早的」，因为它的窗口取的是**最近** 20 轮）；`all` 不设上限。会话、工作区或轮次很多时，回复会按 `textChunkLimit`（4000 字）拆成多条消息，超出微信 10 条/窗口额度的部分进入 `/next` FIFO 缓存（上限 100 条），需在微信端主动发消息或发 `/next` 继续发送。`/fork show` 的正文**不截断**（要的就是完整内容），超长同样走这条分段 + `/next` 链路。
 - `/s list` 的编号与显示窗口无关：`/s switch <编号>` 仍按**完整**列表校验，所以 `/s list` 之后 `/s switch 25` 能切到未显示的第 25 条（列表行号 1-20 与它一一对应，靠「看更多」提示按需展开）。
 - 会话置顶走宿主注册表（`workspaceRegistry.pinnedSessionIds` / `pinSession` / `unpinSession`），与 GUI 侧边栏共享同一份**持久**集合，任一端置顶或取消，另一端立即一致；`/s pin` / `/s unpin` 只写这一处，不额外落本地状态。置顶区内部仍按最近活动时间降序（对应 GUI 的「最近更新」视图——置顶时间不参与排序），所以置顶只改变分区归属，不冻结行内顺序；无置顶时行序与以前完全一致。归档与置顶互斥：已归档会话无法置顶（GUI 归档时会顺带清掉该会话的置顶），`/s list` 也不显示归档会话，因此只有「当前绑定会话」这条路径可能撞上该限制。宿主未挂载 `workspaceRegistry` 或版本早于该功能时，置顶命令提示「未提供置顶服务」并降级为无置顶显示，不会报错。
 - `list current` 的目录匹配走宿主的 canonical path 规则（`fs.promises.realpath`，与 `@deepseek-ai/dsh-workspace` 的 `realpathNormalize` 同源）：折叠尾斜杠、`.`/`..`、混合分隔符、符号链接，Windows 上也折叠大小写——与 GUI 侧边栏的工作区分组完全一致。目录已删除/无法解析时退化为 `path.resolve` 归一。`/s new` 复用空白会话、`/workspace list` 的「◀ 当前」标记、以及跨会话任务提醒的收件人解析都用同一套比较。

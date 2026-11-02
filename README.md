@@ -4,13 +4,9 @@
 [![npm downloads](https://img.shields.io/npm/dm/dsh-wechat?style=flat-square&logo=npm)](https://www.npmjs.com/package/dsh-wechat)
 [![License](https://img.shields.io/github/license/pan17/dsh-wechat?style=flat-square)](https://github.com/pan17/dsh-wechat)
 
-把微信变成 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 的第二客户端：在微信里和你的 agent 聊天，文字、图片、文件和语音都能发进来（语音自动转文字），用 slash 命令管理会话、工作区、模型与权限，审批卡和提问卡在微信与桌面端同步弹出。
+把微信变成 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 的第二客户端：在微信里和你的 agent 聊天，文字、图片、文件和语音双向传输，用 slash 命令管理会话、工作区、模型、权限等等。
 
 <img src="./resources/send.jpg" alt="发送" width="32%" /> <img src="./resources/receive.jpg" alt="接收" width="32%" /> <img src="./resources/settings.png" alt="设置页" width="32%" />
-
-## 功能
-
-微信与 DSH 双向同步：文字、图片、文件和语音（自动转文字）直接发给 agent，回复与执行过程推回微信，审批卡和提问卡两端同弹、谁先答谁生效；`/at` 可引用其它会话或文件，把几条消息或「截图 + 问题」合成一轮，静默模式与结论模式控制推送频率，跨会话任务完成提醒可选带摘要或全文；会话、工作区、Preset、模型、权限都能在微信里用 slash 命令管理，与 GUI 同源；另有秘密脱敏、文件范围限制、入站白名单与审计日志等边界，以及内嵌在 DSH 设置里的扫码登录、配置页与**指令帮助**（每条指令一句说明，点开看全部例子、点一下复制）。
 
 ## 安装
 
@@ -25,7 +21,7 @@ dsh plugin --profile desktop add dsh-wechat
 dsh plugin --profile desktop list --depth 0    # 查看已装版本
 ```
 
-安装后打开 **设置 → WeChat** 扫码登录（也可直接访问 `http://127.0.0.1:3080/wechat/qr`）。
+安装后打开 **设置 → WeChat** 扫码登录。
 
 ## 微信命令
 
@@ -36,6 +32,7 @@ dsh plugin --profile desktop list --depth 0    # 查看已装版本
 | `/status` | 工作区、会话、模型、权限、各开关状态；末尾会话级状态默认只显示模式和后台任务（`/status full` 看全部） |
 | `/workspace`（`/ws`） | `list` / `status` / `switch <编号\|路径>` / `add <路径>` |
 | `/session`（`/s`） | `list [current]` / `switch [current]` / `pin` / `unpin` / `new` / `status` |
+| `/fork` | `list [all\|数量]` 看每轮提问与最终回复，`show <编号>` 看全文，`switch <编号>` 从那轮分叉新会话 |
 | `/preset`（`/p`） | `list` / `switch <名称\|编号>` 切当前会话（第一条消息前）/ `default [名称\|编号]` 改新会话默认 / `status` |
 | `/model` | `list` / `switch <提供商/模型>` / `status` |
 | `/perm` | `status` / `list` / `switch <名称\|编号>` / `default [名称\|编号]` |
@@ -47,7 +44,7 @@ dsh plugin --profile desktop list --depth 0    # 查看已装版本
 | `/media`（`/md`） | 图片/文件合并开关；`at\|path` 切换附件交付措辞 |
 | `/at` | 引用其它会话（`s`）或文件/目录（`f`），附加到下一条消息 |
 | `/notify`（`/watch`） | 跨会话决策推送；`tasks on\|off` 单独控制任务提醒 |
-| `/history` | 查看最近历史，`all` 含系统消息 |
+| `/history` | 按轮次回看：默认最近 5 轮，末轮全文；`list all\|数量` 换窗口，`show <编号>` 看全文 |
 | `/skill` | 查看当前会话的技能；`/skill 2` 或 `/skill office` 看详细说明 |
 | `/flush`（`/f`） | 立即取回结论模式暂存的结论 |
 | `/surface`（`/wxprompt`） | 微信渠道提示词注入开关 |

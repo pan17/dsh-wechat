@@ -218,6 +218,23 @@ const COMMANDS: HelpCommandEntry[] = [
     ],
   },
   {
+    id: "fork",
+    command: "/fork",
+    aliases: [],
+    summary: "按轮次分叉当前会话",
+    usage: "/fork list [all|数量] | show <编号> | switch <编号>（裸 /fork 同 list）",
+    subcommands: ["list", "show", "switch"],
+    group: "navigate",
+    examples: [
+      { line: "/fork", note: "最近 20 轮，显示共几轮" },
+      { line: "/fork list", note: "同上" },
+      { line: "/fork list 50", note: "最近 50 轮" },
+      { line: "/fork list all", note: "全部轮次" },
+      { line: "/fork show 3", note: "第 3 轮的提问与回复全文" },
+      { line: "/fork switch 3", note: "从第 3 轮分叉新会话" },
+    ],
+  },
+  {
     id: "workspace",
     command: "/workspace",
     aliases: ["ws"],
@@ -469,15 +486,20 @@ const COMMANDS: HelpCommandEntry[] = [
     id: "history",
     command: "/history",
     aliases: [],
-    summary: "查看历史记录",
-    usage: "/history [all] [数量]（默认 5，最多 20）",
-    subcommands: ["all"],
+    summary: "回看历史轮次",
+    usage: "/history [list [all|数量] | show <编号>]（默认最近 5 轮）",
+    // No `subcommands`: declaring `list`/`show` costs a row in the `/help`
+    // listing, and that row (~55 chars) is what pushes the listing past its
+    // 2000-char ceiling (measured 1954 chars). Both forms are spelled out in
+    // `usage` and in the examples below, and every `/history` list ends with
+    // `看全文: /history show N` — the hint arrives exactly when it is needed.
+    subcommands: [],
     group: "reference",
     examples: [
-      { line: "/history", note: "最近 5 条" },
-      { line: "/history 10", note: "最近 10 条（上限 20）" },
-      { line: "/history all", note: "含系统消息" },
-      { line: "/history all 10", note: "系统消息 + 10 条" },
+      { line: "/history", note: "最近 5 轮，末轮全文" },
+      { line: "/history list 10", note: "最近 10 轮" },
+      { line: "/history list all", note: "全部轮次" },
+      { line: "/history show 3", note: "第 3 轮的完整问答" },
     ],
   },
 

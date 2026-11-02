@@ -643,6 +643,7 @@ function recognizesLocalCommand(text: string): boolean {
     parseReasoningCommand(text) !== null ||
     parseEnterCommand(text) !== null ||
     parseHistoryCommand(text) !== null ||
+    parseForkCommand(text) !== null ||
     parseAtCommand(text) !== null ||
     parseSkillCommand(text) !== null
   );
@@ -838,6 +839,20 @@ function parseListLimit(tokens: string[]): { limit?: number; all?: boolean } | u
     ...(limit !== undefined ? { limit } : {}),
     ...(all ? { all: true } : {}),
   };
+}
+
+/**
+ * Parse the single row number a `show` / `switch` subcommand takes.
+ *
+ * Exactly one positive integer and nothing else: `show 1 2` and `show abc` are
+ * usage errors, never a guess. Shared by `/fork show`, `/fork switch` and
+ * `/history show`, so the three agree on what a number means — and on when it
+ * is not one.
+ */
+function parseTurnIndex(tokens: string[]): number | undefined {
+  if (tokens.length !== 1 || !/^\d+$/.test(tokens[0]!)) return undefined;
+  const index = parseInt(tokens[0]!, 10);
+  return Number.isFinite(index) && index > 0 ? index : undefined;
 }
 
 /**
@@ -1111,10 +1126,35 @@ export function parseEnterCommand(text: string): EnterCommand | null {
 
 // ─── History ────────────────────────────────────────────────────────────────
 
+/**
+ * Rows `/history` prints when the caller does not ask for more.
+ *
+ * Smaller than {@link LIST_DEFAULT} on purpose: `/history` answers "what did we
+ * just say", and five turns is roughly one screen of WeChat. The window can be
+ * lifted with `list <数量>` / `list all`, exactly like `/fork list`.
+ */
 export const HISTORY_DEFAULT = 5;
-export const HISTORY_MAX = 20;
 
-export type HistoryCommand = { kind: "history"; count: number; includeSystem: boolean };
+/**
+ * `/history`（回看）— 按轮次回看当前会话，与 `/fork` 同一套折叠。
+ *
+ *   /history                   → 同 `/history list`
+ *   /history list [all|数量]   → 每轮一行（默认最近 5 轮），末轮全文
+ *   /history show <编号>       → 第 N 轮的完整提问与完整回复
+ *
+ * 每轮只保留「该轮第一条人类提示词 + 该轮最终回复」：过程中间的助手消息
+ * （工具调用前后的碎句）不再出现——那不是这一轮说了什么，而是它怎么说的。
+ * 折叠来自 `ops.readSessionTurns()`，与 `/fork` 逐字同源，所以两个命令对同一份
+ * 日志给出的编号永远一致，`show N` 看到的是同一轮。
+ *
+ * `list` 的窗口语法与 `/fork list`、`/s list` 完全一致（同一个
+ * {@link parseListLimit}）：`all` 现在是「全部轮次」，不再是旧版的「含系统
+ * 消息」——注入类消息（压缩检查点 / 插件上下文 / goal 续跑）本来就不该出现在
+ * 「你说过什么」的列表里。
+ */
+export type HistoryCommand =
+  | { kind: "list"; limit?: number; all?: boolean }
+  | { kind: "show"; index: number };
 
 // ─── /at: reference another session or a file ───────────────────────────────
 
@@ -1165,65 +1205,329 @@ export function parseAtCommand(text: string): AtCommand | null {
 
 /**
  * True if text looks like an `/at` attempt (including an invalid argument),
- * used to decide whether to show usage instead of forwarding to the agent —
- * the same contract as {@link isHistoryCommandAttempt}.
+ * used to decide whether to show usage instead of forwarding to the agent.
  */
 export function isAtCommandAttempt(text: string): boolean {
   return /^\s*\/at\b/i.test(text);
 }
 
 /**
- * Parse `/history [all] [N]` — view recent conversation history.
- *   /history            → 5 human+assistant turns (default)
- *   /history 10         → 10
- *   /history all        → 5, including synthesized system injections
- *   /history all 10     → 10, including system
- *   /history 10 all     → same as `all 10`
- *   /history 30         → 20 (clamped to HISTORY_MAX)
+ * Parse `/history [list [all|数量] | show <编号>]`.
  *
- * Returns null for: invalid tokens, non-integer / <=0 counts, extra
- * trailing garbage, or a non-history prefix. The caller detects a
- * leading `/history` with an invalid arg and replies with usage
- * instead of forwarding to the agent.
+ * Mirrors {@link parseForkCommand} minus `switch`: the same window grammar
+ * (`parseListLimit`), the same "exactly one positive integer" rule for `show`,
+ * and the same refusal to guess at anything else.
+ *
+ * The old spellings are deliberately gone: `/history 10` (bare count) and
+ * `/history all` (system messages) both fail closed here, and the usage reply
+ * teaches `list 10` / `list all` instead of quietly meaning something a `/fork`
+ * user would not expect.
  */
 export function parseHistoryCommand(text: string): HistoryCommand | null {
   const trimmed = text.trim();
   const m = trimmed.match(/^\/history(?:\s+(.*))?$/i);
   if (!m) return null;
   const rest = (m[1] ?? "").trim();
-  if (!rest) return { kind: "history", count: HISTORY_DEFAULT, includeSystem: false };
-
-  const tokens = rest.split(/\s+/);
-  let includeSystem = false;
-  let countToken: string | undefined;
-  for (const token of tokens) {
-    if (/^all$/i.test(token)) {
-      if (includeSystem) return null;
-      includeSystem = true;
-      continue;
+  if (!rest) return { kind: "list" };
+  const [head, ...tail] = rest.split(/\s+/);
+  switch (head!.toLowerCase()) {
+    case "list": {
+      const window = parseListLimit(tail);
+      return window === undefined ? null : { kind: "list", ...window };
     }
-    if (/^\d+$/.test(token)) {
-      if (countToken !== undefined) return null;
-      countToken = token;
-      continue;
+    case "show": {
+      const index = parseTurnIndex(tail);
+      return index === undefined ? null : { kind: "show", index };
     }
-    return null;
+    default:
+      return null;
   }
+}
 
-  if (countToken === undefined) {
-    return { kind: "history", count: HISTORY_DEFAULT, includeSystem };
+// ─── /fork: 按轮次分叉当前会话 ──────────────────────────────────────────────
+
+/**
+ * `/fork`（分叉）— 以当前会话的某一轮为切点开一个新会话。
+ *
+ *   /fork                      → 同 `/fork list`
+ *   /fork list [all|<数量>]    → 轮次列表（默认 20 行，并显示「共 N 轮」「显示 20/37」）
+ *   /fork show <编号>          → 第 N 轮的完整提问与完整回复
+ *   /fork switch <编号>        → 从第 N 轮末尾分叉，并把微信绑定切到新会话
+ *
+ * `list` 的窗口语法与 `/s list`、`/workspace list` 完全一致（同一个
+ * {@link parseListLimit}），所以 `all` / 数字 / `all 5` 的行为逐字相同。详情因此
+ * 单独占 `show` 一个子命令：`list 5` 永远是「看 5 行」，不会和「看第 5 轮」混淆。
+ *
+ * 编号是**全表行号**（1…N），与 `/s list` 一致：窗口只影响显示，不影响解析，
+ * 所以只显示 20 行时 `/fork show 25` 照样能到第 25 轮（同 `/s switch 25`）。
+ */
+export type ForkCommand =
+  | { kind: "list"; limit?: number; all?: boolean }
+  | { kind: "show"; index: number }
+  | { kind: "switch"; index: number };
+
+export function parseForkCommand(text: string): ForkCommand | null {
+  const trimmed = text.trim();
+  const m = trimmed.match(/^\/fork(?:\s+(.*))?$/i);
+  if (!m) return null;
+  const rest = (m[1] ?? "").trim();
+  if (!rest) return { kind: "list" };
+  const [head, ...tail] = rest.split(/\s+/);
+  switch (head!.toLowerCase()) {
+    case "list": {
+      const window = parseListLimit(tail);
+      return window === undefined ? null : { kind: "list", ...window };
+    }
+    case "show":
+    case "switch": {
+      const index = parseTurnIndex(tail);
+      return index === undefined ? null : { kind: head!.toLowerCase() as "show" | "switch", index };
+    }
+    default:
+      return null;
   }
-  const n = parseInt(countToken, 10);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return { kind: "history", count: Math.min(n, HISTORY_MAX), includeSystem };
 }
 
 /**
- * True if text looks like a /history attempt (including invalid args),
- * used to decide whether to show usage instead of forwarding to agent.
+ * True if text looks like a `/fork` attempt (including an invalid argument).
+ *
+ * Same contract as {@link isAtCommandAttempt}: a mistyped line gets its usage
+ * reply instead of being forwarded to the agent as prose.
  */
-export function isHistoryCommandAttempt(text: string): boolean {
-  return /^\s*\/history\b/i.test(text);
+export function isForkCommandAttempt(text: string): boolean {
+  return /^\s*\/fork\b/i.test(text);
+}
+
+/**
+ * The turn fields the WeChat renderers read.
+ *
+ * Structural subset of `SessionTurn` (`src/dsh/ops.ts`) so this module keeps
+ * its single dependency (the help catalog) and stays trivially unit-testable.
+ * Shared by `/fork` and `/history`: both print the SAME fold, so a type named
+ * after either command would misdescribe the other.
+ */
+export interface TurnView {
+  prompt: string;
+  reply: string;
+  /** `turn/end` seq; absent means the turn is still running. */
+  endSeq?: number;
+  /** When the human spoke (`user/message` event time). */
+  promptTime?: number;
+  /** When the turn closed (`turn/end` event time); absent while it runs. */
+  replyTime?: number;
+}
+
+/** Prompt preview budget: one WeChat line next to the row number and emoji. */
+const TURN_PROMPT_PREVIEW = 30;
+/** Reply preview budget: a bit more than the prompt, the reply carries the answer. */
+const TURN_REPLY_PREVIEW = 50;
+
+/**
+ * Collapse one message body to a single-line preview, mirroring the GUI
+ * rail's `preview()` normalization (whitespace collapsed, ellipsis when
+ * clipped) at a budget sized for a WeChat bubble rather than a rail card.
+ */
+function turnPreview(text: string, limit: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized === "") return "";
+  const chars = Array.from(normalized);
+  if (chars.length <= limit) return normalized;
+  return `${chars.slice(0, limit - 1).join("").trimEnd()}…`;
+}
+
+/**
+ * One side of a list row: `👤 50 分钟前 · 提问…`.
+ *
+ * The stamp sits BEFORE the text, not after it: the text is a preview that may
+ * end in `…`, and `…（50 分钟前）` reads like part of the sentence rather than
+ * metadata. A side without a stamp (a turn still running has no reply time)
+ * degrades to `🤖 （进行中）` instead of printing a bare `未知时间`.
+ */
+function rowSide(emoji: string, epoch: number | undefined, text: string): string {
+  return typeof epoch === "number"
+    ? `${emoji} ${formatRelativeTime(epoch)} · ${text}`
+    : `${emoji} ${text}`;
+}
+
+/**
+ * A block label with its own clock: `👤 你 · 50 分钟前`.
+ *
+ * Prompt and reply carry SEPARATE stamps — the human's message and the answer
+ * can be minutes apart, and the two questions ("when did I say it", "when did
+ * it answer") deserve their own answer.
+ */
+function blockLabel(label: string, epoch: number | undefined): string {
+  return typeof epoch === "number" ? `${label} · ${formatRelativeTime(epoch)}` : label;
+}
+
+/**
+ * One list row: `N. 👤 50 分钟前 · 提示词… → 🤖 49 分钟前 · 回复…`.
+ *
+ * Shared by `/fork list` and `/history list`. The numbers already agree between
+ * the two commands, and a different row shape would suggest they do not.
+ */
+function turnRow(index: number, turn: TurnView): string {
+  const prompt = turnPreview(turn.prompt, TURN_PROMPT_PREVIEW) || "（无文字）";
+  // A running turn has no closing event yet, which is a different fact from
+  // a finished turn that produced no prose (tool-only or aborted).
+  const reply = turnPreview(turn.reply, TURN_REPLY_PREVIEW)
+    || (turn.endSeq === undefined ? "（进行中）" : "（无回复）");
+  return `${index}. ${rowSide("👤", turn.promptTime, prompt)} → ${rowSide("🤖", turn.replyTime, reply)}`;
+}
+
+/**
+ * Separator between the blocks of a turn list.
+ *
+ * A BLANK line, never a single `\n`. WeChat markdown-renders a bot message as
+ * soon as it contains any markdown at all — one `**bold**`, one table or one
+ * inline code span in the agent's reply is enough — and in that mode a single
+ * newline is a SOFT break, rendered as a space. That welded `🤖 助手` onto the
+ * reply, and `看全文: …` onto the reply's last line, on desktop WeChat (the
+ * mobile client reflows the same way; it just wraps at a different width). A
+ * blank line is a paragraph break under BOTH renderers, so the layout survives
+ * whether or not the message happens to trip the markdown path.
+ *
+ * The cost is one extra line per block; for a five-row list that is nothing,
+ * and a broken layout is far more expensive than an airy one.
+ */
+const BLOCK_SEPARATOR = "\n\n";
+
+/**
+ * `/fork list` — one line per turn, newest window by default.
+ *
+ * The window is a TAIL window (the latest turns are the interesting ones),
+ * but the printed numbers stay absolute (1…N) so a row the user reads here
+ * addresses the same turn in `/fork show` / `/fork switch`, and so a row
+ * outside the window keeps its number.
+ */
+export function renderForkList(
+  turns: readonly TurnView[],
+  window: { limit?: number; all?: boolean } = {},
+): string {
+  const total = turns.length;
+  if (total === 0) return "🔀 这个会话还没有已记录的轮次。";
+  const limit = window.all ? total : (window.limit ?? LIST_DEFAULT);
+  const shown = limit >= total ? turns : turns.slice(total - limit);
+  const offset = total - shown.length;
+  const blocks: string[] = [`🔀 会话轮次（共 ${total} 轮）`];
+  shown.forEach((turn, position) => {
+    blocks.push(turnRow(offset + position + 1, turn));
+  });
+  if (shown.length < total) {
+    blocks.push(`显示 ${shown.length}/${total}，看更早的: /fork list all（或 /fork list <数量>）`);
+  }
+  const newest = offset + shown.length;
+  // Point the fork example at the newest COMPLETED turn: suggesting a switch
+  // on a running turn would answer the very command it printed with a refusal.
+  let switchIndex: number | undefined;
+  for (let position = shown.length - 1; position >= 0; position--) {
+    if (shown[position]!.endSeq !== undefined) {
+      switchIndex = offset + position + 1;
+      break;
+    }
+  }
+  const hints = [`看全文: /fork show ${newest}`];
+  if (switchIndex !== undefined) hints.push(`从那轮分叉: /fork switch ${switchIndex}`);
+  blocks.push(hints.join("；"));
+  return blocks.join(BLOCK_SEPARATOR);
+}
+
+/**
+ * One turn in full, for `/fork show` and `/history show`.
+ *
+ * Deliberately NOT truncated: the whole point of naming a turn is to read it.
+ * Oversized bodies are handled downstream by `splitText` (per-message chunking)
+ * and the `/next` queue.
+ *
+ * `emoji` is the ONLY difference between the two commands' detail views
+ * (`🔀` fork, `📜` history): the body has to stay identical, because it is the
+ * same turn either way, and the footer's fork hint is true from both.
+ */
+export function renderTurnDetail(turn: TurnView, index: number, emoji = "🔀"): string {
+  const prompt = turn.prompt.trim() || "（这一轮没有文字提示词）";
+  const reply = turn.reply.trim()
+    || (turn.endSeq === undefined ? "（这一轮还在进行中）" : "（这一轮没有文字回复）");
+  const lines = [
+    `${emoji} 第 ${index} 轮`,
+    "",
+    blockLabel("👤 你", turn.promptTime),
+    "",
+    prompt,
+    "",
+    blockLabel("🤖 助手", turn.replyTime),
+    "",
+    reply,
+  ];
+  // The reply block already said the turn is running, so the footer only has
+  // to answer the question the reader actually has: can I fork here?
+  lines.push("", turn.endSeq === undefined ? "这一轮结束后才能分叉。" : `从那轮分叉: /fork switch ${index}`);
+  return lines.join("\n");
+}
+
+/** `/fork show <编号>` — that turn, in full. */
+export function renderForkDetail(turn: TurnView, index: number): string {
+  return renderTurnDetail(turn, index, "🔀");
+}
+
+/** `/history show <编号>` — the same turn `/fork show` prints, read not forked. */
+export function renderHistoryDetail(turn: TurnView, index: number): string {
+  return renderTurnDetail(turn, index, "📜");
+}
+
+/**
+ * The newest turn, printed as a block instead of a one-line row: label, prompt
+ * and reply each get their own paragraph.
+ *
+ * This is the row the reader came for ("what did it just say"), so it is the
+ * one place a `/history` list is allowed to be tall. Every part is separated by
+ * {@link BLOCK_SEPARATOR} — see the note there for why a single newline is not
+ * enough.
+ */
+function historyLastBlock(index: number, turn: TurnView): string {
+  const prompt = turn.prompt.trim() || "（无文字）";
+  const reply = turn.reply.trim()
+    || (turn.endSeq === undefined ? "（进行中）" : "（无回复）");
+  return [
+    `${index}. ${blockLabel("👤 你", turn.promptTime)}`,
+    prompt,
+    blockLabel("🤖 助手", turn.replyTime),
+    reply,
+  ].join(BLOCK_SEPARATOR);
+}
+
+/**
+ * `/history list` — the same turns `/fork list` shows, read as a transcript.
+ *
+ * Every row is 「你的提示词 → 该轮最终回复」; the NEWEST turn is printed in full
+ * (prompt and reply, untruncated) because it is the answer the reader is most
+ * likely to be looking for — "what did it just say" — and it is exactly what
+ * the old flat `/history` did with the latest assistant message. The earlier
+ * rows are previews only, which is what lets five turns fit in one bubble.
+ *
+ * The window is a TAIL window that always ends at the newest turn, so
+ * `index === total` is always "the last turn" regardless of how many rows are
+ * shown. Numbers stay absolute (1…N), the same coordinate `/fork` uses, so
+ * `/history show 25` reaches turn 25 while only 5 rows are printed.
+ */
+export function renderHistoryList(
+  turns: readonly TurnView[],
+  window: { limit?: number; all?: boolean } = {},
+): string {
+  const total = turns.length;
+  if (total === 0) return "📜 暂无历史消息。";
+  const limit = window.all ? total : (window.limit ?? HISTORY_DEFAULT);
+  const shown = limit >= total ? turns : turns.slice(total - limit);
+  const offset = total - shown.length;
+  const blocks: string[] = [`📜 会话轮次（共 ${total} 轮）`];
+  shown.forEach((turn, position) => {
+    const index = offset + position + 1;
+    blocks.push(index === total ? historyLastBlock(index, turn) : turnRow(index, turn));
+  });
+  if (shown.length < total) {
+    blocks.push(`显示 ${shown.length}/${total}，看更早的: /history list all（或 /history list <数量>）`);
+  }
+  blocks.push(`看全文: /history show ${total}`);
+  return blocks.join(BLOCK_SEPARATOR);
 }
 
 // ─── /skill: 查看当前会话的技能 ──────────────────────────────────────────────
@@ -1269,8 +1573,8 @@ export function parseSkillCommand(text: string): SkillCommand | null {
 /**
  * True if text looks like an `/skill` attempt (including an invalid argument).
  *
- * Same contract as {@link isHistoryCommandAttempt}: a mistyped line gets its
- * usage reply instead of being forwarded as prose.
+ * Same contract as {@link isAtCommandAttempt}: a mistyped line gets its usage
+ * reply instead of being forwarded as prose.
  */
 export function isSkillCommandAttempt(text: string): boolean {
   return /^\s*\/skill\b/i.test(text);
@@ -1324,6 +1628,9 @@ export function isBypassSlashCommand(text: string): boolean {
     parseEnterCommand(text) !== null ||
     parseNotifyCommand(text) !== null ||
     parseHistoryCommand(text) !== null ||
+    // `/fork` follows the `/at` / `/skill` attempt rule: a mistyped subcommand
+    // (`/fork shw 2`) is a command attempt, never a plausible card answer.
+    isForkCommandAttempt(text) ||
     // `/at` bypasses on the ATTEMPT, not just a valid parse: a mistyped
     // `/at s` is never a plausible answer to a permission/question card, and
     // swallowing it as one would both drop the user's intent and leave the
@@ -1389,6 +1696,7 @@ export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "flush",
   "f",
   "history",
+  "fork",
   "at",
   "skill",
   "rp",

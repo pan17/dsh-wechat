@@ -105,10 +105,14 @@ describe("sessionEvents prefers snapshotEvents", () => {
 });
 
 describe("DshOps live log via snapshotEvents", () => {
-  it("getSessionHistory reads snapshotEvents without a legacy events array", async () => {
+  it("readSessionTurns reads snapshotEvents without a legacy events array", async () => {
+    // `/history` and `/fork` both fold this log; the live path is the one that
+    // matters for the bound session, and it must not need `session.events`.
     const events = [
-      { type: "user/message", time: 1, data: { content: [{ type: "text", text: "你好" }] } },
-      { type: "assistant/message", time: 2, data: { message: { content: [{ type: "text", text: "收到" }] } } },
+      { type: "turn/start", seq: 0, time: 1, data: { turn: 1 } },
+      { type: "user/message", seq: 1, time: 2, data: { role: "user", source: { kind: "user" }, content: [{ type: "text", text: "你好" }] } },
+      { type: "assistant/message", seq: 2, time: 3, data: { message: { content: [{ type: "text", text: "收到" }] } } },
+      { type: "turn/end", seq: 3, time: 4, data: { turn: 1 } },
     ];
     const agent = {
       session: { snapshotEvents: () => events },
@@ -117,9 +121,9 @@ describe("DshOps live log via snapshotEvents", () => {
       get: (name: string) => (name === "agents" ? { get: () => agent } : undefined),
       on: () => () => {},
     });
-    await expect(ops.getSessionHistory("s-1", 10)).resolves.toEqual([
-      { role: "user", text: "你好", time: 1 },
-      { role: "assistant", text: "收到", time: 2 },
+    await expect(ops.readSessionTurns("s-1")).resolves.toEqual([
+      // Two clocks, not one: the human spoke at 2, the turn closed at 4.
+      { turn: 1, prompt: "你好", reply: "收到", startSeq: 0, endSeq: 3, promptTime: 2, replyTime: 4 },
     ]);
   });
 });

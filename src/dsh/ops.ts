@@ -139,10 +139,11 @@ export interface SessionQuery {
   listEvents(sessionId: string): Promise<Array<{ type: string; time: number; data?: unknown; seq?: number }>>;
   /**
    * Full validated log (0.1.2+). `listEvents` no longer carries `data`, so
-   * `/history` prefers this when the host exposes it.
+   * `/history` and `/fork` both prefer this when the host exposes it. `seq`
+   * rides along on every event — it is the coordinate `/fork` cuts at.
    */
   readSession?(sessionId: string): Promise<{
-    events: Array<{ type: string; time?: number; data?: unknown }>;
+    events: Array<{ type: string; time?: number; data?: unknown; seq?: number }>;
   }>;
 }
 
@@ -176,13 +177,6 @@ interface ProjectionCacheService {
 export type SessionLogActivity =
   | { ok: true; lastUserMessageTime?: number }
   | { ok: false; error: string };
-
-export interface HistoryEntry {
-  /** `system` is a synthesized user-role message (compact / plugin / goal / recall). */
-  role: "user" | "assistant" | "system";
-  text: string;
-  time: number;
-}
 
 export interface LlmService {
   listProviders(): ProviderInfo[];
@@ -226,6 +220,12 @@ export interface AgentDefaultModelService {
  * selection, and saves the deployment default in the background. Calling it
  * from WeChat is what keeps both surfaces on ONE selection instead of the
  * bridge maintaining a second, request-only override.
+ *
+ * `fork` and `rename` are the two operations behind the GUI chat's
+ * 「分叉」 button: `fork` copies the inclusive event prefix through `atSeq`
+ * into a brand-new Session (the child gets its own Agent, a `parentSession`
+ * header and the source workspace membership), and `rename` rewrites the
+ * child's title so parent and child do not read as duplicates.
  */
 export interface SessionControllerService {
   selectModel?(request: {
@@ -234,7 +234,81 @@ export interface SessionControllerService {
     model: string;
     reasoningEffort?: string;
   }): Promise<{ selected?: ModelSelection } | undefined>;
+  /**
+   * Fork one Session at an inclusive event boundary.
+   *
+   * The GUI passes the closing turn's `turn/end` seq as `atSeq`, and so does
+   * `/fork switch`: the cut then contains the whole completed turn. Omitting
+   * `atSeq` lets the host pick the latest completed-turn prefix, which is NOT
+   * what either surface wants (the user names the turn).
+   */
+  fork?(request: {
+    sessionId: string;
+    atSeq?: number;
+    allowMigration?: boolean;
+  }): Promise<{ sessionId: string } | undefined>;
+  /** Append a user-owned Session title (the GUI's rename). */
+  rename?(request: {
+    sessionId: string;
+    title: string;
+  }): Promise<{ title?: string; seq?: number } | undefined>;
 }
+
+/**
+ * One conversation turn, folded from the durable session log exactly the way
+ * the host's `turnOutline` projection folds it (`@deepseek-ai/dsh-session-turn-outline`):
+ * `turn/start` anchors a turn, the FIRST human `user/message` of that turn is
+ * its prompt, and the last text-bearing `assistant/message` becomes its reply
+ * when `turn/end` commits the draft.
+ *
+ * Unlike the projection this carries the FULL text (the projection caps at
+ * 50/120-char previews) plus the `turn/end` seq, which is the fork boundary
+ * the GUI uses.
+ */
+export interface SessionTurn {
+  /** Host turn number (`turn/start` payload `data.turn`) — the GUI rail's number. */
+  turn: number;
+  /** Full text of the turn's first human prompt; `''` for an image-only turn. */
+  prompt: string;
+  /** Full text of the reply committed at `turn/end`; `''` when the turn produced none. */
+  reply: string;
+  /** `turn/start` seq — the load-through anchor, unused by the bridge today. */
+  startSeq: number;
+  /**
+   * `turn/end` seq — the exact inclusive fork boundary.
+   *
+   * Absent while the turn is still open: a running turn has no closing event,
+   * so there is nothing to cut at and `/fork switch` must refuse it.
+   */
+  endSeq?: number;
+  /**
+   * Event time of the human `user/message` that filled the prompt.
+   *
+   * Kept separate from {@link replyTime}: a turn can run for minutes, and the
+   * two sides are printed with their own clock because they answer different
+   * questions — "when did I say this" and "when did it answer".
+   */
+  promptTime?: number;
+  /** Event time of `turn/end`; absent while the turn is still open. */
+  replyTime?: number;
+}
+
+/**
+ * Outcome of a fork attempt, mapped from the host's own error codes so the
+ * bridge can word a precise reply without importing `@deepseek-ai/*` classes
+ * (the host's `RemoteError` carries a stable `code` string).
+ */
+export type ForkOutcome =
+  | { kind: "ok"; sessionId: string }
+  /** The deployment composes no session controller, or one without `fork`. */
+  | { kind: "unsupported" }
+  /** `session/not-found` — the source Session is gone. */
+  | { kind: "not-found" }
+  /** `session/fork-unavailable` — the cut seq is not in the source log. */
+  | { kind: "unavailable"; message: string }
+  /** `session/migration-required` — the source log needs an open in the GUI first. */
+  | { kind: "migration-required" }
+  | { kind: "error"; message: string };
 
 /** Outcome of routing one switch through the Host session controller. */
 export type SessionModelSelectionOutcome =
@@ -834,41 +908,7 @@ export class DshOps {
     }
   }
 
-  // ─── History ──────────────────────────────────────────────────────────────
-
-  /**
-   * Extract display text from a session event's data payload.
-   * Handles multiple host shapes: `data.message.content[]`, `data.content`,
-   * `data.text`, etc. Returns empty string when nothing text-like is found.
-   */
-  private extractHistoryText(data: unknown): string {
-    if (!data || typeof data !== "object") {
-      if (typeof data === "string") return data;
-      return "";
-    }
-    const d = data as Record<string, unknown>;
-    // Primary: DSH message shape `data.message.content: [{type:"text",text}]`
-    const msg = d.message as Record<string, unknown> | undefined;
-    if (msg && Array.isArray(msg.content)) {
-      const parts = (msg.content as Array<Record<string, unknown>>)
-        .filter((b) => b.type === "text" && typeof b.text === "string")
-        .map((b) => String(b.text));
-      if (parts.length > 0) return parts.join("\n");
-    }
-    // Fallback: `data.content` array (some versions flatten)
-    if (Array.isArray(d.content)) {
-      const parts = (d.content as Array<Record<string, unknown>>)
-        .filter((b) => b && typeof b === "object" && (b as { type?: string }).type === "text" && typeof (b as { text?: unknown }).text === "string")
-        .map((b) => String((b as { text: string }).text));
-      if (parts.length > 0) return parts.join("\n");
-    }
-    // Fallback: plain `data.text`
-    if (typeof d.text === "string" && d.text.trim()) return d.text;
-    // Fallback: `data.prompt` or `data.input` string
-    if (typeof d.prompt === "string" && d.prompt.trim()) return d.prompt;
-    if (typeof d.input === "string" && d.input.trim()) return d.input;
-    return "";
-  }
+  // ─── Turns & fork ─────────────────────────────────────────────────────────
 
   /**
    * Classify one `user/message` payload as a genuine human turn or a
@@ -891,84 +931,226 @@ export class DshOps {
     return kind === undefined || kind === "user" ? "user" : "system";
   }
 
-  /** Fold chronological history entries out of surface or raw-log events. */
-  private historyEntries(
-    events: readonly { type: string; time?: number; data?: unknown }[],
-  ): HistoryEntry[] {
-    const entries: HistoryEntry[] = [];
-    for (const ev of events) {
-      if (ev.type !== "user/message" && ev.type !== "assistant/message") continue;
-      const text = this.extractHistoryText(ev.data);
-      if (!text) continue;
-      const role = ev.type === "user/message" ? this.userMessageRole(ev.data) : "assistant" as const;
-      entries.push({ role, text, time: typeof ev.time === "number" ? ev.time : Date.now() });
-    }
-    return entries;
-  }
-
-  private takeHistoryWindow(entries: HistoryEntry[], cap: number, includeSystem: boolean): HistoryEntry[] {
-    const visible = includeSystem ? entries : entries.filter((e) => e.role !== "system");
-    return visible.slice(-cap);
-  }
+  // ─── Turns & fork ─────────────────────────────────────────────────────────
 
   /**
-   * Retrieve the most recent `limit` conversation entries for `sessionId`,
-   * ordered oldest→newest.
+   * Read one session's durable log as event records that carry `seq`.
    *
-   * Strategy:
-   *  1. Try in-memory `session.snapshotEvents()` (0.1.5) or the legacy
-   *     `session.events` array via `ctx.get("agents")` — fast, no I/O,
-   *     survives even when `sessionQuery` is unavailable.
-   *  2. Fall back to persisted `sessionQuery.readSession(sessionId)` (full
-   *     raw log with `data`). `listEvents` is metadata-only since 0.1.2
-   *     and cannot reconstruct text.
+   * Two sources, in this order: the live in-memory log first (no I/O, and the
+   * bound session is normally live), then the persisted
+   * `sessionQuery.readSession()` read (full validated events with `data`).
+   * `listEvents` is deliberately NOT a fallback — since 0.1.2 it is
+   * metadata-only and cannot reconstruct prompt/reply text, so folding it
+   * would silently produce empty turns.
    *
-   * Folds `user/message` and `assistant/message`. Synthesized user-role
-   * messages (see {@link userMessageRole}) are tagged `system` and omitted
-   * unless `includeSystem` is set. Other event types (tool results, true
-   * `system/message`, etc.) stay out of the WeChat view.
-   *
-   * Returns `[]` on any error or when no history exists — caller renders
-   * a friendly empty-state message.
+   * Returns `[]` on any error; callers render a friendly empty state.
    */
-  async getSessionHistory(
+  private async sessionLogRecords(
     sessionId: string,
-    limit: number,
-    opts?: { includeSystem?: boolean },
-  ): Promise<HistoryEntry[]> {
-    const cap = Math.max(1, Math.min(limit, 20));
-    const includeSystem = opts?.includeSystem === true;
-    // 1) In-memory fast path
+  ): Promise<Array<{ type: string; time?: number; data?: unknown; seq?: number }>> {
     try {
       const agents = this.get<{ get(id: string): { session?: AgentSession } | undefined }>("agents");
-      const agent = agents?.get(sessionId);
-      const events = sessionEvents(agent?.session);
-      if (events.length > 0) {
-        const entries = this.takeHistoryWindow(this.historyEntries(events), cap, includeSystem);
-        if (entries.length > 0) {
-          // events are already in chronological order (ascending seq)
-          return entries;
-        }
-      }
+      const events = sessionEvents(agents?.get(sessionId)?.session);
+      if (events.length > 0) return [...events];
     } catch {
       // fall through to persisted path
     }
-
-    // 2) Persisted fallback. Prefer `readSession` (full events with `data`);
-    // `listEvents` in 0.1.2 is metadata-only and cannot reconstruct text.
     const query = this.get<SessionQuery>("sessionQuery");
-    if (!query) return [];
+    if (!query || typeof query.readSession !== "function") return [];
     try {
-      let records: Array<{ type: string; time?: number; data?: unknown }> = [];
-      if (typeof query.readSession === "function") {
-        const snapshot = await query.readSession(sessionId);
-        records = snapshot.events ?? [];
-      } else {
-        records = await query.listEvents(sessionId);
-      }
-      return this.takeHistoryWindow(this.historyEntries(records), cap, includeSystem);
+      const snapshot = await query.readSession(sessionId);
+      return snapshot.events ?? [];
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Text of one message event, mirroring the host's own extraction shape:
+   * `assistant/message` nests the message under `data.message`, while
+   * `user/message` carries it directly in `data`.
+   *
+   * Text blocks are joined with a newline in block order and left otherwise
+   * untouched — the turn fold needs the full, unnormalized body so `/fork show`
+   * and `/history show` can print it verbatim.
+   */
+  private turnMessageText(data: unknown, nested: boolean): string {
+    if (!data || typeof data !== "object") return "";
+    const holder = nested ? (data as { message?: unknown }).message : data;
+    if (!holder || typeof holder !== "object") return "";
+    const content = (holder as { content?: unknown }).content;
+    if (!Array.isArray(content)) return "";
+    const parts = content
+      .filter(
+        (block): block is { type: string; text: string } =>
+          !!block &&
+          typeof block === "object" &&
+          (block as { type?: unknown }).type === "text" &&
+          typeof (block as { text?: unknown }).text === "string",
+      )
+      .map((block) => block.text);
+    return parts.join("\n");
+  }
+
+  /**
+   * Fold a log into turns, exactly as the host's `turnOutline` projection
+   * folds it — with full text and the closing seq attached.
+   *
+   * The rules, copied from `@deepseek-ai/dsh-session-turn-outline`:
+   *   - `turn/start` anchors a turn, but only when its `data.turn` ADVANCES
+   *     past the previous entry (a retried boundary reuses the number and
+   *     must not create a second row);
+   *   - the turn's FIRST human `user/message` fills the prompt, and later
+   *     human messages in the same turn (steering) never overwrite it;
+   *   - every text-bearing `assistant/message` overwrites a draft;
+   *   - `turn/end` commits the draft as the reply and records its own seq,
+   *     which is the exact inclusive fork boundary.
+   *
+   * Synthesized user-role messages (compaction checkpoints, plugin context,
+   * goal rounds — see {@link userMessageRole}) never become a prompt.
+   */
+  private turnEntries(
+    events: readonly { type: string; time?: number; data?: unknown; seq?: number }[],
+  ): SessionTurn[] {
+    const turns: SessionTurn[] = [];
+    let draft = "";
+    for (const event of events) {
+      if (!event || typeof event !== "object") continue;
+      switch (event.type) {
+        case "turn/start": {
+          const turn = (event.data as { turn?: unknown } | undefined)?.turn;
+          if (typeof turn !== "number") break;
+          // `seq` is the load-through anchor and the coordinate space the fork
+          // boundary lives in; without it the turn cannot be addressed at all.
+          if (typeof event.seq !== "number") break;
+          const last = turns.at(-1);
+          if (last !== undefined && turn <= last.turn) break;
+          turns.push({
+            turn,
+            prompt: "",
+            reply: "",
+            startSeq: event.seq,
+          });
+          draft = "";
+          break;
+        }
+        case "user/message": {
+          const last = turns.at(-1);
+          if (last === undefined || last.prompt !== "") break;
+          if (this.userMessageRole(event.data) !== "user") break;
+          const prompt = this.turnMessageText(event.data, false).trim();
+          if (!prompt) break;
+          // The prompt's own clock, not the turn's: this message is when the
+          // human spoke, which can be minutes before the turn closes.
+          turns[turns.length - 1] = {
+            ...last,
+            prompt,
+            ...(typeof event.time === "number" ? { promptTime: event.time } : {}),
+          };
+          break;
+        }
+        case "assistant/message": {
+          const reply = this.turnMessageText(event.data, true).trim();
+          if (!reply) break;
+          draft = reply;
+          break;
+        }
+        case "turn/end": {
+          const last = turns.at(-1);
+          if (last === undefined) {
+            draft = "";
+            break;
+          }
+          // A closing event names its turn; ignore one that does not match the
+          // row we are folding (defensive: a malformed log must not move a
+          // completed turn's boundary onto the wrong row).
+          const closingTurn = (event.data as { turn?: unknown } | undefined)?.turn;
+          if (typeof closingTurn === "number" && closingTurn !== last.turn) {
+            draft = "";
+            break;
+          }
+          turns[turns.length - 1] = {
+            ...last,
+            ...(draft === "" ? {} : { reply: draft }),
+            ...(typeof event.seq === "number" ? { endSeq: event.seq } : {}),
+            // The reply's clock is the closing event, which is when the answer
+            // was committed — not the prompt's time, which `...last` carries.
+            ...(typeof event.time === "number" ? { replyTime: event.time } : {}),
+          };
+          draft = "";
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    return turns;
+  }
+
+  /**
+   * Every turn of one session, oldest first, with full prompt/reply text and
+   * the closing seq `/fork switch` cuts at.
+   *
+   * A turn whose `endSeq` is absent is still running (or was interrupted
+   * before its closing event reached the log) — it is listed, but cannot be
+   * forked from.
+   */
+  async readSessionTurns(sessionId: string): Promise<SessionTurn[]> {
+    if (!sessionId) return [];
+    try {
+      return this.turnEntries(await this.sessionLogRecords(sessionId));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Whether this deployment exposes the host's fork operation at all. */
+  supportsFork(): boolean {
+    return typeof this.get<SessionControllerService>("sessionController")?.fork === "function";
+  }
+
+  /**
+   * Fork one session at an inclusive event boundary through the Host session
+   * controller — the exact call the GUI chat's 「分叉」 button makes, so the
+   * child is a first-class session (own Agent, `parentSession` header, same
+   * workspace membership) rather than a bridge-side imitation.
+   *
+   * Never throws: the host's error codes are mapped to {@link ForkOutcome} so
+   * the caller can word the failure.
+   */
+  async forkSession(sessionId: string, atSeq: number): Promise<ForkOutcome> {
+    const controller = this.get<SessionControllerService>("sessionController");
+    if (!controller || typeof controller.fork !== "function") return { kind: "unsupported" };
+    try {
+      const result = await controller.fork({ sessionId, atSeq });
+      const childId = result?.sessionId;
+      if (typeof childId !== "string" || childId.length === 0) {
+        return { kind: "error", message: "宿主没有返回新会话 id" };
+      }
+      return { kind: "ok", sessionId: childId };
+    } catch (err) {
+      const code = (err as { code?: unknown } | undefined)?.code;
+      const message = err instanceof Error ? err.message : String(err);
+      if (code === "session/not-found") return { kind: "not-found" };
+      if (code === "session/fork-unavailable") return { kind: "unavailable", message };
+      if (code === "session/migration-required") return { kind: "migration-required" };
+      return { kind: "error", message };
+    }
+  }
+
+  /**
+   * Append one user-owned session title (the GUI's rename). Returns whether
+   * the write landed; a failure is never fatal — the forked child is usable
+   * with its inherited title, it just reads as a duplicate of its parent.
+   */
+  async renameSession(sessionId: string, title: string): Promise<boolean> {
+    const controller = this.get<SessionControllerService>("sessionController");
+    if (!controller || typeof controller.rename !== "function") return false;
+    try {
+      await controller.rename({ sessionId, title });
+      return true;
+    } catch {
+      return false;
     }
   }
 

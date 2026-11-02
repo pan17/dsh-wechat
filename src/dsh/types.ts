@@ -62,11 +62,20 @@ export interface UserMessage {
   readonly source: UserMessageSource;
 }
 
-/** One durable session-log record the bridge folds (permission / history / blank). */
+/**
+ * One durable session-log record the bridge folds (permission / history / blank).
+ *
+ * `seq` is the event's position in the log — contiguous from zero, and the
+ * exact value the host's fork boundary (`atSeq`) is expressed in. Every
+ * durable read carries it (`Session.snapshotEvents()`, `sessionQuery
+ * .readSession()`); it stays optional here because the bridge also folds
+ * `listEvents()` records, whose shape predates it, and older hosts may omit it.
+ */
 export interface SessionEventRecord {
   type: string;
   time?: number;
   data?: unknown;
+  seq?: number;
 }
 
 /**
