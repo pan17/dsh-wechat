@@ -4,13 +4,13 @@
 [![npm downloads](https://img.shields.io/npm/dm/dsh-wechat?style=flat-square&logo=npm)](https://www.npmjs.com/package/dsh-wechat)
 [![License](https://img.shields.io/github/license/pan17/dsh-wechat?style=flat-square)](https://github.com/pan17/dsh-wechat)
 
-把微信变成 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 的第二客户端：在微信里和你的 agent 聊天，收发文字、图片、文件和语音，用 slash 命令管理会话、工作区、模型与权限，审批卡和提问卡在微信与桌面端同步弹出。
+把微信变成 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 的第二客户端：在微信里和你的 agent 聊天，文字、图片、文件和语音都能发进来（语音自动转文字），用 slash 命令管理会话、工作区、模型与权限，审批卡和提问卡在微信与桌面端同步弹出。
 
 <img src="./resources/send.jpg" alt="发送" width="32%" /> <img src="./resources/receive.jpg" alt="接收" width="32%" /> <img src="./resources/settings.png" alt="设置页" width="32%" />
 
 ## 功能
 
-微信与 DSH 双向同步：文字、图片、文件、语音直接发给 agent，回复与执行过程推回微信，审批卡和提问卡两端同弹、谁先答谁生效；`/at` 可引用其它会话或文件，把几条消息或「截图 + 问题」合成一轮，静默模式与结论模式控制推送频率，跨会话任务完成提醒可选带摘要或全文；会话、工作区、Preset、模型、权限都能在微信里用 slash 命令管理，与 GUI 同源；另有秘密脱敏、文件范围限制、入站白名单与审计日志等边界，以及内嵌在 DSH 设置里的扫码登录、配置页与**指令帮助**（每条指令一句说明，点开看全部例子、点一下复制）。
+微信与 DSH 双向同步：文字、图片、文件和语音（自动转文字）直接发给 agent，回复与执行过程推回微信，审批卡和提问卡两端同弹、谁先答谁生效；`/at` 可引用其它会话或文件，把几条消息或「截图 + 问题」合成一轮，静默模式与结论模式控制推送频率，跨会话任务完成提醒可选带摘要或全文；会话、工作区、Preset、模型、权限都能在微信里用 slash 命令管理，与 GUI 同源；另有秘密脱敏、文件范围限制、入站白名单与审计日志等边界，以及内嵌在 DSH 设置里的扫码登录、配置页与**指令帮助**（每条指令一句说明，点开看全部例子、点一下复制）。
 
 ## 安装
 
@@ -57,6 +57,14 @@ dsh plugin --profile desktop list --depth 0    # 查看已装版本
 | `/rq` | 关闭当前会话的待处理卡 |
 
 其它 `/xxx` 作为文本转发给 agent。DSH 原生 slash 命令（`/plan`、`/goal`、`/compact` 等）由 bridge 直接交给原生 handler，微信端无需改动即可识别。
+
+## 已知限制
+
+下面三条都是微信 iLink 通道本身的限制，插件改不了；设置页底部的「已知限制」里也是这三条。
+
+1. **一个窗口最多连发 10 条**：bot 连续向同一个人发 10 条后，要等你在微信里先发一条才会解锁。超出的部分不会丢，会进 `/next` 缓存队列，发 `/next`（或随便发条消息）就能接着推。
+2. **24 小时互动窗口**：你最后一次在微信发消息后的 24 小时内，bot 才能主动给你发消息；超过 24 小时没互动，得先在微信里发一条，回复才会继续送到。
+3. **发不出原生语音气泡**：bot 发的语音条会被微信客户端整条丢弃——服务端返回成功、审计也记成已发送，手机端却什么都没有（连占位都没有），所以目前音频都当作普通文件发送。另外入站语音不受影响，会被微信自动转成文字，DSH 无需配置语音转文本。
 
 ## 开发
 

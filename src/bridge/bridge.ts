@@ -7878,6 +7878,14 @@ function isPathInside(root: string, target: string): boolean {
  * Pick the WeChat upload media type for a file name: images and videos use
  * their native types so the WeChat client renders them inline instead of as
  * a file attachment that must be opened. Everything else stays a file.
+ *
+ * Voice is deliberately absent. The iLink bot channel has no renderer for
+ * `type=3` voice bubbles: a VOICE upload is accepted by the server (`ret: 0`,
+ * audited as sent) and then dropped whole by the WeChat client — no bubble,
+ * no placeholder, no error (issue #17, eight `voice_item` variants tried).
+ * Adding `.silk` or an audio extension here would therefore not fail loudly,
+ * it would silently lose messages. Audio goes out as FILE; an mp3 opens and
+ * plays fine in WeChat.
  */
 function mediaTypeForFile(fileName: string): 1 | 2 | 3 | 4 {
   const ext = fileName.split(".").pop()?.toLowerCase() ?? "";

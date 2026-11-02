@@ -1089,12 +1089,13 @@ window.__ModuleLoader__.load({
 							createElement("span", null, "⚠"),
 							createElement("span", null, "已知限制"),
 						),
-						createElement("span", { className: "wx_group_summary" }, isOpen("limits") ? "" : "2 条微信平台限制"),
+						createElement("span", { className: "wx_group_summary" }, isOpen("limits") ? "" : "3 条微信平台限制"),
 					),
 					isOpen("limits")
 						? createElement("ol", { id: "wx_group_limits" },
 							createElement("li", null, "微信 iLink 通道限制：bot 单窗口最多连续向同一用户发送 10 条消息，达到上限后必须由用户在微信端主动发一条消息才能解锁并继续推送（超过的部分会进 /next 缓存队列）。"),
 							createElement("li", null, "用户最后一次在微信端发消息后的 24 小时内 bot 可以主动向其发送消息，超过 24 小时未互动则需要用户先在微信发一条消息才能继续接收 bot 回复（微信平台策略，非本插件限制）。"),
+							createElement("li", null, "发不出原生语音气泡：bot 发的语音条会被微信客户端整条丢弃——服务端返回成功、审计也记成已发送，手机端却什么都没有（连占位都没有），所以目前音频都当作普通文件发送。另外入站语音不受影响，会被微信自动转成文字，DSH 无需配置语音转文本。"),
 						)
 						: null,
 				),

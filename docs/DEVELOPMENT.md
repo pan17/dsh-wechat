@@ -39,7 +39,7 @@
   展开状态记在浏览器 localStorage（`dsh-wechat/settings-open`），不进 `config.json`；存储不可用时退化为「能展开但不记忆」，不会报错。
 - **保存** — 底部 `保存配置` 一次提交全部字段；有改动未保存时按钮旁显示 `● 有未保存的修改`。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` / `finalOnlyIdleMs` / `finalOnlyCeilingMs` 仍可写 `~/.dsh-wechat/config.json` 或插件行 `config:`，设置页保存不会覆盖它们。网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
 - **指令帮助** — 卡片标题行的 **指令帮助** 按钮展开一份说明书：顶部一句说明 → 搜索框 + 全部展开/收起 → 6 个按用途分的组（常用 / 会话与项目 / 模型与权限 / 输出节奏 / 引用与回看 / 待处理卡片）→ 23 条指令，每条一句简短说明 + 行尾 **?**。**?** 悬浮出前 2 条示例并提示「共 N 条示例，展开查看全部」；点整行（或直接点 ?）展开该指令的**全部**示例，每条示例可点击复制。展开状态记在 `dsh-wechat/help-open`，不进 `config.json`。同一份文案也渲染成微信 `/help`（见下一节），DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出。文案要求**简单但不口语**：说清做什么，不写语气词与比喻
-- **已知限制** — 页面底部的告警盒，同样可折叠（默认收起），列出 iLink 的 10 条窗口与 24 小时互动窗口
+- **已知限制** — 页面底部的告警盒，同样可折叠（默认收起），列出 iLink 的 10 条窗口、24 小时互动窗口，以及「出站语音气泡不可渲染」（见「已知边界」里的语音条目）
 
 与宿主通信走插件自己的 HTTP API（`/wechat/api/status|help|config|relogin|logout`），客户端零 `@deepseek-ai` 依赖。
 
@@ -251,6 +251,7 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 - 审批/提问卡挂在 Host 的 `approval/request` 与 `user-questions/request` waterfall 上，与 GUI 竞速；无微信 peer 时立即 `next()`，软超时只撤微信卡、不替用户决策。微信先答时会 abort 传给 GUI 的 `request.signal`（不碰 turn 的 `exec.signal`），Web composer 卡随 Gateway `cancel` 帧收起。DSH 重启后未决卡片随 turn 消失（上游已知限制）。
 - 微信回答卡片后的回执**每条占一次微信发送额度**（10 条/窗口）。一次 `P1=1 P2=2` 会发 2 条回执；额度用尽时回执与其他出站消息一样进入 `/next` FIFO 缓存，不会被丢弃。`P{n}` 是整批处理开始时快照的编号（卡片在结算时即被摘除，现算取不到编号、回执会退化成不带编号的文案）。跨会话卡的 `❗来自其他会话` 只是正文提示标记，不影响编号或回复语法。
 - `send_wechat` 工具对所有 agent 可见；任何会话的 agent 都能调用——绑定会话发送到绑定用户，未绑定会话回退到首个已知微信用户（单用户部署默认行为）。单用户模式下，工具推送与 assistant 回复共享唯一一份微信 10 条/窗口限流预算：超限或发送失败自动进入 `/next` FIFO 缓存队列。计数和队列持久化到 `state.json`，普通 DSH 更新或重启后继续沿用；下一条微信入站会重置窗口并自动补发。微信真实限流响应（HTTP 200 + `ret: -2` / `prepare failed`）也会被识别并缓存，不再误判成功。
+- **出站语音（`voice_item` / `type=3`）在 iLink bot 通道不可渲染**：`sendMediaMessage` 的 VOICE 分支能上传成功、服务端返回 `ret: 0`、审计也记成 `sent`，但微信客户端把整条消息丢弃——没有气泡、没有占位、也没有红色感叹号。issue #17 用 8 组 `voice_item` 字段组合（含把微信自己发出的语音字节原样回发、`message_type: USER`）逐一验证过，结论是 bot 消息在客户端侧没有 type=3 的渲染器，语音在这条通道上是**入站专用**（入站语音转文字）。所以 `mediaTypeForFile()` 只映射图片与视频，**不要**把 `.silk` 或音频扩展名加进 VOICE 分支：那不会报错，只会静默丢消息；要发音频就走 `FILE`，mp3 在微信里点开能正常播放。
 - `/preset switch` 是**会话级**的：它走宿主自己的 `agentPresets.select`（与 GUI 的预设选择器同一条调用），既重绑当前 Agent 的组成，也追加持久化事件 `agent-preset/selected`，所以重启/恢复后仍是新预设，`/s list` 与 `/status` 立刻显示新值。DSH 只允许在会话的第一条消息之前改预设，因此已开始的会话会被**明确拒绝**并提示 `/s new`，而不是把它悄悄记成「下个会话生效」。判定用的就是宿主自己的谓词：`sessionProjections.stateOf(session, "turnBoundary")`（`openTurnStartSeq !== null || lastTurn > 0`），旧宿主没有 `stateOf` 时回落到事件日志里是否有 `turn/start` / `user/message` / `assistant/message`。
 - `/preset default` 是**部署级**的：写入 DSH 设置文档——按设置服务公布的命名空间写 `agent-preset-registry.selectedDefault`（保留旧版 `agent-presets.default` 回退），GUI 设置页与微信双端读写同一事实源，只影响此后新建的会话；裸 `/preset default` 只读不回写。写入被拒绝时明确提示「默认 Preset 切换失败，默认 Preset 未更改」，不再误报成功。**一次聊天消息不会改变全局默认以外的任何东西**：`switch` 绝不写设置文档，`default` 绝不改当前会话。
 - `/preset status` 分两行报两个事实（新会话默认 / 当前会话），不再把部署默认当成当前会话的值；`/preset list` 同理分别标 `◀ 新会话默认` 与 `◀ 当前会话`。
