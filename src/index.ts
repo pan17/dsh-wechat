@@ -13,7 +13,7 @@ import { WeChatDSHBridge } from "./bridge/bridge.js";
 import { formatHelp } from "./bridge/slash.js";
 import { helpCatalog } from "./help-catalog.js";
 import { ConfigStore, type EditableConfig } from "./config-store.js";
-import { defaultConfig, type WeChatDSHConfig } from "./config.js";
+import { defaultConfig, normalizeWorkStepsConfig, type WeChatDSHConfig, type WorkStepsMode } from "./config.js";
 import { qrSvgFor } from "./qr.js";
 import { sessionIdFrom, sessionIdFromAssembleContext, weChatSurfaceText } from "./surface-prompt.js";
 export { sessionIdFrom };
@@ -30,8 +30,12 @@ export interface PluginConfig {
   cwd?: string;
   textChunkLimit?: number;
   cardTimeoutMs?: number;
+  /** @deprecated Folded into `workSteps`; kept for composition-config migration. */
   silent?: boolean;
+  /** @deprecated Folded into `workSteps`; kept for composition-config migration. */
   finalOnly?: boolean;
+  /** 工作步骤展示: minimal / concise / standard. */
+  workSteps?: WorkStepsMode;
   /** Whole-answer completion notices (`notifyTaskEvents` must also be on). */
   notifyTaskFullReply?: boolean;
   finalOnlyIdleMs?: number;
@@ -53,9 +57,13 @@ export interface PluginConfig {
 }
 
 export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise<void> {
+  // Migrate the removed silent/finalOnly keys on a copy so the caller's
+  // composition object is never mutated. A valid workSteps wins.
+  const raw = { ...rawConfig } as Record<string, unknown>;
+  normalizeWorkStepsConfig(raw);
   const baseConfig: WeChatDSHConfig = {
     ...defaultConfig(),
-    ...pickDefined(rawConfig),
+    ...pickDefined(raw as PluginConfig),
   };
   const configStore = new ConfigStore(baseConfig.storageDir);
   const config = configStore.resolve(baseConfig);
@@ -97,7 +105,7 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
     if (sessionId) bridge.clearSessionOutput(sessionId);
   });
 
-  // ─── Agent idleness → 结论模式 (final-only) quiescence ───
+  // ─── Agent idleness → 极简模式 (per-task hold) quiescence ───
   // The goal round-driver wakes the NEXT round exactly when `agent.status`
   // flips to `idle`, so this is also the signal that tells the hold "more
   // rounds are coming" (running cancels the countdown) versus "the task is

@@ -13,7 +13,7 @@
  * The host side is equally quiet: `EDITABLE_KEYS` drops unknown keys without
  * an error, and the boolean type-guard silently refuses a non-boolean.
  * These assertions pin the two sides together for every toggle the panel
- * renders, plus 结论模式 specifically.
+ * renders, plus the work-steps enum specifically.
  */
 
 import { describe, expect, it } from "vitest";
@@ -33,8 +33,6 @@ const RENDERED_TOGGLES = [
   "notifyTaskEvents",
   // 完成提醒带全文还是摘要 (gated by notifyTaskEvents, default摘要).
   "notifyTaskFullReply",
-  "silent",
-  "finalOnly",
   "surfacePromptEnabled",
   // Hardening wave: the merge window and the two security switches.
   "mergeEnabled",
@@ -65,24 +63,48 @@ describe("settings panel ↔ host config wiring", () => {
     expect(client).toContain(`${key}: !!form.${key}`);
   });
 
-  it("the 结论模式 control is labelled and explained to the user", () => {
-    expect(client).toContain("结论模式");
+  it("the 工作步骤展示 control is a labelled three-mode dropdown", () => {
+    expect(client).toContain("工作步骤展示");
+    expect(client).not.toContain("选择希望看到多少工具调用细节");
+    expect(client).not.toContain("wx_setting_desc");
+    expect(client).toContain("极简");
+    expect(client).toContain("简洁");
+    expect(client).toContain("标准");
+    expect(client).toContain("role: \"listbox\"");
+    expect(client).toContain("role: \"option\"");
+    expect(client).toContain("aria-selected");
+    expect(client).toContain("wx_select_menu");
+    expect(client).toContain("wx_select_check");
+    expect(client).toContain("/steps 极简|简洁|标准");
+    // Each option explains itself on hover/focus via the shared portal
+    // tooltip (the menu's overflow:hidden would clip a child bubble).
+    expect(client).toContain("一般用于 goal 多轮任务");
+    expect(client).toContain("每轮只发送最后一段回复");
+    expect(client).toContain("显示执行过程和最终回复");
+    expect(client).toContain("placeHelpFloat(e.currentTarget, option.description)");
+    expect(client).toContain("onMouseEnter: (e) => placeHelpFloat");
+    expect(client).toContain("onMouseLeave: removeHelpFloat");
     expect(client).toContain("/flush");
-    // The panel must point at the WeChat-side switch too: a user who only
-    // reads the settings page would otherwise never learn `/final` exists.
-    expect(client).toContain("/final on|off");
+    // The old checkbox controls and their commands are gone.
+    expect(client).not.toContain("form?.silent");
+    expect(client).not.toContain("form?.finalOnly");
+    expect(client).not.toContain("/silent");
+    expect(client).not.toContain("/final");
   });
 
-  it("describes 静默 as something you turn ON to quieten things down", () => {
-    // Both switches are opt-in: `/silent` and `/final` each get quieter when
-    // switched ON, and 结论模式 is the stronger of the two. The group blurb
-    // once said 「先关『静默』」 — the opposite of what the switch does, which
-    // sends a user hunting for a toggle that makes the bot LOUDER.
-    const blurb = client.split("\n").find((line) => line.includes("决定微信里出现多少内容"));
-    expect(blurb, "the 消息推送 group blurb must still exist").toBeDefined();
-    expect(blurb).toContain("先开「静默」");
-    expect(blurb).toContain("结论模式");
-    expect(blurb).not.toContain("先关");
+  it("initialises, renders and saves workSteps as an enum", () => {
+    expect(EDITABLE_KEYS as readonly string[]).toContain("workSteps");
+    expect(defaultConfig().workSteps).toBe("standard");
+    expect(client).toContain("r.body.config?.workSteps");
+    expect(client).toContain("value: form?.workSteps");
+    expect(client).toContain("setForm({ ...form, workSteps: value })");
+    expect(client).toContain("workSteps: normalizeWorkSteps(form.workSteps)");
+    expect(client).toContain("function normalizeWorkSteps(value)");
+    // The summary line must mention it, or a collapsed group hides it.
+    expect(client).toContain("工作步骤 ${workStepsLabel(form.workSteps)}");
+    // The old merge blurb was removed on request; the row and its HelpTip
+    // carry the explanation instead.
+    expect(client).not.toContain("原来的「静默」「结论模式」合并");
   });
 
   it("the 打字合并 control points at the WeChat-side switch", () => {
@@ -172,9 +194,9 @@ describe("settings panel ↔ host config wiring", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-panel-"));
     try {
       const store = new ConfigStore(dir);
-      expect(store.update({ finalOnly: true }).finalOnly).toBe(true);
-      expect(store.update({ finalOnly: "nope" as never }).finalOnly).toBe(true);
-      expect(new ConfigStore(dir).stored().finalOnly).toBe(true);
+      expect(store.update({ mergeEnabled: true }).mergeEnabled).toBe(true);
+      expect(store.update({ mergeEnabled: "nope" as never }).mergeEnabled).toBe(true);
+      expect(new ConfigStore(dir).stored().mergeEnabled).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -318,16 +340,17 @@ describe("settings panel grouping", () => {
     expect(fullAt).toBeGreaterThan(depAt);
     // The wrapper must close AFTER the dependent switch, or the child escapes
     // its cell again (slice runs to the next toggle that follows the pair).
-    const silentAt = client.indexOf("checked: !!form?.silent");
-    expect(silentAt).toBeGreaterThan(fullAt);
-    const cellSource = client.slice(cellAt, silentAt);
+    const nextControlAt = client.indexOf('name: "statusMode"');
+    expect(nextControlAt).toBeGreaterThan(fullAt);
+    const cellSource = client.slice(cellAt, nextControlAt);
     expect(cellSource).toContain("checked: !!form?.notifyTaskFullReply");
     // The span-the-whole-row hack must be GONE — it was the actual bug.
     expect(client).not.toContain(".wx_dep{grid-column:1 / -1;");
     expect(client).toContain(".wx_cell{display:flex;flex-direction:column;min-width:0}");
-    // The dependency has to be stated in the UI, not only in the tooltip: a
-    // greyed-out box with no explanation reads as a bug.
-    expect(client).toContain("仅在「跨会话任务完成提醒」开启时生效");
+    // The inline dependency hint was removed to save space; the child's
+    // HelpTip still explains the gating.
+    expect(client).not.toContain("仅在「跨会话任务完成提醒」开启时生效");
+    expect(client).not.toContain("wx_dep_hint");
   });
 
   it("remembers which groups are expanded, without requiring storage", () => {

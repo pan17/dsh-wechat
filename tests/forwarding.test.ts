@@ -140,7 +140,7 @@ describe("WeChat → agent forwarding chain", () => {
     expect(sendTextMessage).not.toHaveBeenCalled();
   });
 
-  it("silent mode buffers and flushes only the last text on turn/end", async () => {
+  it("concise mode buffers and flushes only the last text on turn/end", async () => {
     const anyBridge = bridge as unknown as {
       state: { ensureUser(u: string, c: string): unknown };
       handleSessionEvent(s: string, e: unknown): void;
@@ -148,7 +148,7 @@ describe("WeChat → agent forwarding chain", () => {
     anyBridge.state.ensureUser("u1", "C:\\work");
     const state = anyBridge.state as { update(u: string, p: unknown): void; getUser(u: string): { silent: boolean } };
     state.update("u1", { sessionId: "wx-s1", silent: true });
-    (bridge as unknown as { config: { silent: boolean } }).config.silent = true;
+    (bridge as unknown as { config: { workSteps: string } }).config.workSteps = "concise";
 
     anyBridge.handleSessionEvent("wx-s1", {
       type: "assistant/message",

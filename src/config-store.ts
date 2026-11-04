@@ -7,7 +7,15 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { defaultConfig, LEGACY_SURFACE_PROMPTS, type StatusMode, type WeChatDSHConfig } from "./config.js";
+import {
+  defaultConfig,
+  LEGACY_SURFACE_PROMPTS,
+  normalizeWorkStepsConfig,
+  WORK_STEPS_MODES,
+  type StatusMode,
+  type WeChatDSHConfig,
+  type WorkStepsMode,
+} from "./config.js";
 import { ensurePrivateDir, writePrivateFile } from "./utils/secure-fs.js";
 
 export type EditableConfig = Pick<
@@ -21,8 +29,7 @@ export type EditableConfig = Pick<
   | "crossSessionNotify"
   | "notifyTaskEvents"
   | "notifyTaskFullReply"
-  | "silent"
-  | "finalOnly"
+  | "workSteps"
   | "finalOnlyIdleMs"
   | "finalOnlyCeilingMs"
   | "surfacePromptEnabled"
@@ -53,8 +60,7 @@ export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "crossSessionNotify",
   "notifyTaskEvents",
   "notifyTaskFullReply",
-  "silent",
-  "finalOnly",
+  "workSteps",
   "finalOnlyIdleMs",
   "finalOnlyCeilingMs",
   "surfacePromptEnabled",
@@ -78,11 +84,9 @@ export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
 /** Boolean config keys: a non-boolean from a hand-edited file would be truthy-by-accident. */
 const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
   "surfacePromptEnabled",
-  "silent",
   "crossSessionNotify",
   "notifyTaskEvents",
   "notifyTaskFullReply",
-  "finalOnly",
   "allowRemotePermissionEscalation",
   "allowAnyFilePath",
   "mergeEnabled",
@@ -120,8 +124,9 @@ const NON_NEGATIVE_NUMBER_KEYS: ReadonlySet<string> = new Set(["mergeSilenceMs"]
  * a hand-edited `"no"` (truthy!) through and silently mean `"full"`. A value
  * outside this set is dropped, so the built-in default applies.
  */
-const ENUM_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+const ENUM_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>([
   ["statusMode", new Set<StatusMode>(["brief", "full"])],
+  ["workSteps", new Set<WorkStepsMode>(WORK_STEPS_MODES)],
 ]);
 
 export class ConfigStore {
@@ -138,6 +143,11 @@ export class ConfigStore {
       if (fs.existsSync(this.filePath)) {
         const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf-8")) as Partial<EditableConfig>;
         if (parsed && typeof parsed === "object") {
+          // One-time migration of the removed silent/finalOnly switches. A
+          // valid workSteps wins; otherwise finalOnly=true means minimal,
+          // silent=true means concise, and an explicit false means standard.
+          // The old keys are deleted so they cannot be round-tripped forever.
+          normalizeWorkStepsConfig(parsed as Record<string, unknown>);
           // A stored prompt equal to a superseded built-in default was never
           // edited by the user: drop it so the current default applies.
           if (

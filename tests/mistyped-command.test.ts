@@ -49,28 +49,6 @@ import {
   commandUsageHint,
   isBypassSlashCommand,
   isMistypedLocalCommand,
-  parseAtCommand,
-  parseEnterCommand,
-  parseFinalCommand,
-  parseFlushCommand,
-  parseHelpCommand,
-  parseHistoryCommand,
-  parseMediaCommand,
-  parseMergeCommand,
-  parseModelCommand,
-  parseNextCommand,
-  parseNotifyCommand,
-  parsePermCommand,
-  parsePresetCommand,
-  parseReasoningCommand,
-  parseRejectPermissionCommand,
-  parseRejectQuestionCommand,
-  parseSessionCommand,
-  parseSilentCommand,
-  parseStatusCommand,
-  parseStopCommand,
-  parseSurfaceCommand,
-  parseWorkspaceCommand,
 } from "../src/bridge/slash.js";
 
 function makeMockAgent(id: string) {
@@ -158,8 +136,7 @@ describe("isMistypedLocalCommand / commandUsageHint", () => {
       "/enter quueue",
       "/notify tasks bogus",
       "/status briefx",
-      "/silent onn",
-      "/final onn",
+      "/steps onn",
       "/merge onn",
       "/media onn",
       "/surface onn",
@@ -238,8 +215,9 @@ describe("isMistypedLocalCommand / commandUsageHint", () => {
     // hijack a working command.
     for (const line of [
       // Every parser's own accepted shapes, one per entry.
-      "/help", "/help s", "/?", "/status", "/status brief", "/silent", "/silent on",
-      "/final off", "/merge status", "/media at", "/surface on", "/stop", "/next",
+      "/help", "/help s", "/?", "/status", "/status brief",
+      "/steps", "/steps 极简", "/steps 简洁", "/steps 标准", "/steps status",
+      "/merge status", "/media at", "/surface on", "/stop", "/next",
       "/flush", "/f", "/notify on", "/notify tasks off", "/rq", "/rp",
       "/workspace", "/workspace list", "/ws switch 2", "/workspace add C:\\repo",
       "/session", "/s list", "/s list current 50", "/s switch 3", "/s pin", "/s new",
@@ -256,6 +234,10 @@ describe("isMistypedLocalCommand / commandUsageHint", () => {
   it("leaves a name nobody owns alone (it still goes to the agent)", () => {
     for (const line of [
       "/nope",
+      // Removed commands are no longer local: they now look like any other
+      // unregistered `/xxx` and go to the agent.
+      "/silent on",
+      "/final on",
       "/plan off",
       "/goal 写一个 demo",
       "/compact extra",
@@ -329,7 +311,7 @@ describe("a mistyped command is answered, never forwarded", () => {
     "/reasoning hihg",
     "/enter quueue",
     "/notify tasks bogus",
-    "/silent onn",
+    "/steps onn",
     "/status briefx",
     "/history abc",
     "/workspacelist",

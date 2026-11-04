@@ -80,7 +80,6 @@ window.__ModuleLoader__.load({
 .wx_cell{display:flex;flex-direction:column;min-width:0}
 .wx_dep{display:flex;flex-direction:column;gap:6px;margin:2px 0 6px 24px;padding-left:10px;border-left:2px solid rgba(128,128,128,.28)}
 .wx_dep .wx_check{padding:2px 0}
-.wx_dep .wx_dep_hint{font-size:11px;color:var(--dsw-alias-label-secondary,#888);line-height:1.4}
 .wx_help{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:14px;height:14px;border-radius:50%;background:rgba(128,128,128,.22);color:var(--dsw-alias-label-secondary,#888);font-size:10px;font-weight:600;cursor:help;margin-left:6px;vertical-align:middle;position:relative;user-select:none;line-height:1}
 .wx_help:hover,.wx_help:focus{background:rgba(128,128,128,.42);outline:none;color:inherit}
 .wx_help_float{position:fixed;z-index:10000;padding:6px 10px;background:rgba(20,20,20,.92);color:#fff;font-size:11px;font-weight:400;white-space:pre-wrap;width:max-content;max-width:min(340px,calc(100vw - 16px));border-radius:6px;line-height:1.5;text-align:left;pointer-events:none;overflow-wrap:anywhere;box-shadow:0 4px 16px rgba(0,0,0,.28)}
@@ -95,6 +94,22 @@ window.__ModuleLoader__.load({
 .wx_group_summary{font-size:12px;color:var(--dsw-alias-label-secondary,#888);margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;padding-left:10px}
 .wx_group_body{display:flex;flex-direction:column;gap:10px;padding:2px 2px 12px}
 .wx_group_desc{font-size:12px;color:var(--dsw-alias-label-secondary,#888);line-height:1.55}
+.wx_setting_row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:10px 2px;border-bottom:1px solid rgba(128,128,128,.14);min-width:0}
+.wx_setting_row:last-child{border-bottom:none}
+.wx_setting_text{flex:1 1 auto;min-width:0}
+.wx_setting_title{display:flex;align-items:center;font-size:13px;font-weight:600}
+.wx_select{position:relative;flex:0 0 auto}
+.wx_select_btn{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;min-width:96px;padding:6px 10px;border-radius:8px;border:1px solid rgba(128,128,128,.18);background:rgba(128,128,128,.10);color:inherit;font:inherit;font-size:12px;line-height:1.2;white-space:nowrap;cursor:pointer;appearance:none}
+.wx_select_btn:hover{background:rgba(128,128,128,.16)}
+.wx_select_btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#1976d2);outline-offset:2px}
+.wx_select_chevron{display:inline-block;width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);margin-top:-3px;transition:transform .12s}
+.wx_select_chevron.open{transform:rotate(-135deg);margin-top:2px}
+.wx_select_menu{position:absolute;top:calc(100% + 4px);right:0;z-index:30;min-width:140px;padding:4px;border:1px solid rgba(128,128,128,.18);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 8px 24px rgba(0,0,0,.16);overflow:hidden}
+.wx_select_option{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;padding:7px 9px;border:none;border-radius:7px;background:transparent;color:inherit;font:inherit;font-size:12px;line-height:1.4;text-align:left;white-space:nowrap;cursor:pointer;appearance:none}
+.wx_select_option:hover,.wx_select_option:focus-visible{background:rgba(128,128,128,.12)}
+.wx_select_option:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#1976d2);outline-offset:-2px}
+.wx_select_option.selected{font-weight:600}
+.wx_select_check{flex:0 0 auto;font-size:12px;color:var(--dsw-alias-label-secondary,#888)}
 .wx_sub{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:10px;background:rgba(128,128,128,.06);border:1px solid rgba(128,128,128,.16)}
 .wx_sub_off{font-size:12px;color:var(--dsw-alias-label-secondary,#888)}
 .wx_limits{border:1px solid rgba(237,108,2,.4);border-radius:12px;padding:8px 16px 12px;background:rgba(237,108,2,.06);display:flex;flex-direction:column;gap:6px}
@@ -131,7 +146,7 @@ window.__ModuleLoader__.load({
 .wx_cmd_example_note{font-size:11px;color:var(--dsw-alias-label-secondary,#888);line-height:1.5;padding-left:2px}
 .wx_cmd_more{font-size:11px;color:var(--dsw-alias-label-secondary,#888)}
 .wx_cmd_copied{font-size:11px;color:#2e7d32}
-@media (max-width:560px){.wx_form{grid-template-columns:1fr}.wx_toggles{grid-template-columns:1fr}}`;
+@media (max-width:560px){.wx_form{grid-template-columns:1fr}.wx_toggles{grid-template-columns:1fr}.wx_setting_row{align-items:flex-start;flex-direction:column;gap:8px}.wx_select{align-self:flex-start}}`;
 		if (typeof document !== "undefined") {
 			let tag = document.querySelector("style[data-plugin-css=\"dsh-wechat/section\"]");
 			if (tag === null) {
@@ -492,6 +507,89 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/**
+		 * The 「工作步骤展示」 dropdown. A native select cannot render the
+		 * checkmark the DSH settings row uses, so this is a small listbox with
+		 * click-outside/Escape handling and the usual ARIA attributes.
+		 */
+		function WorkStepsSelect(props) {
+			const [open, setOpen] = react.useState(false);
+			const rootRef = react.useRef(null);
+			const triggerRef = react.useRef(null);
+			react.useEffect(() => {
+				if (!open || typeof document === "undefined") return undefined;
+				const onPointerDown = (event) => {
+					if (rootRef.current && !rootRef.current.contains(event.target)) {
+						setOpen(false);
+						removeHelpFloat();
+					}
+				};
+				const onKeyDown = (event) => {
+					if (event.key === "Escape") {
+						setOpen(false);
+						removeHelpFloat();
+						if (triggerRef.current) triggerRef.current.focus();
+					}
+				};
+				document.addEventListener("mousedown", onPointerDown);
+				document.addEventListener("keydown", onKeyDown);
+				return () => {
+					document.removeEventListener("mousedown", onPointerDown);
+					document.removeEventListener("keydown", onKeyDown);
+				};
+			}, [open]);
+			// A hover/focus tooltip is portaled to <body>; never leave it behind
+			// when the menu closes or the settings panel unmounts.
+			react.useEffect(() => () => removeHelpFloat(), []);
+			react.useEffect(() => {
+				if (!open) removeHelpFloat();
+			}, [open]);
+			const choose = (value) => {
+				removeHelpFloat();
+				props.onChange(value);
+				setOpen(false);
+				if (triggerRef.current) triggerRef.current.focus();
+			};
+			return createElement("div", { className: "wx_select", ref: rootRef },
+				createElement("button", {
+					type: "button",
+					className: "wx_select_btn",
+					ref: triggerRef,
+					onClick: () => {
+						removeHelpFloat();
+						setOpen((prev) => !prev);
+					},
+					"aria-haspopup": "listbox",
+					"aria-expanded": open,
+					"aria-label": "工作步骤展示",
+				},
+					createElement("span", null, workStepsLabel(props.value)),
+					createElement("span", { className: "wx_select_chevron" + (open ? " open" : ""), "aria-hidden": "true" }),
+				),
+				open
+					? createElement("div", { className: "wx_select_menu", role: "listbox", "aria-label": "工作步骤展示" },
+						WORK_STEPS_OPTIONS.map((option) => createElement("button", {
+							key: option.value,
+							type: "button",
+							role: "option",
+							"aria-selected": props.value === option.value,
+							className: "wx_select_option" + (props.value === option.value ? " selected" : ""),
+							onClick: () => choose(option.value),
+							onMouseEnter: (e) => placeHelpFloat(e.currentTarget, option.description),
+							onMouseLeave: removeHelpFloat,
+							onFocus: (e) => placeHelpFloat(e.currentTarget, option.description),
+							onBlur: removeHelpFloat,
+						},
+							createElement("span", null, option.label),
+							props.value === option.value
+								? createElement("span", { className: "wx_select_check", "aria-hidden": "true" }, "✓")
+								: null,
+						)),
+					)
+					: null,
+			);
+		}
+
 		function api(path, options) {
 			return fetch("/wechat/api" + path, {
 				headers: { "Content-Type": "application/json" },
@@ -514,8 +612,7 @@ window.__ModuleLoader__.load({
 				crossSessionNotify: !!form.crossSessionNotify,
 				notifyTaskEvents: !!form.notifyTaskEvents,
 				notifyTaskFullReply: !!form.notifyTaskFullReply,
-				silent: !!form.silent,
-				finalOnly: !!form.finalOnly,
+				workSteps: normalizeWorkSteps(form.workSteps),
 				mergeEnabled: !!form.mergeEnabled,
 				mergeSuffixTokens: !!form.mergeSuffixTokens,
 				mediaMergeEnabled: !!form.mediaMergeEnabled,
@@ -548,6 +645,31 @@ window.__ModuleLoader__.load({
 				// "full" — the stored default is brief.
 				statusMode: form.statusMode === "full" ? "full" : "brief",
 			};
+		}
+
+		const WORK_STEPS_OPTIONS = [
+			{
+				value: "minimal",
+				label: "极简",
+				description: "一般用于 goal 多轮任务：只发送最终轮的结论，不推送中间过程。",
+			},
+			{
+				value: "concise",
+				label: "简洁",
+				description: "每轮只发送最后一段回复，不显示执行过程。",
+			},
+			{
+				value: "standard",
+				label: "标准",
+				description: "显示执行过程和最终回复。",
+			},
+		];
+		function workStepsLabel(value) {
+			const option = WORK_STEPS_OPTIONS.find((entry) => entry.value === value);
+			return option ? option.label : "标准";
+		}
+		function normalizeWorkSteps(value) {
+			return value === "minimal" || value === "concise" ? value : "standard";
 		}
 
 		const onOff = (value) => (value ? "开" : "关");
@@ -596,15 +718,13 @@ window.__ModuleLoader__.load({
 				api("/status").then((r) => {
 					if (!r.ok) return;
 					setStatus(r.body);
-					const firstUser = r.body.users && r.body.users[0];
 					// Fill the form once — only when first entering the page.
 					// Polling below only ever calls setStatus; user edits stay
 					// locally until Save, and are only re-synced when the user
 					// refreshes the page or after a successful save/relogin/
 					// logout (which all call refresh() explicitly).
-					// Silent is global (config.json). Fall back to the bound
-					// user only for older hosts that have not yet added
-					// config.silent.
+					// The work-steps mode is global (config.json) and this
+					// client always reads the single new key.
 					setForm((prev) => prev ?? {
 						cwd: r.body.config?.cwd ?? "",
 						cardTimeoutMs: String(r.body.config?.cardTimeoutMs ?? ""),
@@ -613,8 +733,7 @@ window.__ModuleLoader__.load({
 						notifyTaskFullReply: !!r.body.config?.notifyTaskFullReply,
 						surfacePromptEnabled: !!r.body.config?.surfacePromptEnabled,
 						surfacePrompt: r.body.config?.surfacePrompt ?? "",
-						silent: !!(r.body.config?.silent ?? (firstUser && firstUser.silent)),
-						finalOnly: !!r.body.config?.finalOnly,
+						workSteps: normalizeWorkSteps(r.body.config?.workSteps),
 						mergeEnabled: !!r.body.config?.mergeEnabled,
 						mergeSilenceMs: String(r.body.config?.mergeSilenceMs ?? ""),
 						mergeMaxMsgs: String(r.body.config?.mergeMaxMsgs ?? ""),
@@ -766,7 +885,7 @@ window.__ModuleLoader__.load({
 					: "已关闭 · 每条消息各自一轮")
 				: "";
 			const deliverySummary = form
-				? `静默 ${onOff(form.silent)} · 结论 ${onOff(form.finalOnly)} · 决策推送 ${onOff(form.crossSessionNotify)} · 任务提醒 ${onOff(form.notifyTaskEvents)}${form.notifyTaskEvents ? `（${form.notifyTaskFullReply ? "全文" : "摘要"}）` : ""} · 状态 ${form.statusMode === "full" ? "详细" : "简洁"}`
+				? `工作步骤 ${workStepsLabel(form.workSteps)} · 决策推送 ${onOff(form.crossSessionNotify)} · 任务提醒 ${onOff(form.notifyTaskEvents)}${form.notifyTaskEvents ? `（${form.notifyTaskFullReply ? "全文" : "摘要"}）` : ""} · 状态 ${form.statusMode === "full" ? "详细" : "简洁"}`
 				: "";
 			const mediaSummary = form
 				? (form.mediaMergeEnabled
@@ -889,10 +1008,17 @@ window.__ModuleLoader__.load({
 							id: "delivery",
 							title: "消息推送",
 							summary: deliverySummary,
-							desc: "决定微信里出现多少内容、什么时候出现。想安静一点，先开「静默」，还嫌吵再开「结论模式」。`/status` 的详细程度也在这一组。",
 							open: isOpen("delivery"),
 							onToggle: toggleGroup,
 						},
+							createElement("div", { className: "wx_setting_row" },
+								createElement("div", { className: "wx_setting_text" },
+									createElement("div", { className: "wx_setting_title" }, "工作步骤展示",
+										createElement(HelpTip, { text: "极简：整条任务停下后只发一条最终结论，中间过程不推送；简洁：每轮只发最后一段回复；标准：思考与工具调用合并为「执行过程」，正文独立发送。极简会等任务停手 45 秒后交付，最长 10 分钟一定发一次；等不及发 /flush 立即取回。权限卡、提问卡、报错在任何模式都会立刻推送。微信端也能用 /steps 极简|简洁|标准 切换，和这里同一个值。" }))),
+								createElement(WorkStepsSelect, {
+									value: form?.workSteps,
+									onChange: (value) => setForm({ ...form, workSteps: value }),
+								})),
 							createElement("div", { className: "wx_toggles" },
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.crossSessionNotify, onChange: (e) => setForm({ ...form, crossSessionNotify: e.target.checked }) }),
@@ -912,16 +1038,7 @@ window.__ModuleLoader__.load({
 										createElement("label", { className: "wx_check" },
 											createElement("input", { type: "checkbox", checked: !!form?.notifyTaskFullReply, onChange: (e) => setForm({ ...form, notifyTaskFullReply: e.target.checked }), disabled: !form?.notifyTaskEvents }),
 											createElement("span", null, "完整显示任务完成回复"),
-											createElement(HelpTip, { text: "默认关闭：完成提醒只带最后 80 字摘要，一眼看完，适合只要知道「做完了」的场景。打开后，提醒里带该会话这一轮回答的**全文**，不用切过去也知道结论——但长回答会占掉不少消息额度（微信一个窗口最多连发 10 条）。只在上面「跨会话任务完成提醒」打开时生效。" })),
-										createElement("div", { className: "wx_dep_hint" }, "仅在「跨会话任务完成提醒」开启时生效"))),
-								createElement("label", { className: "wx_check" },
-									createElement("input", { type: "checkbox", checked: !!form?.silent, onChange: (e) => setForm({ ...form, silent: e.target.checked }) }),
-									createElement("span", null, "静默"),
-									createElement(HelpTip, { text: "打开后每轮只发它最后那段回复。关掉后，思考过程和工具调用会合成一条「执行过程」一起发过来，能看到它每一步在干什么。微信端也能用 /silent on|off 切换，和这里同一个值。" })),
-								createElement("label", { className: "wx_check" },
-									createElement("input", { type: "checkbox", checked: !!form?.finalOnly, onChange: (e) => setForm({ ...form, finalOnly: e.target.checked }) }),
-									createElement("span", null, "结论模式"),
-									createElement(HelpTip, { text: "整件事彻底做完，只发一条最终结论；中间自动续跑再多轮也只发一条。权限卡、提问卡、报错照样立刻发，不会被压住。它停手 45 秒后交付，最长 10 分钟一定发一次；等不及就发 /flush 立刻取回。打开后比「静默」更强。微信端也能用 /final on|off 切换，和这里同一个值。" })),
+											createElement(HelpTip, { text: "默认关闭：完成提醒只带最后 80 字摘要，一眼看完，适合只要知道「做完了」的场景。打开后，提醒里带该会话这一轮回答的**全文**，不用切过去也知道结论——但长回答会占掉不少消息额度（微信一个窗口最多连发 10 条）。只在上面「跨会话任务完成提醒」打开时生效。" })))),
 							),
 							// `/status` 的详细程度：只影响末尾「会话级状态」那一段，
 							// 上面的工作区/会话/模型/权限等行两种模式完全一样。

@@ -374,7 +374,7 @@ describe("/status — statusMode 生效", () => {
       vi.clearAllMocks();
       const harness = makeBridge({ statusMode });
       const text = await runStatus(harness);
-      for (const row of ["📊 当前状态", "• 工作区:", "• 会话:", "• 模型:", "• 静默模式:", "• 跨会话任务完成提醒:"]) {
+      for (const row of ["📊 当前状态", "• 工作区:", "• 会话:", "• 模型:", "• 工作步骤:", "• 跨会话任务完成提醒:"]) {
         expect(text, `${statusMode}: ${row}`).toContain(row);
       }
     }
@@ -495,7 +495,7 @@ describe("/status brief | full — 切换并持久化", () => {
     expect(text).not.toContain("[用量与统计]");
 
     // Persisted: a fresh store over the same directory sees the value, which
-    // is the same contract `/silent` and `/final` have (survives a re-scan).
+    // is the same contract `/steps` has (survives a re-scan).
     const store = new ConfigStore(harness.dir);
     expect(store.stored().statusMode).toBe("brief");
     expect(store.resolve(defaultConfig()).statusMode).toBe("brief");

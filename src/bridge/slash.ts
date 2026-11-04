@@ -14,12 +14,12 @@
  */
 
 import { findHelpEntry, helpCatalog, shortestSpelling } from "../help-catalog.js";
-import type { StatusMode } from "../config.js";
+import type { StatusMode, WorkStepsMode } from "../config.js";
 
 export type HelpCommand = { kind: "help" };
 export type StatusCommand = { kind: "status"; mode?: StatusMode };
-export type SilentCommand = { kind: "silent"; mode: "on" | "off" | "status" };
-export type FinalCommand = { kind: "final"; mode: "on" | "off" | "status" };
+/** 工作步骤展示: bare `/steps` is status; otherwise one of the three modes. */
+export type WorkStepsCommand = { kind: "steps"; mode: WorkStepsMode | "status" };
 export type MergeCommand = { kind: "merge"; mode: "on" | "off" | "status" };
 /**
  * `/media` — 图片/文件与文字合并发送 + 附件交付措辞.
@@ -67,8 +67,7 @@ export type NotifyCommand =
 export type SlashCommand =
   | HelpCommand
   | StatusCommand
-  | SilentCommand
-  | FinalCommand
+  | WorkStepsCommand
   | MergeCommand
   | MediaCommand
   | StopCommand
@@ -109,8 +108,8 @@ export function parseHelpCommand(
  * Parse `/status` — bare for a report, `brief` / `full` to switch how much of
  * the trailing 「会话级状态」 section is printed.
  *
- * The switch is spelled exactly like every other local toggle (`/silent on`,
- * `/merge off`): a lowercase English word, no Chinese aliases. `/status now`
+ * The switch is spelled exactly like every other local toggle (`/merge off`):
+ * a lowercase English word, no Chinese aliases. `/status now`
  * stays unparsed on purpose — it is not a mode, and answering it with the
  * usage line is better than silently treating it as a report request.
  */
@@ -123,35 +122,29 @@ export function parseStatusCommand(text: string): StatusCommand | null {
 }
 
 /**
- * Parse `/silent` (alias `/sl`) — query or toggle silent mode.
- * Bare command defaults to status.
- */
-export function parseSilentCommand(text: string): SilentCommand | null {
-  const trimmed = text.trim().toLowerCase();
-  if (trimmed === "/silent" || trimmed === "/sl") {
-    return { kind: "silent", mode: "status" };
-  }
-  const m = trimmed.match(/^\/(?:silent|sl)\s+(on|off|status)\s*$/);
-  if (!m) return null;
-  return { kind: "silent", mode: m[1] as "on" | "off" | "status" };
-}
-
-/**
- * Parse `/final` (alias `/fo`) — query or toggle 结论模式 (final-only).
- * Bare command defaults to status.
+ * Parse `/steps` — view or switch 工作步骤展示.
  *
- * `/f` is deliberately NOT an alias: it already means `/flush`, and
- * "take back what is held" is the opposite of "start holding". `/fo`
- * is the shortest unambiguous prefix.
+ * Bare command defaults to status. Chinese and English mode names are both
+ * accepted so a user who reads either the settings page or the docs can type
+ * what they remember.
  */
-export function parseFinalCommand(text: string): FinalCommand | null {
+export function parseWorkStepsCommand(text: string): WorkStepsCommand | null {
   const trimmed = text.trim().toLowerCase();
-  if (trimmed === "/final" || trimmed === "/fo") {
-    return { kind: "final", mode: "status" };
-  }
-  const m = trimmed.match(/^\/(?:final|fo)\s+(on|off|status)\s*$/);
+  if (trimmed === "/steps") return { kind: "steps", mode: "status" };
+  const m = trimmed.match(/^\/steps\s+(.+)$/);
   if (!m) return null;
-  return { kind: "final", mode: m[1] as "on" | "off" | "status" };
+  const arg = m[1]!.trim();
+  if (arg === "status") return { kind: "steps", mode: "status" };
+  const modes = new Map<string, WorkStepsMode>([
+    ["极简", "minimal"],
+    ["minimal", "minimal"],
+    ["简洁", "concise"],
+    ["concise", "concise"],
+    ["标准", "standard"],
+    ["standard", "standard"],
+  ]);
+  const mode = modes.get(arg);
+  return mode ? { kind: "steps", mode } : null;
 }
 
 /**
@@ -296,8 +289,8 @@ export function parseNextCommand(text: string): boolean {
 }
 
 /**
- * Parse `/flush` (alias `/f`) — deliver whatever 结论模式 (final-only) is
- * currently holding, without waiting for the quiescence timer. This is the
+ * Parse `/flush` (alias `/f`) — deliver whatever 极简模式 is currently
+ * holding, without waiting for the quiescence timer. This is the
  * escape hatch for "I can see it is done, tell me now".
  */
 export function parseFlushCommand(text: string): boolean {
@@ -541,7 +534,7 @@ const SUGGEST_MAX_DISTANCE = 2;
  *
  * Ambiguity is a refusal: two candidates at the same distance (`/modle` sits
  * between `model` and nothing else, but a name like `/finai` could reach both
- * `final` and `media`) means the guess is not safe enough to answer INSTEAD of
+ * `flush` and `media`) means the guess is not safe enough to answer INSTEAD of
  * forwarding, so it returns `null` and the line takes the unknown-command path.
  */
 function lookupTypoCorrectedName(token: string): LocalCommandRef | null {
@@ -625,8 +618,7 @@ function recognizesLocalCommand(text: string): boolean {
     parseNextCommand(text) ||
     parseFlushCommand(text) ||
     parseStatusCommand(text) !== null ||
-    parseSilentCommand(text) !== null ||
-    parseFinalCommand(text) !== null ||
+    parseWorkStepsCommand(text) !== null ||
     parseMergeCommand(text) !== null ||
     parseMediaCommand(text) !== null ||
     parseSurfaceCommand(text) !== null ||
@@ -1610,8 +1602,7 @@ export function isBypassSlashCommand(text: string): boolean {
     parseHelpCommand(text) !== false ||
     parseNextCommand(text) ||
     parseFlushCommand(text) ||
-    parseSilentCommand(text) !== null ||
-    parseFinalCommand(text) !== null ||
+    parseWorkStepsCommand(text) !== null ||
     parseMergeCommand(text) !== null ||
     parseMediaCommand(text) !== null ||
     parseSurfaceCommand(text) !== null ||
@@ -1679,10 +1670,7 @@ export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "reasoning",
   "enter",
   "busy",
-  "silent",
-  "sl",
-  "final",
-  "fo",
+  "steps",
   "merge",
   "mg",
   "media",

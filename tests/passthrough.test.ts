@@ -155,7 +155,7 @@ describe("强制透传: /raw on stops every interception", () => {
     "/stauts",            // typo-corrected name
     "/nope",              // unknown-command hint
     "/stop",              // stop handler
-    "/silent on",         // mode switch
+    "/steps 极简",        // mode switch
     "/model switch x/y",  // management command
     "/at nope",           // /at usage reply
   ];

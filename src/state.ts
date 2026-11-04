@@ -1,6 +1,6 @@
 /**
- * Durable per-user bridge state: session mapping, silent mode, and workspace
- * choices. Presets deliberately live elsewhere: the bound session's preset is
+ * Durable per-user bridge state: session mapping, the legacy silent mirror,
+ * and workspace choices. Presets deliberately live elsewhere: the bound session's preset is
  * recorded in its own session log (`agent-preset/selected`), and the
  * new-session default lives in the DSH settings document
  * (`agent-preset-registry.selectedDefault`) — the same one the GUI settings
@@ -29,7 +29,11 @@ export interface UserState {
     * default; users without this flag follow the settings default.
     */
   cwdExplicit?: boolean;
-  /** Silent mode: only send the final text of each turn. */
+  /**
+   * Legacy per-user silent mirror. Delivery reads `config.workSteps`; this
+   * field only feeds the one-time migration from old `state.json` files and
+   * the legacy `/wechat/api/user` endpoint.
+   */
   silent: boolean;
   /** Cross-session notification preference (default inherit -> follows global config). */
   crossSessionNotify?: "inherit" | "on" | "off";

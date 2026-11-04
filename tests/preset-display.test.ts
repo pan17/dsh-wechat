@@ -418,7 +418,7 @@ describe("preset display — session list uses live preset (event-aware)", () =>
     expect(text).toMatch(/• 当前会话 Preset:\s*创造模式/);
     expect(text.indexOf("• 当前会话 Preset:")).toBeLessThan(text.indexOf("• 模型:"));
     expect(text.indexOf("• 模型:")).toBeLessThan(text.indexOf("• 新会话默认 Preset:"));
-    expect(text.indexOf("• 新会话默认 Preset:")).toBeLessThan(text.indexOf("• 静默模式:"));
+    expect(text.indexOf("• 新会话默认 Preset:")).toBeLessThan(text.indexOf("• 工作步骤:"));
     expect(text).not.toMatch(/• 当前会话 Preset:\s*标准模式/);
     expect(text).not.toMatch(/Preset:\s*standard\b/);
     expect(text).not.toMatch(/Preset:\s*cordis\b/);

@@ -46,22 +46,20 @@ export interface WeChatDSHConfig {
    */
   notifyTaskFullReply: boolean;
   /**
-   * Silent mode: only send the final text of each turn. Global, survives
-   * re-scan (which clears per-user `state.json`). Default off.
+   * 工作步骤展示 / work-steps mode. Global, survives re-scan (which clears
+   * per-user `state.json`). Default `standard`.
+   *
+   * - `standard`: per-turn process group + prose (the old silent=false)
+   * - `concise`: per-turn final reply only (the old silent=true)
+   * - `minimal`: per-task hold, one conclusion (the old finalOnly=true)
+   *
+   * The two historical booleans are folded into this single value on load, so
+   * they can never disagree again.
    */
-  silent: boolean;
-  /**
-   * 结论模式 / Final-only: hold every narration push (the bound session's
-   * assistant text AND cross-session task notices) and deliver exactly one
-   * consolidated conclusion once the whole task has gone quiet. Where
-   * `silent` is per-TURN (one message per turn — a goal that auto-continues
-   * over 8 rounds still produces 8 messages), `finalOnly` is per-TASK.
-   * Takes precedence over `silent`. Default off.
-   */
-  finalOnly: boolean;
-  /** `finalOnly` settle window (ms): every activity event pushes it back. */
+  workSteps: WorkStepsMode;
+  /** `minimal` settle window (ms): every activity event pushes it back. */
   finalOnlyIdleMs: number;
-  /** `finalOnly` hard ceiling (ms): after this, deliver whatever is held. */
+  /** `minimal` hard ceiling (ms): after this, deliver whatever is held. */
   finalOnlyCeilingMs: number;
   /** Inject the WeChat surface prompt while the last user message came from WeChat. Default off. */
   surfacePromptEnabled: boolean;
@@ -239,6 +237,42 @@ export interface WeChatDSHConfig {
 /** See {@link WeChatDSHConfig.statusMode}. */
 export type StatusMode = "brief" | "full";
 
+/** See {@link WeChatDSHConfig.workSteps}. */
+export type WorkStepsMode = "minimal" | "concise" | "standard";
+
+/** The three work-steps modes, in the order the settings menu shows them. */
+export const WORK_STEPS_MODES: readonly WorkStepsMode[] = ["minimal", "concise", "standard"];
+
+/** Narrow an untrusted value to a work-steps mode. */
+export function normalizeWorkSteps(value: unknown): WorkStepsMode | undefined {
+  return value === "minimal" || value === "concise" || value === "standard" ? value : undefined;
+}
+
+/**
+ * Fold the removed `silent` / `finalOnly` booleans into `workSteps`.
+ *
+ * Mutates `raw` so it can be used on a parsed `config.json` object or on a
+ * shallow copy of a composition `config:` block. A valid `workSteps` wins; a
+ * malformed one falls back to the legacy booleans, then is deleted so the
+ * caller's default applies. The legacy keys are always removed.
+ */
+export function normalizeWorkStepsConfig(raw: Record<string, unknown>): void {
+  const current = normalizeWorkSteps(raw.workSteps);
+  if (current) {
+    raw.workSteps = current;
+  } else if (raw.finalOnly === true) {
+    raw.workSteps = "minimal";
+  } else if (raw.silent === true) {
+    raw.workSteps = "concise";
+  } else if (raw.finalOnly === false || raw.silent === false) {
+    raw.workSteps = "standard";
+  } else {
+    delete raw.workSteps;
+  }
+  delete raw.silent;
+  delete raw.finalOnly;
+}
+
 /** Default WeChat surface prompt — injected as a runtime-context snapshot. */
 export const DEFAULT_SURFACE_PROMPT =
   "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（支持简单的 Markdown、适度使用 emoji、避免过长的表格）。";
@@ -272,8 +306,7 @@ export function defaultConfig(): WeChatDSHConfig {
     // The notice stays a one-glance card by default; the full answer is opt-in
     // (`notifyTaskFullReply`).
     notifyTaskFullReply: false,
-    silent: false,
-    finalOnly: false,
+    workSteps: "standard",
     finalOnlyIdleMs: 45_000,
     finalOnlyCeilingMs: 10 * 60_000,
     surfacePromptEnabled: false,

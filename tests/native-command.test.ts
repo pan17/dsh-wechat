@@ -5,7 +5,7 @@
  * The bridge routes a leading-slash line through three layers in order:
  *   1. `ctx.commands.find` — host-side native registry. Hit → run the
  *      handler, render to WeChat. Miss → fall through.
- *   2. Local whitelist — `parseXxxCommand` parsers (`/silent`, `/next`,
+ *   2. Local whitelist — `parseXxxCommand` parsers (`/steps`, `/next`,
  *      `/workspace`, `/session`, ...).
  *   3. Forward to agent — every remaining `/xxx` becomes a user prompt.
  *
@@ -202,8 +202,8 @@ describe("Native command dispatch via ctx.commands", () => {
 
   it("falls through to the local whitelist when the name is not registered", async () => {
     const mock = makeMockAgent("wx-s1");
-    // `commands` is composed but `/silent` is not registered — the
-    // bridge must NOT error out; the existing local silent branch runs.
+    // `commands` is composed but `/steps` is not registered — the bridge
+    // must NOT error out; the local work-steps branch runs.
     const commands = makeMockCommands({
       registry: new Map([
         ["plan", { description: "Enter or leave plan mode", reply: { kind: "success", text: "Plan mode off." } }],
@@ -212,17 +212,13 @@ describe("Native command dispatch via ctx.commands", () => {
     const bridge = makeBridge({ agent: mock, commands });
 
     await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
-      wechatTextMessage("/silent on"),
+      wechatTextMessage("/steps 极简"),
     );
 
-    // Silent mode flips silently — no sendTextMessage call expected for
-    // the command itself (a separate reply is only emitted when the
-    // agent's first reply lands). The point: nothing crashed, nothing
-    // routed to the agent.
     expect(mock.received.length).toBe(0);
-    const user = (bridge as unknown as { state: { getUser(u: string): { silent: boolean } } }).state.getUser("u1");
-    expect(user?.silent).toBe(true);
-    expect((bridge as unknown as { config: { silent: boolean } }).config.silent).toBe(true);
+    expect((bridge as unknown as { config: { workSteps: string } }).config.workSteps).toBe("minimal");
+    const texts = sendTextMessage.mock.calls.map((c) => c[1] as string);
+    expect(texts.some((t) => t.includes("极简"))).toBe(true);
   });
 
   it("forwards an unregistered /foo bar to the agent verbatim (fallback)", async () => {
@@ -264,34 +260,32 @@ describe("Native command dispatch via ctx.commands", () => {
     expect(hintText).toContain("未知命令 /plan");
   });
 
-  it("a native `final` command must NOT shadow the local /final handler", async () => {
+  it("a native `steps` command must NOT shadow the local /steps handler", async () => {
     // `LOCAL_COMMAND_NAMES` is what keeps a host-registered name from
-    // stealing a local command. `/final` is in it, so even a profile that
-    // happens to register `final` resolves to the local 结论模式 switch —
-    // and `/fo` (the alias) must survive too, since the registry would
-    // never own a two-letter name it did not declare.
+    // stealing a local command. `/steps` is in it, so even a profile that
+    // happens to register `steps` resolves to the local work-steps switch.
     const mock = makeMockAgent("wx-s1");
     const commands = makeMockCommands({
       registry: new Map([
-        ["final", { description: "host-owned final", reply: { kind: "success", text: "SHADOWED" } }],
+        ["steps", { description: "host-owned steps", reply: { kind: "success", text: "SHADOWED" } }],
       ]),
     });
     const bridge = makeBridge({ agent: mock, commands });
     const anyBridge = bridge as unknown as {
       state: { ensureUser(u: string, c: string): unknown };
-      config: { finalOnly: boolean };
+      config: { workSteps: string };
     };
     anyBridge.state.ensureUser("u1", "C:\\work");
 
     await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
-      wechatTextMessage("/final on"),
+      wechatTextMessage("/steps 极简"),
     );
 
-    expect(anyBridge.config.finalOnly).toBe(true);
+    expect(anyBridge.config.workSteps).toBe("minimal");
     expect(mock.received.length).toBe(0);
     const texts = sendTextMessage.mock.calls.map((c) => c[1] as string);
     expect(texts.some((t) => t.includes("SHADOWED"))).toBe(false);
-    expect(texts.some((t) => t.includes("结论模式已开启"))).toBe(true);
+    expect(texts.some((t) => t.includes("极简"))).toBe(true);
   });
 
   it("bypasses a pending approval card when the line is a registered native command", async () => {

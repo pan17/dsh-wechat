@@ -13,7 +13,7 @@
  *  - Each key is rendered with `renderProjectionValue` and sorted
  *    alphabetically so plugin load order does not change output.
  *  - Existing rows (workspace / session / agent / preset / model /
- *    context / permission / silent) are untouched.
+ *    context / permission / work-steps) are untouched.
  *
  * These tests also cover `renderProjectionValue` directly — a pure
  * function with no I/O, fully exercised at the unit level.
@@ -231,7 +231,7 @@ describe("/status — session-level projection section (generic)", () => {
     expect(text).not.toContain("会话级状态");
     // Existing rows are still present.
     expect(text).toContain("• 工作区:");
-    expect(text).toContain("• 静默模式:");
+    expect(text).toContain("• 工作步骤:");
   });
 
   it("renders null values as the literal text 'null'", async () => {
@@ -308,7 +308,7 @@ describe("/status — session-level projection section (generic)", () => {
     // Existing rows remain — projection failure must not poison the
     // whole /status output.
     expect(text).toContain("• 工作区:");
-    expect(text).toContain("• 静默模式:");
+    expect(text).toContain("• 工作步骤:");
   });
 
   it("omits the section when the bound agent has no session", async () => {
@@ -376,13 +376,13 @@ describe("/status — session-level projection section (generic)", () => {
     expect(text).toContain("• 当前会话 Preset:");
     expect(text).toContain("• 模型:");
     expect(text).toContain("• 新会话默认 Preset:");
-    expect(text).toContain("• 静默模式:");
+    expect(text).toContain("• 工作步骤:");
     expect(text.indexOf("• 当前会话 Preset:")).toBeLessThan(text.indexOf("• 模型:"));
     expect(text.indexOf("• 模型:")).toBeLessThan(text.indexOf("• 新会话默认 Preset:"));
-    expect(text.indexOf("• 新会话默认 Preset:")).toBeLessThan(text.indexOf("• 静默模式:"));
+    expect(text.indexOf("• 新会话默认 Preset:")).toBeLessThan(text.indexOf("• 工作步骤:"));
     expect(text).not.toContain("• 待处理");
     // The new section appears AFTER the existing rows.
-    expect(text.indexOf("• 静默模式:")).toBeLessThan(text.indexOf("── 会话级状态 ──"));
+    expect(text.indexOf("• 工作步骤:")).toBeLessThan(text.indexOf("── 会话级状态 ──"));
   });
 });
 

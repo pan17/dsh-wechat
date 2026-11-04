@@ -54,8 +54,12 @@ import {
   type OutboundMessage,
   type UserState,
 } from "../state.js";
-import type { WeChatDSHConfig } from "../config.js";
-import { defaultConfig } from "../config.js";
+import {
+  defaultConfig,
+  normalizeWorkSteps,
+  type WeChatDSHConfig,
+  type WorkStepsMode,
+} from "../config.js";
 import { EDITABLE_KEYS, type ConfigStore, type EditableConfig } from "../config-store.js";
 import { maskCredentials, maskSecrets, maskUserId } from "../utils/redact.js";
 import { AuditLog } from "../utils/audit.js";
@@ -80,7 +84,6 @@ import {
   renderHistoryList,
   renderProjectionSection,
   parseEnterCommand,
-  parseFinalCommand,
   parseMergeCommand,
   parseModelCommand,
   splitProviderModelTarget,
@@ -96,7 +99,7 @@ import {
   parseRejectPermissionCommand,
   parseRejectQuestionCommand,
   parseSessionCommand,
-  parseSilentCommand,
+  parseWorkStepsCommand,
   parseRawCommand,
   parseSurfaceCommand,
   parseStatusCommand,
@@ -107,7 +110,6 @@ import {
   type AtCommand,
   type BackgroundJobView,
   type EnterCommand,
-  type FinalCommand,
   type ForkCommand,
   type HistoryCommand,
   type MergeCommand,
@@ -122,6 +124,7 @@ import {
   type SessionCommand,
   type SkillCommand,
   type WorkspaceCommand,
+  type WorkStepsCommand,
 } from "./slash.js";
 import {
   buildMentionBlock,
@@ -319,7 +322,7 @@ interface PendingQuestion {
 }
 
 /**
- * One held conclusion for a session under 结论模式 (`config.finalOnly`).
+ * One held conclusion for a session under 极简模式 (`config.workSteps = "minimal"`).
  * The entry accumulates instead of sending: `body` keeps the latest full
  * assistant text, `notice` the preview a cross-session completion card would
  * have carried, and `rounds` counts how many turn ends were folded in, so the
@@ -522,6 +525,11 @@ function fullReplySuffix(text: string): string {
   return body ? `\n\n${body}\n` : "";
 }
 
+/** User-facing label for the three work-steps modes. */
+function workStepsLabel(mode: WorkStepsMode): string {
+  return mode === "minimal" ? "极简" : mode === "concise" ? "简洁" : "标准";
+}
+
 /**
  * Sliding 60-second limiter for agent-initiated `send_wechat` pushes.
  *
@@ -619,7 +627,7 @@ export class WeChatDSHBridge {
    * already delivered (the card is always re-viewable via /history).
    */
   private readonly pushedCardRpcIds = new Map<string, Set<string>>();
-  private readonly silentBuffers = new Map<string, string[]>();
+  private readonly conciseBuffers = new Map<string, string[]>();
   /** Desktop-style process group for the currently bound conversation. */
   private readonly processes = new Map<string, ExecutionProcess>();
   private readonly assistantStreams = new Map<string, {
@@ -632,14 +640,14 @@ export class WeChatDSHBridge {
   /** Invalidates queued sends across logout / re-login, even for the same peer. */
   private outboundGeneration = 0;
   /**
-   * 结论模式 (final-only) hold table, keyed by session id. While
-   * `config.finalOnly` is on, neither the bound session's assistant text nor
-   * a cross-session task notice is pushed as it happens: each is folded into
-   * the entry for its session and the whole entry is delivered ONCE, after
-   * the task has been quiet for `finalOnlyIdleMs` (or at the
+   * 极简模式 (per-task hold) table, keyed by session id. While
+   * `config.workSteps` is `"minimal"`, neither the bound session's assistant
+   * text nor a cross-session task notice is pushed as it happens: each is
+   * folded into the entry for its session and the whole entry is delivered
+   * ONCE, after the task has been quiet for `finalOnlyIdleMs` (or at the
    * `finalOnlyCeilingMs` hard ceiling). This is what collapses a goal that
    * auto-continues over N rounds — each round is a separate DSH turn, so the
-   * per-turn `silent` mode still emits one message per round — into a single
+   * per-turn `concise` mode still emits one message per round — into a single
    * conclusion.
    */
   private readonly pendingFinal = new Map<string, PendingFinal>();
@@ -788,7 +796,7 @@ export class WeChatDSHBridge {
     this.configStore = configStore;
     this.state = new StateStore(config.storageDir);
     this.audit = new AuditLog(config.storageDir, (message) => this.log(message));
-    this.migrateSilentFromUsers();
+    this.migrateWorkStepsFromUsers();
     this.seedAllowlistFromPeer();
     this.restoreOutboundState();
     this.agents = new AgentStore(ctx);
@@ -799,12 +807,13 @@ export class WeChatDSHBridge {
   /**
    * Pre-global-silent installs stored the toggle only on the WeChat user.
    * Copy it into config.json once so the settings page and a later re-scan
-   * still see the same value.
+   * still see the same value. A stored `workSteps` is an explicit choice and
+   * always wins.
    */
-  private migrateSilentFromUsers(): void {
-    if (this.configStore?.stored().silent !== undefined) return;
+  private migrateWorkStepsFromUsers(): void {
+    if (this.configStore?.stored().workSteps !== undefined) return;
     if (!this.state.all().some((u) => u.silent)) return;
-    this.persistEditable({ silent: true });
+    this.persistEditable({ workSteps: "concise" });
   }
 
   /**
@@ -875,7 +884,7 @@ export class WeChatDSHBridge {
 
   /** Bind or create the WeChat user, inheriting the global silent default. */
   private ensureBoundUser(userId: string): UserState {
-    return this.state.ensureUser(userId, this.config.cwd, { silent: this.config.silent });
+    return this.state.ensureUser(userId, this.config.cwd, { silent: this.workSteps() === "concise" });
   }
 
   /** Hydrate the one peer's persisted budget and queue without auto-flushing. */
@@ -1169,7 +1178,7 @@ export class WeChatDSHBridge {
         userId: u.userId,
         sessionId: u.sessionId,
         cwd: u.cwd,
-        silent: this.isSilent(),
+        silent: this.workSteps() === "concise",
         crossSessionNotify: u.crossSessionNotify ?? "inherit",
         watchedSessions: u.watchedSessions ?? [],
       })),
@@ -1433,14 +1442,14 @@ export class WeChatDSHBridge {
     // Deliver what 打字合并 is holding BEFORE `stopInteraction()`: the merged
     // batch is forwarded through `forwardToAgent`, which aborts as soon as the
     // interaction is marked stopped — flushing afterwards would silently
-    // discard the user's own words. Same rule as the 结论模式 flush below: the
+    // discard the user's own words. Same rule as the 极简模式 flush below: the
     // peer is not changing, so already-produced input is delivered.
     await this.flushAllMergedText("dispose");
     this.stopInteraction();
     this.processes.clear();
     this.assistantStreams.clear();
     this.streamedReasoning.clear();
-    this.silentBuffers.clear();
+    this.conciseBuffers.clear();
     this.seenOutputEvents.clear();
     this.outboundGeneration++;
     // A hold is a conclusion the agent ALREADY produced. Plugin dispose /
@@ -1573,7 +1582,7 @@ export class WeChatDSHBridge {
     this.outboundCache = [];
     this.cacheNoticeSent = false;
     this.wechatMsgCount = 0;
-    this.silentBuffers.clear();
+    this.conciseBuffers.clear();
     this.dropMergedText();
     this.dropAllPendingRefs();
     this.discardPendingFinal();
@@ -1687,15 +1696,27 @@ export class WeChatDSHBridge {
       }
     }
 
-    if (typeof patch.silent === "boolean") {
-      if (patch.silent !== before.silent) {
+    if (patch.workSteps !== undefined) {
+      const beforeMode = normalizeWorkSteps(before.workSteps) ?? "standard";
+      const afterMode = this.workSteps();
+      if (afterMode !== beforeMode) {
+        // A mode switch invalidates every half-built process / stream / buffer
+        // from the previous mode; the next turn starts cleanly in the new one.
         this.processes.clear();
         this.assistantStreams.clear();
         this.streamedReasoning.clear();
-        if (!patch.silent) this.silentBuffers.clear();
-      }
-      for (const user of this.state.all()) {
-        this.state.update(user.userId, { silent: patch.silent });
+        // Leaving 简洁 for 标准 discards the current turn's buffered prose,
+        // matching the old `silent off` rule. Entering 极简 keeps it: turn/end
+        // folds that prose into the per-task hold.
+        if (afterMode === "standard") this.conciseBuffers.clear();
+        if (beforeMode === "minimal") {
+          // Held conclusions are output the agent already produced. Leaving
+          // minimal hands them over instead of destroying them.
+          await this.flushAllPendingFinal("config-work-steps");
+        }
+        for (const user of this.state.all()) {
+          this.state.update(user.userId, { silent: afterMode === "concise" });
+        }
       }
     }
 
@@ -1739,7 +1760,9 @@ export class WeChatDSHBridge {
     if (!user) return { ok: false, message: `未找到用户 ${userId}` };
     const toUpdate: Partial<UserState> = {};
     if (typeof patch.silent === "boolean") {
-      this.persistEditable({ silent: patch.silent });
+      // Legacy per-user endpoint: fold the old boolean into the global mode.
+      const mode: WorkStepsMode = patch.silent ? "concise" : "standard";
+      this.persistEditable({ workSteps: mode });
       toUpdate.silent = patch.silent;
     }
     if (patch.crossSessionNotify === "on" || patch.crossSessionNotify === "off" || patch.crossSessionNotify === "inherit") {
@@ -1842,7 +1865,7 @@ export class WeChatDSHBridge {
     // bypass check see the same input.
     const text = extractText(msg.item_list);
     // Slash commands whose meaning is unrelated to the pending card (e.g.
-    // `/next` to flush cached outbound, `/silent on`, `/status`,
+    // `/next` to flush cached outbound, `/steps 简洁`, `/status`,
     // `/workspace …`) bypass the card and execute normally. The
     // card-specific commands (`/rp`, `/rq`) stay in the card handler and
     // keep their existing semantics (reject the card). Empty text returns
@@ -1996,15 +2019,9 @@ export class WeChatDSHBridge {
         return;
       }
 
-      const silent = parseSilentCommand(text);
-      if (silent) {
-        await this.handleSilentCommand(userId, silent.mode);
-        return;
-      }
-
-      const finalCmd = parseFinalCommand(text);
-      if (finalCmd) {
-        await this.handleFinalCommand(userId, finalCmd);
+      const steps = parseWorkStepsCommand(text);
+      if (steps) {
+        await this.handleWorkStepsCommand(userId, steps);
         return;
       }
 
@@ -2025,8 +2042,8 @@ export class WeChatDSHBridge {
         await this.sendReply(
           userId,
           flushed > 0
-            ? `📤 已立即取回 ${flushed} 条暂存的最终结论。`
-            : "📭 当前没有暂存的结论（结论模式未开启，或已交付）。",
+            ? `📤 已立即取回 ${flushed} 条暂存的结论。`
+            : "📭 当前没有暂存的结论（工作步骤不是极简，或已交付）。",
         );
         return;
       }
@@ -2046,7 +2063,7 @@ export class WeChatDSHBridge {
       const status = parseStatusCommand(text);
       if (status) {
         // `/status brief|full` is a switch, not a report: it persists exactly
-        // like `/silent on|off` (config.json, so a re-scan keeps it) and then
+        // like `/steps 简洁` (config.json, so a re-scan keeps it) and then
         // answers with the NEW rendering, so the user sees the effect without
         // sending a second command.
         if (status.mode) {
@@ -2836,7 +2853,7 @@ export class WeChatDSHBridge {
       if (source?.kind === "user") {
         // The user is speaking again: whatever is still held belongs to the
         // PREVIOUS request, so deliver it before the new task starts holding.
-        if (this.finalOnlyEnabled() && this.pendingFinal.has(sessionId)) {
+        if (this.isMinimal() && this.pendingFinal.has(sessionId)) {
           void this.flushPendingFinal(sessionId, "new-user-message");
         }
       }
@@ -2881,7 +2898,7 @@ export class WeChatDSHBridge {
           const ctx = await this.sessionContextLabel(sessionId);
           const suffix = this.previewSuffix(sessionId);
           const body = ctx + "\n✅ 任务已完成" + suffix + "\n发送 /session switch <编号> 切换查看。";
-          const holdMode = this.finalOnlyEnabled();
+          const holdMode = this.isMinimal();
           // The immediate path must confirm reachability BEFORE claiming the
           // dedupe slot: marking while unreachable and then bailing out would
           // both suppress a later, deliverable completion of the same session
@@ -2897,7 +2914,7 @@ export class WeChatDSHBridge {
           // Arm the cleanup for every path that marks, so a mark can never
           // outlive its 30s window without a timer to release it.
           setTimeout(() => this.notifiedCrossSessionTurns.get(r.userId)?.delete(sessionId), 30_000);
-          // 结论模式: fold this round's completion card into the task's hold
+          // 极简模式: fold this round's completion card into the task's hold
           // instead of emitting one card per auto-continued round.
           if (holdMode) {
             this.foldFinalRound(sessionId);
@@ -2909,7 +2926,7 @@ export class WeChatDSHBridge {
       })();
     }
 
-    if (this.isSilent() || !this.token || this.tokenGiveUp) this.processes.delete(sessionId);
+    if (!this.showsProcess() || !this.token || this.tokenGiveUp) this.processes.delete(sessionId);
     switch (event.type) {
       case "turn/start":
         this.clearSessionOutput(sessionId);
@@ -2922,10 +2939,10 @@ export class WeChatDSHBridge {
         const streamKey = JSON.stringify([sessionId, event.seq]);
         const handledReasoning = this.streamedReasoning.get(streamKey) ?? stream?.handledReasoning;
         this.streamedReasoning.delete(streamKey);
-        if (this.isSilent()) {
+        if (this.isConcise()) {
           const text = blocks.filter((b) => b.type === "text" && typeof b.text === "string")
             .map((b) => b.text).join("\n");
-          if (text.trim()) this.silentBuffers.set(sessionId, [text]);
+          if (text.trim()) this.conciseBuffers.set(sessionId, [text]);
           break;
         }
         // Keep adjacent prose blocks together, flushing the process group BEFORE prose.
@@ -2935,7 +2952,7 @@ export class WeChatDSHBridge {
           this.flushProcess(sessionId, user.userId);
           const proseText = prose.join("\n");
           prose = [];
-          // 结论模式 (per-task) outranks 静默 (per-turn): hold the exact text
+          // 极简模式 (per-task) outranks 简洁 (per-turn): hold the exact text
           // this turn would otherwise push and let the quiescence timer deliver
           // the conclusion once the whole task — every auto-continued round
           // included — has stopped. The typing indicator stays on through the
@@ -2968,12 +2985,12 @@ export class WeChatDSHBridge {
       }
       case "turn/end": {
         this.flushProcess(sessionId, user.userId);
-        const buffer = this.silentBuffers.get(sessionId);
-        if (this.finalOnlyEnabled()) {
+        const buffer = this.conciseBuffers.get(sessionId);
+        if (this.isMinimal()) {
           // Whatever the per-turn buffer still held belongs to this task's
           // conclusion; fold it in and count the round.
           if (buffer && buffer.length > 0) {
-            this.silentBuffers.delete(sessionId);
+            this.conciseBuffers.delete(sessionId);
             this.holdFinalText(user.userId, sessionId, buffer[buffer.length - 1]!);
           }
           this.foldFinalRound(sessionId);
@@ -2989,7 +3006,7 @@ export class WeChatDSHBridge {
           this.endTyping(user.userId, "turn-end");
           break;
         }
-        if (this.isSilent() && buffer?.length) this.pushOutput(user.userId, buffer[buffer.length - 1]!);
+        if (this.isConcise() && buffer?.length) this.pushOutput(user.userId, buffer[buffer.length - 1]!);
         this.clearSessionOutput(sessionId);
         this.endTyping(user.userId, "turn-end");
         this.clearCrossSessionTurnNotified(user.userId, sessionId);
@@ -2998,27 +3015,42 @@ export class WeChatDSHBridge {
     }
   }
 
-  // ─── 结论模式 / Final-only hold (per-TASK, not per-turn) ───
+  // ─── 极简模式 / minimal hold (per-TASK, not per-turn) ───
   //
-  // `silent` collapses the intermediate steps *within* one turn; it still
+  // `concise` collapses the intermediate steps *within* one turn; it still
   // emits one message per turn, so a goal that auto-continues over N rounds
   // (each round is its own DSH turn, woken by the round driver on
-  // `agent/status → idle`) still produces N messages. `finalOnly` instead
+  // `agent/status → idle`) still produces N messages. `minimal` instead
   // holds every push — the bound session's assistant text AND the
   // cross-session "✅ 任务已完成" notices — and delivers exactly one
   // consolidated conclusion once the whole task has gone quiet.
 
-  /** Whether 结论模式 (per-task hold) is on. Supersedes `silent`. */
-  private finalOnlyEnabled(): boolean {
-    return this.config.finalOnly === true;
+  /** The effective work-steps mode; an invalid stored value fails safe. */
+  private workSteps(): WorkStepsMode {
+    return normalizeWorkSteps(this.config.workSteps) ?? "standard";
   }
 
-  private finalOnlyIdleMs(): number {
+  /** Whether 极简模式 (per-task hold) is on. */
+  private isMinimal(): boolean {
+    return this.workSteps() === "minimal";
+  }
+
+  /** Whether 简洁模式 (per-turn final reply only) is on. */
+  private isConcise(): boolean {
+    return this.workSteps() === "concise";
+  }
+
+  /** Whether the per-turn 「执行过程」 group is delivered at all. */
+  private showsProcess(): boolean {
+    return this.workSteps() === "standard";
+  }
+
+  private minimalIdleMs(): number {
     const value = this.config.finalOnlyIdleMs;
     return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 45_000;
   }
 
-  private finalOnlyCeilingMs(): number {
+  private minimalCeilingMs(): number {
     const value = this.config.finalOnlyCeilingMs;
     return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 10 * 60_000;
   }
@@ -3041,7 +3073,7 @@ export class WeChatDSHBridge {
     // task that never goes quiet still reports in at least once per window.
     entry.ceiling = setTimeout(
       () => void this.flushPendingFinal(sessionId, "ceiling"),
-      this.finalOnlyCeilingMs(),
+      this.minimalCeilingMs(),
     );
     entry.ceiling.unref?.();
     return entry;
@@ -3050,8 +3082,8 @@ export class WeChatDSHBridge {
   /** (Re)arm the quiescence timer: every activity event pushes delivery back. */
   private armFinalSettle(entry: PendingFinal): void {
     if (entry.settle) clearTimeout(entry.settle);
-    const remaining = entry.firstAt + this.finalOnlyCeilingMs() - Date.now();
-    const delay = Math.max(0, Math.min(this.finalOnlyIdleMs(), remaining));
+    const remaining = entry.firstAt + this.minimalCeilingMs() - Date.now();
+    const delay = Math.max(0, Math.min(this.minimalIdleMs(), remaining));
     entry.settle = setTimeout(() => void this.flushPendingFinal(entry.sessionId, "idle"), delay);
     entry.settle.unref?.();
   }
@@ -3070,7 +3102,7 @@ export class WeChatDSHBridge {
    * now (the hold owns delivery from here on).
    */
   private holdFinalText(userId: string, sessionId: string, text: string): boolean {
-    if (!this.finalOnlyEnabled()) return false;
+    if (!this.isMinimal()) return false;
     const entry = this.ensurePendingFinal(sessionId, userId);
     entry.userId = userId;
     entry.body = text;
@@ -3119,9 +3151,9 @@ export class WeChatDSHBridge {
     const digest = entry.body && entry.rounds > 1
       ? `✅ 已完成（共 ${entry.rounds} 轮）\n${text}`
       : text;
-    this.log(`final-only flush ${sessionId} (${reason}, ${entry.rounds} round(s))`);
+    this.log(`minimal flush ${sessionId} (${reason}, ${entry.rounds} round(s))`);
     await this.sendReply(entry.userId, digest).catch((err) => {
-      this.log(`final-only flush failed: ${String(err)}`);
+      this.log(`minimal flush failed: ${String(err)}`);
     });
   }
 
@@ -3163,7 +3195,7 @@ export class WeChatDSHBridge {
    * (`Agent.id: SessionId`), so no extra mapping is needed.
    */
   handleAgentStatus(sessionId: string, status: string): void {
-    if (!this.finalOnlyEnabled()) return;
+    if (!this.isMinimal()) return;
     if (status === "running") {
       this.cancelFinalSettle(sessionId);
       return;
@@ -3179,7 +3211,7 @@ export class WeChatDSHBridge {
   /** Flush accumulated process on the FIRST prose chunk, before the response commits. */
   handleAssistantStream(sessionId: string, frame: AssistantStreamFrame): void {
     const user = this.userForAgent(sessionId);
-    if (this.interactionStopped || !user || this.isSilent() || !this.token || this.tokenGiveUp) {
+    if (this.interactionStopped || !user || !this.showsProcess() || !this.token || this.tokenGiveUp) {
       this.assistantStreams.delete(sessionId);
       return;
     }
@@ -3231,7 +3263,7 @@ export class WeChatDSHBridge {
   }
 
   private processFor(sessionId: string): ExecutionProcess | undefined {
-    if (this.isSilent() || !this.token || this.tokenGiveUp) return undefined;
+    if (!this.showsProcess() || !this.token || this.tokenGiveUp) return undefined;
     let process = this.processes.get(sessionId);
     if (!process) {
       process = new ExecutionProcess(this.userForAgent(sessionId)?.cwd);
@@ -3242,18 +3274,18 @@ export class WeChatDSHBridge {
 
   private flushProcess(sessionId: string, userId: string): void {
     const process = this.processes.get(sessionId);
-    if (this.isSilent() || !this.token || this.tokenGiveUp || this.userForAgent(sessionId)?.userId !== userId) {
+    if (!this.showsProcess() || !this.token || this.tokenGiveUp || this.userForAgent(sessionId)?.userId !== userId) {
       this.processes.delete(sessionId);
       return;
     }
     const text = process?.take(this.config.textChunkLimit);
-    // 结论模式 holds the whole task, so the 「执行过程」 group — reasoning and
+    // 极简模式 holds the whole task, so the 「执行过程」 group — reasoning and
     // tool activity, i.e. exactly the intermediate narration the mode exists to
     // suppress — is DROPPED rather than pushed. `flushProcess` is the single
     // sink for it (assistant text blocks, turn/end, cards, agent error), so one
     // guard here covers every path. Without this the mode would still emit one
     // process message per auto-continued round and the flood would persist.
-    if (text && !this.finalOnlyEnabled()) this.pushOutput(userId, text, true);
+    if (text && !this.isMinimal()) this.pushOutput(userId, text, true);
   }
 
   private pushOutput(userId: string, text: string, plainText = false): void {
@@ -3267,7 +3299,7 @@ export class WeChatDSHBridge {
       if ((JSON.parse(key) as [string, number])[0] === sessionId) this.streamedReasoning.delete(key);
     }
     this.processes.delete(sessionId);
-    this.silentBuffers.delete(sessionId);
+    this.conciseBuffers.delete(sessionId);
   }
 
   /** Notify the bound user of an agent error. */
@@ -3764,7 +3796,7 @@ export class WeChatDSHBridge {
     for (const user of recipients) {
       if (user.sessionId === sessionId) continue;
       if (!this.notifyTaskEventsEnabled()) continue;
-      const holdMode = this.finalOnlyEnabled();
+      const holdMode = this.isMinimal();
       // Same ordering rule as the bound-user path: the immediate send must
       // confirm reachability before claiming the dedupe slot, while the hold
       // path marks unconditionally (its delivery is deferred and parked).
@@ -3775,7 +3807,7 @@ export class WeChatDSHBridge {
       this.notifiedCrossSessionTurns.set(user.userId, set);
       // Arm the cleanup for every path that marks.
       setTimeout(() => { this.notifiedCrossSessionTurns.get(user.userId)?.delete(sessionId); }, 30_000);
-      // 结论模式: hold instead of one card per auto-continued round.
+      // 极简模式: hold instead of one card per auto-continued round.
       if (holdMode) {
         this.foldFinalRound(sessionId);
         this.holdFinalNotice(user.userId, sessionId, body);
@@ -4376,15 +4408,21 @@ export class WeChatDSHBridge {
    * store still see the in-memory change for the rest of the process.
    */
   private persistEditable(patch: Partial<EditableConfig>): void {
-    if (typeof patch.silent === "boolean" && patch.silent !== this.config.silent) {
-      this.processes.clear();
-      this.assistantStreams.clear();
-      this.streamedReasoning.clear();
-      if (!patch.silent) this.silentBuffers.clear();
-    }
+    const beforeMode = this.workSteps();
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) continue;
       (this.config as unknown as Record<string, unknown>)[key] = value;
+    }
+    if (patch.workSteps !== undefined && patch.workSteps !== beforeMode) {
+      // A mode switch invalidates every half-built process / stream / buffer
+      // from the previous mode; the next turn starts cleanly in the new one.
+      this.processes.clear();
+      this.assistantStreams.clear();
+      this.streamedReasoning.clear();
+      if (patch.workSteps === "standard") this.conciseBuffers.clear();
+      for (const user of this.state.all()) {
+        this.state.update(user.userId, { silent: patch.workSteps === "concise" });
+      }
     }
     try {
       this.configStore?.update(patch);
@@ -4490,85 +4528,67 @@ export class WeChatDSHBridge {
     );
   }
 
-  private async handleSilentCommand(userId: string, mode: "on" | "off" | "status"): Promise<void> {
-    const user = this.ensureBoundUser(userId);
-    if (mode === "on") {
-      this.setSilent(true, user.userId);
-      await this.sendReply(userId, "🔇 静默模式已开启：每轮只发送最终回复。");
-    } else if (mode === "off") {
-      this.setSilent(false, user.userId);
-      await this.sendReply(userId, "🔊 静默模式已关闭：思考与工具合并为执行过程，正文独立发送。");
-    } else {
-      await this.sendReply(userId, `静默模式: ${this.isSilent() ? "on" : "off"}（/silent on|off 切换）`);
-    }
-  }
-
-  /** Global silent switch, mirrored onto the current peer so runtime reads stay consistent. */
-  private setSilent(silent: boolean, userId?: string): void {
-    this.persistEditable({ silent });
-    const target = userId ?? this.peerUserId ?? this.state.all()[0]?.userId;
-    if (target) this.state.update(target, { silent });
-  }
-
-  private isSilent(): boolean {
-    return this.config.silent === true;
-  }
-
-  // ─── 结论模式 / final-only (/final) ───
+  // ─── 工作步骤展示 / work-steps (/steps) ───
 
   /**
-   * `/final` — view or switch 结论模式. Mirrors `/silent`: the value is
-   * persisted to `config.json` (so a re-scan keeps it) and the settings
-   * page shows the same switch.
-   *
-   * Turning the mode OFF flushes whatever is held. A hold is a conclusion
-   * the agent has already produced — the user just asked us to stop
-   * holding things back, so handing it over now is the only reading that
-   * does not silently destroy output. (Dispose does the same; only
-   * logout / re-bind discard.)
+   * Switch the work-steps mode and hand back whatever 极简 mode was holding.
+   * The hold is output the agent already produced, so leaving 极简 delivers it
+   * instead of destroying it. The settings page calls `updateConfig`, which
+   * applies the same rule.
    */
-  private async handleFinalCommand(userId: string, cmd: FinalCommand): Promise<void> {
-    if (cmd.mode === "on") {
-      this.persistEditable({ finalOnly: true });
-      await this.sendReply(
-        userId,
-        "📌 结论模式已开启：跨轮次的中间过程不再推送，整条任务停下后只发一条最终结论。\n"
-        + "权限卡、提问卡、报错仍会立即推送；想看当前进度随时发 /flush。",
-      );
-      return;
-    }
-    if (cmd.mode === "off") {
-      this.persistEditable({ finalOnly: false });
-      const flushed = await this.flushAllPendingFinal("command-off");
-      await this.sendReply(
-        userId,
-        flushed > 0
-          ? `📤 结论模式已关闭；已取回 ${flushed} 条暂存的最终结论。之后每轮正常推送。`
-          : "📤 结论模式已关闭：之后每轮正常推送。",
-      );
-      return;
-    }
+  private async switchWorkSteps(mode: WorkStepsMode, reason: string): Promise<number> {
+    const before = this.workSteps();
+    if (before === mode) return 0;
+    this.persistEditable({ workSteps: mode });
+    if (before === "minimal") return this.flushAllPendingFinal(reason);
+    return 0;
+  }
+
+  private workStepsStatusText(): string {
+    const mode = this.workSteps();
     const held = this.pendingFinal.size;
-    await this.sendReply(
-      userId,
-      `结论模式: ${this.finalOnlyEnabled() ? "on" : "off"}`
-      + (this.finalOnlyEnabled() && held > 0 ? `（暂存 ${held} 条，发 /flush 立即取回）` : "")
-      + "\n切换: /final on|off（设置页「结论模式」同步，写入 config.json 后重新扫码仍保留）",
+    const lines = [
+      `📐 工作步骤展示: ${workStepsLabel(mode)}${mode === "minimal" ? `（暂存 ${held} 条）` : ""}`,
+    ];
+    if (mode === "minimal" && held > 0) lines.push("发 /flush 立即取回。");
+    lines.push(
+      "切换: /steps 极简|简洁|标准",
+      "极简=整条任务只发结论；简洁=每轮只发最终回复；标准=过程与回复都发。",
     );
+    return lines.join("\n");
+  }
+
+  private workStepsConfirmation(mode: WorkStepsMode, flushed: number): string {
+    const head = mode === "minimal"
+      ? "📐 工作步骤已切换为极简：整条任务停下后只发一条最终结论；权限卡、提问卡、报错仍会立即推送。"
+      : mode === "concise"
+        ? "📐 工作步骤已切换为简洁：每轮只发最后一段回复，不推送执行过程。"
+        : "📐 工作步骤已切换为标准：思考与工具调用合并为「执行过程」，正文独立发送。";
+    const tail = flushed > 0 ? `\n📤 已取回 ${flushed} 条暂存的结论。` : "";
+    return `${head}${tail}\n切换: /steps 极简|简洁|标准`;
+  }
+
+  private async handleWorkStepsCommand(userId: string, cmd: WorkStepsCommand): Promise<void> {
+    if (cmd.mode === "status") {
+      await this.sendReply(userId, this.workStepsStatusText());
+      return;
+    }
+    const flushed = await this.switchWorkSteps(cmd.mode, "steps-command");
+    await this.sendReply(userId, this.workStepsConfirmation(cmd.mode, flushed));
   }
 
   // ─── 打字合并 / inbound merge window (/merge) ───
 
   /**
-   * `/merge` — view or switch the inbound merge window. Mirrors `/silent`:
-   * persisted to `config.json` (survives a re-scan), shown in the settings
+   * `/merge` — view or switch the inbound merge window. Persisted to
+   * `config.json` (survives a re-scan), shown in the settings
    * page, bypasses a pending card, appears in `/help` and in
    * `LOCAL_COMMAND_NAMES` so a native command of the same name never shadows
    * it.
    *
    * Turning it OFF flushes the buffer first: those are the user's own words
    * and dropping them because they flipped a switch would silently swallow a
-   * message (the same rule `/final off` follows).
+   * message (the same rule `/steps 标准` follows).
    */
   private async handleMergeCommand(userId: string, cmd: MergeCommand): Promise<void> {
     if (cmd.mode === "on") {
@@ -6911,11 +6931,11 @@ export class WeChatDSHBridge {
   }
 
   /**
-   * Color marker for boolean toggles on /status. Each field has its own
-   * semantic — `on` for 静默模式 means "we stop forwarding to WeChat"
-   * (warning), `on` for 跨会话决策推送 means "extra delivery is enabled"
-   * (good). The colored glyph is field-specific; this helper just
-   * annotates an explicit `value` with `🟢` / `🔴`. iLink text items
+   * Color marker for status rows. Each field has its own semantic —
+   * `简洁` means "we stop forwarding process to WeChat" (warning), while
+   * `标准`/`极简` are deliberate delivery choices (good). The colored glyph
+   * is field-specific; this helper just annotates an explicit `value` with
+   * `🟢` / `🔴`. iLink text items
    * have no `<font color>` support — emoji glyphs are the only
    * colored channel that survives the wire.
    */
@@ -6923,6 +6943,13 @@ export class WeChatDSHBridge {
     if (polarity === "positive") return `🟢 ${value}`;
     if (polarity === "warning") return `🔴 ${value}`;
     return `⚪ ${value}`;
+  }
+
+  private workStepsStatusBadge(): string {
+    const mode = this.workSteps();
+    if (mode === "minimal") return this.paintBadge(`极简（暂存 ${this.pendingFinal.size}）`, "positive");
+    if (mode === "concise") return this.paintBadge("简洁", "warning");
+    return this.paintBadge("标准", "positive");
   }
 
   private async formatStatus(user: UserState): Promise<string> {
@@ -6981,12 +7008,9 @@ export class WeChatDSHBridge {
         ? [`• 权限: ${permission.startsWith("danger") ? this.paintBadge(permission, "warning") : permission}`]
         : []),
       presetLines.defaultLine,
-      // 静默模式 on = we stop forwarding (warning); off = normal delivery (good).
-      `• 静默模式: ${this.paintBadge(this.isSilent() ? "on" : "off", this.isSilent() ? "warning" : "positive")}`,
-      // 结论模式 on = per-task hold, only the final conclusion is pushed (good).
-      ...(this.finalOnlyEnabled()
-        ? [`• 结论模式: ${this.paintBadge(`on（暂存 ${this.pendingFinal.size}）`, "positive")}`]
-        : [`• 结论模式: ${this.paintBadge("off", "neutral")}`]),
+      // 工作步骤: 标准/极简 are deliberate delivery choices (good); 简洁 is
+      // the old "stop forwarding process" warning state, so it stays red.
+      `• 工作步骤: ${this.workStepsStatusBadge()}`,
       `• 微信提示词: ${this.paintBadge(this.config.surfacePromptEnabled ? "on" : "off", this.config.surfacePromptEnabled ? "positive" : "neutral")}`,
       // 强制透传 on = the gateway stops intercepting commands, which is
       // precisely the state a user must never be surprised by — so the row is

@@ -122,17 +122,17 @@ describe("bot token missing: drop outbound, do not park", () => {
       state: { ensureUser(u: string, c: string): UserState; update(u: string, p: unknown): void };
       parkOutbound(userId: string, item: { kind: "text"; text: string }): void;
       outboundCache: Array<{ kind: string; text?: string }>;
-      silentBuffers: Map<string, string[]>;
+      conciseBuffers: Map<string, string[]>;
       logout(): Promise<{ ok: boolean; message: string }>;
       handleMessage(m: unknown): Promise<void>;
     };
     bindUser(anyBridge.state, "wx-s1");
     anyBridge.parkOutbound("u1", { kind: "text", text: "登出前暂存的 GUI 回复" });
-    anyBridge.silentBuffers.set("wx-s1", ["静默缓冲"]);
+    anyBridge.conciseBuffers.set("wx-s1", ["简洁缓冲"]);
 
     await anyBridge.logout();
     expect(anyBridge.outboundCache.length).toBe(0);
-    expect(anyBridge.silentBuffers.size).toBe(0);
+    expect(anyBridge.conciseBuffers.size).toBe(0);
 
     sendTextMessage.mockClear();
     (bridge as unknown as { token: unknown }).token = {

@@ -4,8 +4,9 @@
  * client) to draw the reader's eye to actionable rows.
  *
  * Each field has its own polarity:
- *   - 静默模式 on = we stop forwarding → 🔴 warning
- *     静默模式 off = normal delivery     → 🟢 good
+ *   - 工作步骤 简洁 = we stop forwarding process → 🔴 warning
+ *     工作步骤 标准 = normal delivery            → 🟢 good
+ *     工作步骤 极简 = per-task hold              → 🟢 good
  *   - 跨会话决策推送 on  = extra notifications on → 🟢
  *     跨会话决策推送 off = off                  → ⚪ neutral
  *   - Agent running      → 🟢 positive
@@ -45,7 +46,7 @@ interface AgentOpts {
 }
 
 interface BridgeOpts {
-  silent?: boolean;
+  workSteps?: "minimal" | "concise" | "standard";
   crossNotify?: boolean;
   busyEnter?: "steer" | "queue";
   agent?: AgentOpts;
@@ -107,7 +108,7 @@ function makeBridge(opts: BridgeOpts = {}) {
   const cfg = defaultConfig();
   cfg.storageDir = dir;
   cfg.crossSessionNotify = opts.crossNotify ?? false;
-  cfg.silent = opts.silent ?? false;
+  cfg.workSteps = opts.workSteps ?? "standard";
   const bridge = new WeChatDSHBridge(ctx, cfg);
   const stateApi = bridge as unknown as {
     state: {
@@ -118,7 +119,7 @@ function makeBridge(opts: BridgeOpts = {}) {
   stateApi.state.ensureUser("u1", "C:\\work");
   stateApi.state.update("u1", {
     sessionId: "wx-1",
-    silent: opts.silent ?? false,
+    silent: opts.workSteps === "concise",
   });
   (bridge as unknown as { token: unknown }).token = {
     baseUrl: "https://x",
@@ -155,16 +156,22 @@ describe("/status — emoji color markers", () => {
     sendTextMessage.mockClear();
   });
 
-  it("静默模式 on (muted) is warning red", async () => {
-    const bridge = makeBridge({ silent: true });
+  it("工作步骤 简洁 (muted) is warning red", async () => {
+    const bridge = makeBridge({ workSteps: "concise" });
     const text = await runStatus(bridge);
-    expect(text).toContain("• 静默模式: 🔴 on");
+    expect(text).toContain("• 工作步骤: 🔴 简洁");
   });
 
-  it("静默模式 off (sending) is good green", async () => {
-    const bridge = makeBridge({ silent: false });
+  it("工作步骤 标准 (sending) is good green", async () => {
+    const bridge = makeBridge({ workSteps: "standard" });
     const text = await runStatus(bridge);
-    expect(text).toContain("• 静默模式: 🟢 off");
+    expect(text).toContain("• 工作步骤: 🟢 标准");
+  });
+
+  it("工作步骤 极简 (holding) is good green with the hold count", async () => {
+    const bridge = makeBridge({ workSteps: "minimal" });
+    const text = await runStatus(bridge);
+    expect(text).toContain("• 工作步骤: 🟢 极简（暂存 0）");
   });
 
   it("跨会话决策推送 on is good green", async () => {

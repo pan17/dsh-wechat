@@ -26,11 +26,11 @@ let seq: number;
 let rev: number;
 const nextRev = () => ++rev;
 type Internals = {
-  token: unknown; config: { silent: boolean; textChunkLimit: number };
+  token: unknown; config: { workSteps: string; textChunkLimit: number };
   state: { ensureUser(u: string, cwd: string): unknown; update(u: string, patch: unknown): void };
   outboundSerial: Promise<void>; wechatMsgCount: number; outboundCache: Array<{ kind: string; text?: string }>;
   sendReply(u: string, text: string): Promise<void>; flushPending(u: string, opts?: { silent: boolean }): Promise<void>;
-  processes: Map<string, unknown>; silentBuffers: Map<string, string[]>;
+  processes: Map<string, unknown>; conciseBuffers: Map<string, string[]>;
 };
 const b = () => bridge as unknown as Internals;
 const emit = (type: string, data: unknown, session = "s1") => bridge.handleSessionEvent(session, { type, seq: seq++, data });
@@ -124,9 +124,9 @@ describe("grouped process delivery", () => {
     expect(texts()).toHaveLength(1); expect(texts()[0]).toContain("有效思考"); expect(texts()[0]).not.toContain("失败尝试");
   });
 
-  it("ignores duplicate chunks and clears stream state when silent mode changes", async () => {
+  it("ignores duplicate chunks and clears stream state when work-steps changes", async () => {
     streamStart(); streamChunk(0, { type: "reasoning-delta", index: 0, text: "不补发" });
-    await bridge.updateConfig({ silent: true }); await bridge.updateConfig({ silent: false });
+    await bridge.updateConfig({ workSteps: "concise" }); await bridge.updateConfig({ workSteps: "standard" });
     streamChunk(1, { type: "text-delta", index: 1, text: "正文" }); await b().outboundSerial; expect(texts()).toEqual([]);
     streamStart("new"); streamChunk(0, { type: "reasoning-delta", index: 0, text: "正常" }, "new");
     streamChunk(1, { type: "text-delta", index: 1, text: "正文" }, "new");
@@ -164,17 +164,17 @@ describe("grouped process delivery", () => {
     expect(texts()[0]).not.toContain("不应发送");
   });
 
-  it("silent mode sends only final prose, and toggling never revives hidden process", async () => {
-    await bridge.updateConfig({ silent: true });
+  it("concise mode sends only final prose, and toggling never revives hidden process", async () => {
+    await bridge.updateConfig({ workSteps: "concise" });
     assistant({ type: "reasoning", text: "隐藏思考" }, { type: "text", text: "中间正文" }); call(); result();
     assistant({ type: "text", text: "最终正文" }); emit("turn/end", { turn: 1 }); await b().outboundSerial;
     expect(texts()).toEqual(["最终正文"]);
     assistant({ type: "text", text: "不补发正文" });
-    await bridge.updateConfig({ silent: false });
+    await bridge.updateConfig({ workSteps: "standard" });
     emit("turn/end", { turn: 2 }); await b().outboundSerial;
     expect(texts()).toEqual(["最终正文"]);
-    assistant({ type: "reasoning", text: "开启静默前暂存" });
-    await bridge.updateConfig({ silent: true }); await bridge.updateConfig({ silent: false });
+    assistant({ type: "reasoning", text: "开启简洁前暂存" });
+    await bridge.updateConfig({ workSteps: "concise" }); await bridge.updateConfig({ workSteps: "standard" });
     emit("turn/end", { turn: 3 }); await b().outboundSerial;
     expect(texts()).toEqual(["最终正文"]);
   });
@@ -248,7 +248,7 @@ describe("grouped process delivery", () => {
 
   it("keeps an unfinished group when saving unchanged settings", async () => {
     assistant({ type: "reasoning", text: "保存前的过程" });
-    await bridge.updateConfig({ silent: false });
+    await bridge.updateConfig({ workSteps: "standard" });
     assistant({ type: "text", text: "正文" }); await b().outboundSerial;
     expect(texts()[0]).toContain("保存前的过程"); expect(texts()[1]).toBe("正文");
   });

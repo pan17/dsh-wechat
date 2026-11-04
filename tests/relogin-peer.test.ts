@@ -207,7 +207,7 @@ describe("relogin / logout unlocks the single-user peer", () => {
   });
 });
 
-describe("silent mode survives relogin", () => {
+describe("work-steps mode survives relogin", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -239,22 +239,22 @@ describe("silent mode survives relogin", () => {
     return { bridge, mock, storageDir: dir, store };
   }
 
-  it("saves silent with no bound user and keeps it after relogin", async () => {
+  it("saves workSteps with no bound user and keeps it after relogin", async () => {
     const { bridge } = makeStoredBridge();
     const anyBridge = bridge as unknown as BridgeHarness & {
-      updateConfig(patch: { silent?: boolean }): Promise<{ config: Record<string, unknown> }>;
-      getStatus(): { config?: { silent?: boolean }; users: Array<{ silent?: boolean }> };
+      updateConfig(patch: { workSteps?: string }): Promise<{ config: Record<string, unknown> }>;
+      getStatus(): { config?: { workSteps?: string }; users: Array<{ silent?: boolean }> };
     };
     anyBridge.startLoginFlow = async () => {};
 
-    const saved = await anyBridge.updateConfig({ silent: true });
-    expect(saved.config.silent).toBe(true);
-    expect(anyBridge.getStatus().config?.silent).toBe(true);
+    const saved = await anyBridge.updateConfig({ workSteps: "concise" });
+    expect(saved.config.workSteps).toBe("concise");
+    expect(anyBridge.getStatus().config?.workSteps).toBe("concise");
     expect(anyBridge.getStatus().users).toEqual([]);
 
     await anyBridge.relogin();
     expect(anyBridge.state.all()).toEqual([]);
-    expect(anyBridge.getStatus().config?.silent).toBe(true);
+    expect(anyBridge.getStatus().config?.workSteps).toBe("concise");
 
     (bridge as unknown as { token: unknown }).token = {
       baseUrl: "https://gw",
@@ -269,7 +269,7 @@ describe("silent mode survives relogin", () => {
     expect(anyBridge.getStatus().users[0]?.silent).toBe(true);
   });
 
-  it("migrates a legacy per-user silent flag into config.json", () => {
+  it("migrates a legacy per-user silent flag into workSteps", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-silent-mig-"));
     try {
       const state = new StateStore(dir);
@@ -281,8 +281,8 @@ describe("silent mode survives relogin", () => {
       cfg.storageDir = dir;
       const ctx = { get: () => undefined, on: () => () => {} };
       const bridge = new WeChatDSHBridge(ctx, cfg, undefined, store);
-      expect((bridge as unknown as { config: { silent: boolean } }).config.silent).toBe(true);
-      expect(new ConfigStore(dir).stored().silent).toBe(true);
+      expect((bridge as unknown as { config: { workSteps: string } }).config.workSteps).toBe("concise");
+      expect(new ConfigStore(dir).stored().workSteps).toBe("concise");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

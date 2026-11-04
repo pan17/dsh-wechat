@@ -210,12 +210,12 @@ describe("/help <命令>", () => {
   });
 
   it("does not hijack a bare command that already had a meaning", async () => {
-    // `/silent` reports status today; only `/help silent` is a lookup.
+    // `/steps` reports status today; only `/help steps` is a lookup.
     const mock = makeMockAgent("wx-s1");
     const bridge = makeBridge({ agent: mock });
-    await send(bridge, "/silent");
+    await send(bridge, "/steps");
     const reply = lastReply();
-    expect(reply).not.toBe(helpTopicBlock("silent"));
+    expect(reply).not.toBe(helpTopicBlock("steps"));
   });
 
   it("bypasses a pending card, like every other local command", async () => {
@@ -241,7 +241,7 @@ describe("a documented command never answers 未知命令", () => {
     vi.clearAllMocks();
   });
 
-  for (const command of ["/model", "/s", "/ws", "/p", "/perm", "/reasoning", "/enter", "/notify", "/surface", "/at", "/history", "/silent", "/merge", "/media", "/final"]) {
+  for (const command of ["/model", "/s", "/ws", "/p", "/perm", "/reasoning", "/enter", "/notify", "/surface", "/at", "/history", "/steps", "/merge", "/media"]) {
     it(`answers bare ${command} without the unknown-command hint`, async () => {
       const mock = makeMockAgent("wx-s1");
       const bridge = makeBridge({ agent: mock });

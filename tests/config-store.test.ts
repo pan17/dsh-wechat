@@ -70,57 +70,23 @@ describe("ConfigStore", () => {
     }
   });
 
-  it("persists silent as a global boolean", () => {
+  it("persists workSteps as an enum and rejects anything else", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
     try {
       const store = new ConfigStore(dir);
-      store.update({ silent: true });
+      expect(store.update({ workSteps: "minimal" }).workSteps).toBe("minimal");
+      expect(new ConfigStore(dir).stored().workSteps).toBe("minimal");
+      expect(new ConfigStore(dir).resolve(defaultConfig()).workSteps).toBe("minimal");
 
-      const reloaded = new ConfigStore(dir);
-      expect(reloaded.stored().silent).toBe(true);
-      expect(reloaded.resolve(defaultConfig()).silent).toBe(true);
+      expect(store.update({ workSteps: "concise" }).workSteps).toBe("concise");
+      expect(new ConfigStore(dir).stored().workSteps).toBe("concise");
 
-      store.update({ silent: false });
-      expect(new ConfigStore(dir).stored().silent).toBe(false);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+      // Junk is refused rather than persisted, so the previous value stays.
+      expect(store.update({ workSteps: "verbose" as never }).workSteps).toBe("concise");
+      expect(store.update({ workSteps: 42 as never }).workSteps).toBe("concise");
+      expect(store.update({ workSteps: null as never }).workSteps).toBe("concise");
 
-  it("ignores non-boolean silent", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
-    try {
-      const store = new ConfigStore(dir);
-      store.update({ silent: "yes" as never });
-      expect(store.stored().silent).toBeUndefined();
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("persists 结论模式 (finalOnly) as a global boolean", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
-    try {
-      const store = new ConfigStore(dir);
-      store.update({ finalOnly: true });
-
-      const reloaded = new ConfigStore(dir);
-      expect(reloaded.stored().finalOnly).toBe(true);
-      expect(reloaded.resolve(defaultConfig()).finalOnly).toBe(true);
-
-      store.update({ finalOnly: false });
-      expect(new ConfigStore(dir).stored().finalOnly).toBe(false);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("ignores a non-boolean finalOnly", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
-    try {
-      const store = new ConfigStore(dir);
-      store.update({ finalOnly: "yes" as never });
-      expect(store.stored().finalOnly).toBeUndefined();
+      expect(store.update({ workSteps: "standard" }).workSteps).toBe("standard");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -150,9 +116,9 @@ describe("ConfigStore", () => {
     }
   });
 
-  it("defaults 结论模式 to off with a 45s settle window and a 10min ceiling", () => {
+  it("defaults workSteps to standard with a 45s settle window and a 10min ceiling", () => {
     const cfg = defaultConfig();
-    expect(cfg.finalOnly).toBe(false);
+    expect(cfg.workSteps).toBe("standard");
     expect(cfg.finalOnlyIdleMs).toBe(45_000);
     expect(cfg.finalOnlyCeilingMs).toBe(600_000);
   });
@@ -487,11 +453,11 @@ describe("ConfigStore", () => {
 
       fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({
         statusMode: "verbose",
-        silent: true,
+        legacyStatusSwitch: true,
       }), "utf-8");
       const store = new ConfigStore(dir);
-      // Dropped on load, so the built-in default applies.
-      expect(store.stored()).toEqual({ silent: true });
+      // Both dropped on load, so the built-in defaults apply.
+      expect(store.stored()).toEqual({});
       expect(store.resolve(defaultConfig()).statusMode).toBe("brief");
 
       fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ statusMode: "full" }), "utf-8");
@@ -501,23 +467,48 @@ describe("ConfigStore", () => {
     }
   });
 
-  it("drops keys this version no longer knows instead of round-tripping them", () => {    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+  it("drops keys this version no longer knows instead of round-tripping them", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
     try {
       fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({
         // A switch from a hypothetical other version: unknown here, so it must
         // not survive (the file is the only place a user can read the effective
         // config, and a future re-add must not resurrect a stale value).
         legacyMediaSwitch: false,
-        silent: true,
+        statusMode: "full",
       }), "utf-8");
       const store = new ConfigStore(dir);
-      expect(store.stored()).toEqual({ silent: true });
+      expect(store.stored()).toEqual({ statusMode: "full" });
       // Still gone after the next write — not resurrected by the round-trip.
       store.update({ mediaHoldMs: 30_000 });
       const onDisk = JSON.parse(fs.readFileSync(path.join(dir, "config.json"), "utf-8")) as Record<string, unknown>;
-      expect(onDisk).toEqual({ silent: true, mediaHoldMs: 30_000 });
+      expect(onDisk).toEqual({ statusMode: "full", mediaHoldMs: 30_000 });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates silent/finalOnly on load and deletes the legacy keys", () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ finalOnly: true }, "minimal"],
+      [{ silent: true }, "concise"],
+      [{ silent: true, finalOnly: true }, "minimal"],
+      [{ silent: false, finalOnly: false }, "standard"],
+      [{ workSteps: "concise", finalOnly: true }, "concise"],
+      [{ workSteps: "junk", silent: true }, "concise"],
+      [{ workSteps: "junk" }, "standard"],
+    ];
+    for (const [raw, expected] of cases) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+      try {
+        fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(raw), "utf-8");
+        const store = new ConfigStore(dir);
+        expect(store.resolve(defaultConfig()).workSteps).toBe(expected);
+        expect(store.stored().silent).toBeUndefined();
+        expect(store.stored().finalOnly).toBeUndefined();
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 });

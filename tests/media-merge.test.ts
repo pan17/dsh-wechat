@@ -60,7 +60,6 @@ import {
   parseAtCommand,
   parseCommandName,
   parseEnterCommand,
-  parseFinalCommand,
   parseFlushCommand,
   parseHelpCommand,
   parseHistoryCommand,
@@ -73,10 +72,10 @@ import {
   parsePresetCommand,
   parseReasoningCommand,
   parseSessionCommand,
-  parseSilentCommand,
   parseStatusCommand,
   parseStopCommand,
   parseSurfaceCommand,
+  parseWorkStepsCommand,
   parseWorkspaceCommand,
 } from "../src/bridge/slash.js";
 
@@ -505,8 +504,7 @@ describe("/media is wired exactly like /merge", () => {
     const others: Array<[string, (text: string) => unknown]> = [
       ["help", parseHelpCommand],
       ["status", parseStatusCommand],
-      ["silent", parseSilentCommand],
-      ["final", parseFinalCommand],
+      ["steps", parseWorkStepsCommand],
       ["surface", parseSurfaceCommand],
       ["stop", parseStopCommand],
       ["notify", parseNotifyCommand],

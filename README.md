@@ -38,15 +38,14 @@ dsh plugin --profile desktop list --depth 0    # 查看已装版本
 | `/perm` | `status` / `list` / `switch <名称\|编号>` / `default [名称\|编号]` |
 | `/reasoning` | 查看或切换推理等级 |
 | `/enter`（`/busy`） | 繁忙时 `queue` 排队还是 `steer` 插话 |
-| `/silent`（`/sl`） | 静默模式：每轮只发最终回复 |
-| `/final on\|off\|status`（`/fo`） | 结论模式：整条任务只发一条结论 |
+| `/steps [极简\|简洁\|标准]` | 工作步骤展示：极简=整条任务只发结论，简洁=每轮只发最终回复，标准=过程与回复都发 |
 | `/merge`（`/mg`） | 打字合并开关与状态 |
 | `/media`（`/md`） | 图片/文件合并开关；`at\|path` 切换附件交付措辞 |
 | `/at` | 引用其它会话（`s`）或文件/目录（`f`），附加到下一条消息 |
 | `/notify`（`/watch`） | 跨会话决策推送；`tasks on\|off` 单独控制任务提醒 |
 | `/history` | 按轮次回看：默认最近 5 轮，末轮全文；`list all\|数量` 换窗口，`show <编号>` 看全文 |
 | `/skill` | 查看当前会话的技能；`/skill 2` 或 `/skill office` 看详细说明 |
-| `/flush`（`/f`） | 立即取回结论模式暂存的结论 |
+| `/flush`（`/f`） | 立即取回极简模式暂存的结论 |
 | `/surface`（`/wxprompt`） | 微信渠道提示词注入开关 |
 | `/raw` | `on` / `off` / `once` / `status` — 强制透传，命令和文本原样转给 agent，不拦截 |
 | `/stop` | 中断当前任务 |

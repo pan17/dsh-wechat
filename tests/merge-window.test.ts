@@ -39,7 +39,6 @@ import {
   LOCAL_COMMAND_NAMES,
   parseCommandName,
   parseEnterCommand,
-  parseFinalCommand,
   parseFlushCommand,
   parseHelpCommand,
   parseHistoryCommand,
@@ -51,10 +50,10 @@ import {
   parsePresetCommand,
   parseReasoningCommand,
   parseSessionCommand,
-  parseSilentCommand,
   parseStatusCommand,
   parseStopCommand,
   parseSurfaceCommand,
+  parseWorkStepsCommand,
   parseWorkspaceCommand,
 } from "../src/bridge/slash.js";
 
@@ -440,7 +439,7 @@ describe("merge window: switch and persistence", () => {
   });
 });
 
-describe("/merge is wired exactly like /silent (and collides with nothing)", () => {
+describe("/merge is wired like the other local toggles (and collides with nothing)", () => {
   it("parses bare / on / off / status and the /mg alias", () => {
     expect(parseMergeCommand("/merge")).toEqual({ kind: "merge", mode: "status" });
     expect(parseMergeCommand("/mg")).toEqual({ kind: "merge", mode: "status" });
@@ -455,8 +454,7 @@ describe("/merge is wired exactly like /silent (and collides with nothing)", () 
     const others: Array<[string, (text: string) => unknown]> = [
       ["help", parseHelpCommand],
       ["status", parseStatusCommand],
-      ["silent", parseSilentCommand],
-      ["final", parseFinalCommand],
+      ["steps", parseWorkStepsCommand],
       ["surface", parseSurfaceCommand],
       ["stop", parseStopCommand],
       ["notify", parseNotifyCommand],

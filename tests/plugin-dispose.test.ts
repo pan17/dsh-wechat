@@ -44,7 +44,7 @@ function makeHostContext() {
 async function applyPlugin() {
   const host = makeHostContext();
   const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-dispose-"));
-  const stop = apply(host.ctx as never, { storageDir, silent: true } as never) as () => Promise<void>;
+  const stop = apply(host.ctx as never, { storageDir, workSteps: "concise" } as never) as () => Promise<void>;
   return { host, stop, storageDir };
 }
 

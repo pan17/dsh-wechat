@@ -18,8 +18,7 @@ import {
   parseRejectPermissionCommand,
   parseRejectQuestionCommand,
   parseSessionCommand,
-  parseSilentCommand,
-  parseFinalCommand,
+  parseWorkStepsCommand,
   parseFlushCommand,
   parseSurfaceCommand,
   parseStatusCommand,
@@ -60,24 +59,20 @@ describe("slash parsers", () => {
     expect(parseStatusCommand("/status briefly")).toBeNull();
   });
 
-  it("parseSilentCommand: bare → status, on/off/status subcommands", () => {
-    expect(parseSilentCommand("/silent")).toEqual({ kind: "silent", mode: "status" });
-    expect(parseSilentCommand("/sl on")).toEqual({ kind: "silent", mode: "on" });
-    expect(parseSilentCommand("/silent off")).toEqual({ kind: "silent", mode: "off" });
-    expect(parseSilentCommand("/silent status")).toEqual({ kind: "silent", mode: "status" });
-    expect(parseSilentCommand("/silent maybe")).toBeNull();
-  });
-
-  it("parseFinalCommand: bare → status, on/off/status subcommands, /f is NOT an alias", () => {
-    expect(parseFinalCommand("/final")).toEqual({ kind: "final", mode: "status" });
-    expect(parseFinalCommand("/fo on")).toEqual({ kind: "final", mode: "on" });
-    expect(parseFinalCommand("/final off")).toEqual({ kind: "final", mode: "off" });
-    expect(parseFinalCommand("/final status")).toEqual({ kind: "final", mode: "status" });
-    expect(parseFinalCommand("/final maybe")).toBeNull();
-    // `/f` belongs to /flush — "take back what is held" is the opposite of
-    // "start holding", so the two must never collide.
-    expect(parseFinalCommand("/f")).toBeNull();
-    expect(parseFinalCommand("/f on")).toBeNull();
+  it("parseWorkStepsCommand: bare → status, Chinese/English modes, no old aliases", () => {
+    expect(parseWorkStepsCommand("/steps")).toEqual({ kind: "steps", mode: "status" });
+    expect(parseWorkStepsCommand("/steps status")).toEqual({ kind: "steps", mode: "status" });
+    expect(parseWorkStepsCommand("/steps 极简")).toEqual({ kind: "steps", mode: "minimal" });
+    expect(parseWorkStepsCommand("/steps 简洁")).toEqual({ kind: "steps", mode: "concise" });
+    expect(parseWorkStepsCommand("/steps 标准")).toEqual({ kind: "steps", mode: "standard" });
+    expect(parseWorkStepsCommand("/Steps MINIMAL")).toEqual({ kind: "steps", mode: "minimal" });
+    expect(parseWorkStepsCommand("/steps concise")).toEqual({ kind: "steps", mode: "concise" });
+    expect(parseWorkStepsCommand("/steps standard")).toEqual({ kind: "steps", mode: "standard" });
+    expect(parseWorkStepsCommand("/steps maybe")).toBeNull();
+    expect(parseWorkStepsCommand("/step")).toBeNull();
+    // Removed commands are no longer local, and `/f` still belongs to /flush.
+    expect(parseWorkStepsCommand("/silent on")).toBeNull();
+    expect(parseWorkStepsCommand("/final on")).toBeNull();
     expect(parseFlushCommand("/f")).toBe(true);
   });
 
@@ -298,8 +293,9 @@ describe("slash parsers", () => {
     expect(help).toContain("/model");
     expect(help).toContain("/perm");
     expect(help).toContain("/reasoning");
-    expect(help).toContain("/silent");
-    expect(help).toContain("/final");
+    expect(help).toContain("/steps");
+    expect(help).not.toContain("/silent");
+    expect(help).not.toContain("/final");
     expect(help).toContain("/flush");
     expect(help).toContain("/surface");
     expect(help).toContain("/stop");
@@ -322,12 +318,12 @@ describe("isBypassSlashCommand", () => {
     expect(isBypassSlashCommand("/h")).toBe(true);
     expect(isBypassSlashCommand("/?")).toBe(true);
     expect(isBypassSlashCommand("/next")).toBe(true);
-    expect(isBypassSlashCommand("/silent on")).toBe(true);
-    expect(isBypassSlashCommand("/silent")).toBe(true);
-    expect(isBypassSlashCommand("/sl off")).toBe(true);
-    expect(isBypassSlashCommand("/final on")).toBe(true);
-    expect(isBypassSlashCommand("/final")).toBe(true);
-    expect(isBypassSlashCommand("/fo off")).toBe(true);
+    expect(isBypassSlashCommand("/steps")).toBe(true);
+    expect(isBypassSlashCommand("/steps 极简")).toBe(true);
+    expect(isBypassSlashCommand("/steps 简洁")).toBe(true);
+    expect(isBypassSlashCommand("/steps 标准")).toBe(true);
+    expect(isBypassSlashCommand("/silent on")).toBe(false);
+    expect(isBypassSlashCommand("/final on")).toBe(false);
     expect(isBypassSlashCommand("/surface")).toBe(true);
     expect(isBypassSlashCommand("/surface off")).toBe(true);
     expect(isBypassSlashCommand("/wxprompt on")).toBe(true);

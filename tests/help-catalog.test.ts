@@ -265,6 +265,11 @@ describe("help catalog ↔ /help drift guard", () => {
     // A synonym the parser accepts but the help no longer documents is not a
     // topic: `/help watch` must not pretend to know it.
     expect(helpTopicBlock("watch")).toBeNull();
+    // Removed commands have no catalog row, not even a legacy alias.
+    expect(helpTopicBlock("silent")).toBeNull();
+    expect(helpTopicBlock("final")).toBeNull();
+    expect(helpTopicBlock("sl")).toBeNull();
+    expect(helpTopicBlock("fo")).toBeNull();
   });
 
   it("treats everything after /help as a command name", () => {
@@ -290,8 +295,9 @@ describe("help catalog ↔ /help drift guard", () => {
     // messages is unreadable. These bounds also stop the listing from
     // creeping back into a manual.
     //
-    // The line bound moved 55 → 56 when `/fork` landed (24 commands, measured
-    // 1954 chars / 56 lines). It is a budget, not a target: adding a command
+    // The line bound moved 55 → 56 when `/fork` landed; merging the two
+    // old pacing rows into `/steps` brought the catalog to 23 commands. It is
+    // a budget, not a target: adding a command
     // must fit under the 2000-char ceiling, and the char bound is what really
     // keeps the listing in one bubble.
     const help = formatHelp([
