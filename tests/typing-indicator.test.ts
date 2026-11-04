@@ -712,6 +712,95 @@ describe("typing indicator: TTL safety net", () => {
     const cancelAfter = typingCalls().filter((c) => c.status === TypingStatus.CANCEL).length;
     expect(cancelAfter).toBe(1);
   });
+
+  // Regression: the safety timer is a moving target. Each keepalive tick
+  // replaces it, so `typingActive` must hold a mutable box rather than a
+  // snapshot of the first handle — a snapshot leaves every later timer armed
+  // for its full 2-minute TTL. That is a ref'd `Timeout` surviving dispose:
+  // the host process can no longer drain its event loop and the DSH desktop
+  // SIGTERMs it after its 10 s graceful deadline (which is what made in-app
+  // updates refuse to install).
+  it("a keepalive tick does not orphan the safety timer: turn/end clears the LIVE one", async () => {
+    vi.useFakeTimers();
+    const bridge = makeBridge(makeMockAgent("wx-s1"));
+    const anyBridge = bridge as unknown as {
+      state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
+      handleSessionEvent(s: string, e: unknown): void;
+    };
+    anyBridge.state.ensureUser("u1", "C:\\work");
+    anyBridge.state.update("u1", { sessionId: "wx-s1" });
+
+    const baseline = vi.getTimerCount();
+    anyBridge.handleSessionEvent("wx-s1", {
+      type: "agent/inbox/spliced",
+      seq: 1,
+      time: Date.now(),
+      data: {
+        target: "next-turn",
+        start: 0,
+        removedCount: 0,
+        inserted: [{ id: "wx-msg-abc", role: "user" }],
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    // Keepalive interval + safety TTL.
+    expect(vi.getTimerCount()).toBe(baseline + 2);
+
+    // One keepalive tick: TYPING is re-sent and the safety timer is replaced.
+    vi.advanceTimersByTime(10_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    anyBridge.handleSessionEvent("wx-s1", {
+      type: "turn/end",
+      seq: 2,
+      time: Date.now(),
+      data: { turn: 1, reason: "success" },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Nothing may stay armed — including the timer the tick installed.
+    expect(vi.getTimerCount()).toBe(baseline);
+  });
+
+  it("plugin stop leaves no typing timer armed", async () => {
+    vi.useFakeTimers();
+    const bridge = makeBridge(makeMockAgent("wx-s1"));
+    const anyBridge = bridge as unknown as {
+      state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
+      handleSessionEvent(s: string, e: unknown): void;
+    };
+    anyBridge.state.ensureUser("u1", "C:\\work");
+    anyBridge.state.update("u1", { sessionId: "wx-s1" });
+
+    const baseline = vi.getTimerCount();
+    anyBridge.handleSessionEvent("wx-s1", {
+      type: "agent/inbox/spliced",
+      seq: 1,
+      time: Date.now(),
+      data: {
+        target: "next-turn",
+        start: 0,
+        removedCount: 0,
+        inserted: [{ id: "wx-msg-abc", role: "user" }],
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    // A long turn: the keepalive already swapped in a newer safety timer.
+    vi.advanceTimersByTime(10_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await bridge.stop();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(typingCalls().filter((c) => c.status === TypingStatus.CANCEL).length).toBe(1);
+    expect(vi.getTimerCount()).toBe(baseline);
+  });
 });
 
 describe("typing indicator: periodic keepalive", () => {

@@ -63,6 +63,7 @@ import {
 import { EDITABLE_KEYS, type ConfigStore, type EditableConfig } from "../config-store.js";
 import { maskCredentials, maskSecrets, maskUserId } from "../utils/redact.js";
 import { AuditLog } from "../utils/audit.js";
+import { probeTeardown } from "../utils/teardown-probe.js";
 import {
   commandUsageHint,
   detectUnknownSlashCommand,
@@ -206,6 +207,14 @@ const TYPING_KEEPALIVE_MS = 10_000;
  * Matches openclaw's 2-minute safety net.
  */
 const TYPING_SAFETY_TIMEOUT_MS = 2 * 60_000;
+/**
+ * How long dispose waits for a "正在输入" CANCEL to leave the socket before it
+ * aborts the request. Short on purpose: the DSH desktop allows the host 10 s
+ * of graceful teardown before SIGTERM, and a cosmetic bubble is not worth
+ * spending that budget on. The request timer is `unref`'d as well, so even a
+ * silent gateway cannot pin the process.
+ */
+const TYPING_DISPOSE_BUDGET_MS = 1_000;
 /** A model selection override for one agent (`/model switch` / `/reasoning`). */
 interface ModelOverride {
   provider: string;
@@ -615,6 +624,8 @@ export class WeChatDSHBridge {
   private monitorAbort: AbortController | null = null;
   private monitorRunning = false;
   private monitorTask: Promise<void> | null = null;
+  /** Per-run QR scan poll cancellation; recreated on every login flow. */
+  private loginAbort: AbortController | null = null;
   private readonly seenInbound = new Map<string, number>();
   private loginState: LoginState = { phase: "idle" };
   /** Pending question cards per user (rpcId-keyed, first = active). */
@@ -753,6 +764,8 @@ export class WeChatDSHBridge {
   private readonly wechatMessageIds = new Map<string, number>();
   /** True after plugin dispose; pending waterfall waiters must not settle to WeChat. */
   private interactionStopped = false;
+  /** Memoized dispose, so `stop()` is idempotent across every disposer path. */
+  private disposePromise: Promise<void> | null = null;
   /**
    * DSH native command registry (ctx.commands) when present in the host.
    * Set late by `attachCommands` once the cordis commands child has
@@ -775,15 +788,39 @@ export class WeChatDSHBridge {
    * re-entry, (b) periodically refresh the indicator (TYPING is fire-and-
    * forget and the WeChat client auto-hides after a few seconds), and
    * (c) cancel cleanly on turn end / agent error / plugin stop. The
-   * `safetyTimer` is the TTL fallback — it is refreshed by every keepalive
+   * `safety` holder is the TTL fallback — it is refreshed by every keepalive
    * tick and only fires if the keepalive loop itself stops running.
    */
   private readonly typingActive = new Map<string, {
     sessionId: string;
     startedAt: number;
     keepAliveTimer: NodeJS.Timeout;
-    safetyTimer: NodeJS.Timeout;
+    /**
+     * Mutable holder for the TTL fallback, NOT the handle itself.
+     *
+     * Every keepalive tick clears `.current` and installs a fresh timer. A
+     * primitive handle stored here would be a snapshot of the FIRST timer, so
+     * `endTyping` would clear an already-dead one and leave the live timer
+     * armed for its whole 2-minute TTL. That is a ref'd `Timeout` surviving
+     * dispose, i.e. the host process cannot drain its event loop and the DSH
+     * desktop kills it after the 10 s graceful deadline (an in-app update then
+     * refuses to install). Holding the mutable box keeps `endTyping` exact.
+     */
+    safety: { current: NodeJS.Timeout };
   }>();
+  /**
+   * Typing calls started but not settled. `stop()` waits for these (bounded)
+   * so a CANCEL still reaches WeChat, then aborts {@link disposeAbort} to cut
+   * a hanging one — an in-flight fetch is a live socket plus a request timer,
+   * and the DSH host only lets its process drain once nothing is left.
+   */
+  private readonly typingSends = new Set<Promise<void>>();
+  /**
+   * Aborted at the END of dispose. Everything still using it is a cosmetic
+   * best-effort request (typing indicator), so cutting it loses nothing but a
+   * "正在输入" bubble that WeChat hides on its own within seconds.
+   */
+  private readonly disposeAbort = new AbortController();
 
   constructor(
     ctx: BridgeContext,
@@ -1322,6 +1359,7 @@ export class WeChatDSHBridge {
         token: token.token,
         ilinkUserId: userId,
         contextToken,
+        abortSignal: this.disposeAbort.signal,
       });
       if (!resp.typing_ticket) return undefined;
       this.typingTickets.set(userId, {
@@ -1330,6 +1368,7 @@ export class WeChatDSHBridge {
       });
       return resp.typing_ticket;
     } catch (err) {
+      if (this.disposeAbort.signal.aborted) return undefined;
       this.log(`getconfig for typing_ticket failed: ${String(err)}`);
       return undefined;
     }
@@ -1342,19 +1381,71 @@ export class WeChatDSHBridge {
   private async sendTypingStatus(userId: string, status: 1 | 2): Promise<void> {
     const token = this.token;
     if (!token || this.tokenInvalid) return;
+    if (this.disposeAbort.signal.aborted) return;
     const ticket = await this.getTypingTicket(userId, this.wireContextToken ?? undefined);
     if (!ticket) return;
     const still = this.token;
-    if (!still || this.tokenInvalid) return;
+    if (!still || this.tokenInvalid || this.disposeAbort.signal.aborted) return;
     try {
       await apiSendTyping({
         baseUrl: still.baseUrl,
         token: still.token,
         body: { ilink_user_id: userId, typing_ticket: ticket, status },
+        abortSignal: this.disposeAbort.signal,
       });
     } catch (err) {
+      if (this.disposeAbort.signal.aborted) return;
       this.log(`sendtyping(${status}) failed: ${String(err)}`);
     }
+  }
+
+  /**
+   * Fire a typing call without awaiting it, but keep the promise so dispose
+   * can wait for (or cut) it. A "正在输入" refresh must never delay a turn;
+   * the CANCEL that runs from `stopIlink` must not outlive the plugin either —
+   * an in-flight request is a live socket plus a ref'd request timer, and the
+   * host only lets the process drain once nothing is left.
+   */
+  private startTypingSend(userId: string, status: 1 | 2): void {
+    const task = this.sendTypingStatus(userId, status);
+    this.typingSends.add(task);
+    void task.finally(() => this.typingSends.delete(task));
+  }
+
+  /**
+   * Wait (bounded) for the typing calls already in flight, so the CANCEL fired
+   * by `stopIlink` usually reaches WeChat. Callers then abort
+   * {@link disposeAbort} to cut whatever is still hanging.
+   */
+  private async settleTypingSends(budgetMs = TYPING_DISPOSE_BUDGET_MS): Promise<void> {
+    if (this.typingSends.size === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.all([...this.typingSends]).then(() => undefined),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, budgetMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Release a cross-session notice's dedupe mark after 30 s.
+   *
+   * `unref`'d on purpose: the mark is bookkeeping for the NEXT turn, so the
+   * timer that retires it must never be the reason a disposing host cannot
+   * drain its event loop — a ref'd 30 s timer alone outlasts the DSH desktop's
+   * 10 s graceful window and gets the process SIGTERM'd.
+   */
+  private armNotifyDedupeCleanup(userId: string, sessionId: string): void {
+    const timer = setTimeout(() => {
+      this.notifiedCrossSessionTurns.get(userId)?.delete(sessionId);
+    }, 30_000);
+    timer.unref?.();
   }
 
   /**
@@ -1369,30 +1460,36 @@ export class WeChatDSHBridge {
    */
   private beginTyping(userId: string, sessionId: string): void {
     if (this.typingActive.has(userId)) return;
-    // The safety timer is captured by the closure so each keepalive tick can
-    // clearTimeout(stale) + setTimeout(new) to refresh it. endTyping clears
-    // the latest one via `active.safetyTimer`; if a tick has already swapped
-    // in a newer handle, `clearTimeout` on the stale one is a no-op.
-    let safetyTimer: NodeJS.Timeout = setTimeout(() => {
-      this.endTyping(userId, "safety-timeout");
-    }, TYPING_SAFETY_TIMEOUT_MS);
+    // The safety timer lives in a mutable holder so each keepalive tick can
+    // clearTimeout(holder.current) + install a new one, and `endTyping` still
+    // reaches the LIVE handle through the same box. Both timers are `unref`'d:
+    // an indicator is cosmetic, so it must never be the reason a shutting-down
+    // host process stays alive.
+    const safety = {
+      current: setTimeout(() => {
+        this.endTyping(userId, "safety-timeout");
+      }, TYPING_SAFETY_TIMEOUT_MS),
+    };
+    safety.current.unref?.();
     const refreshSafetyTimer = (): void => {
-      clearTimeout(safetyTimer);
-      safetyTimer = setTimeout(() => {
+      clearTimeout(safety.current);
+      safety.current = setTimeout(() => {
         this.endTyping(userId, "safety-timeout");
       }, TYPING_SAFETY_TIMEOUT_MS);
+      safety.current.unref?.();
     };
     const keepAliveTimer = setInterval(() => {
-      void this.sendTypingStatus(userId, TypingStatus.TYPING);
+      this.startTypingSend(userId, TypingStatus.TYPING);
       refreshSafetyTimer();
     }, TYPING_KEEPALIVE_MS);
+    keepAliveTimer.unref?.();
     this.typingActive.set(userId, {
       sessionId,
       startedAt: Date.now(),
       keepAliveTimer,
-      safetyTimer,
+      safety,
     });
-    void this.sendTypingStatus(userId, TypingStatus.TYPING);
+    this.startTypingSend(userId, TypingStatus.TYPING);
   }
 
   /**
@@ -1404,9 +1501,9 @@ export class WeChatDSHBridge {
     const active = this.typingActive.get(userId);
     if (!active) return;
     clearInterval(active.keepAliveTimer);
-    clearTimeout(active.safetyTimer);
+    clearTimeout(active.safety.current);
     this.typingActive.delete(userId);
-    void this.sendTypingStatus(userId, TypingStatus.CANCEL);
+    this.startTypingSend(userId, TypingStatus.CANCEL);
   }
 
   /** Start the bridge: resume with a stored token or begin QR login. */
@@ -1414,6 +1511,7 @@ export class WeChatDSHBridge {
     this.token = loadToken(this.config.storageDir);
     this.tokenInvalid = false;
     this.tokenGiveUp = false;
+    probeTeardown(this.config.storageDir, "start", { loggedIn: this.token !== null });
     if (this.token) {
       this.lockPeerFromState();
       this.loginState = { phase: "logged-in", botId: this.token.accountId };
@@ -1438,7 +1536,36 @@ export class WeChatDSHBridge {
    * registered for the plugin lifetime and survive QR re-login.
    */
   async stop(): Promise<void> {
+    // Idempotent: the plugin parks this on `ctx.effect` AND returns it, and a
+    // host that honours both must not tear down twice.
+    this.disposePromise ??= this.disposeOnce();
+    return this.disposePromise;
+  }
+
+  /** One-shot body of {@link stop}. */
+  private async disposeOnce(): Promise<void> {
+    const disposeStartedAt = Date.now();
+    probeTeardown(this.config.storageDir, "dispose:enter", {
+      monitorRunning: this.monitorRunning,
+      monitorTask: this.monitorTask !== null,
+      typing: this.typingActive.size,
+      typingSends: this.typingSends.size,
+      loginFlow: this.loginAbort !== null,
+    });
+    // A QR scan poll is not a plugin-lifetime task: `login()` would otherwise
+    // keep asking the gateway every 1.5 s for up to 5 minutes after dispose,
+    // with a ref'd timer and an open socket each round.
+    this.stopLoginFlow();
     this.stopIlink("plugin-stop");
+    // The CANCEL above is best-effort and fire-and-forget; give it a short
+    // window to leave, then cut it. Nothing here may outlive dispose: the host
+    // drains its event loop only once no socket or timer is left.
+    await this.settleTypingSends();
+    if (!this.disposeAbort.signal.aborted) this.disposeAbort.abort();
+    probeTeardown(this.config.storageDir, "dispose:ilink-stopped", {
+      monitorTask: this.monitorTask !== null,
+      typingSends: this.typingSends.size,
+    });
     // Deliver what 打字合并 is holding BEFORE `stopInteraction()`: the merged
     // batch is forwarded through `forwardToAgent`, which aborts as soon as the
     // interaction is marked stopped — flushing afterwards would silently
@@ -1469,6 +1596,12 @@ export class WeChatDSHBridge {
     await this.monitorTask;
     // Release the audit descriptor last: everything above can still record.
     this.audit.close();
+    // What the host will now wait on. Anything ref'd here keeps the process
+    // alive past the 10 s graceful window and fails an in-app update.
+    probeTeardown(this.config.storageDir, "dispose:exit", {
+      elapsedMs: Date.now() - disposeStartedAt,
+      monitorTask: this.monitorTask !== null,
+    });
   }
 
   /** Stop the WeChat long-poll and typing indicators; leave Host answerers running. */
@@ -1520,6 +1653,9 @@ export class WeChatDSHBridge {
 
   /** Log out: stop the monitor and remove the stored token. */
   async logout(): Promise<{ ok: boolean; message: string }> {
+    // A scan poll in flight would log the account straight back in after the
+    // user asked to log out.
+    this.stopLoginFlow();
     this.stopIlink("logout");
     this.deleteToken();
     this.token = null;
@@ -1601,13 +1737,30 @@ export class WeChatDSHBridge {
     }
   }
 
+  /**
+   * Stop an in-progress QR scan poll. Safe to call when none is running.
+   *
+   * `login()` waits up to 5 minutes for a scan, so it is a plugin-lifetime
+   * task like the long poll and needs the same cancellation: `stop()` must
+   * leave nothing behind, and a re-login starts a fresh flow whose predecessor
+   * would otherwise keep polling the old QR code forever.
+   */
+  private stopLoginFlow(): void {
+    this.loginAbort?.abort();
+    this.loginAbort = null;
+  }
+
   private async startLoginFlow(): Promise<void> {
+    this.stopLoginFlow();
+    const abort = new AbortController();
+    this.loginAbort = abort;
     try {
       this.loginState = { phase: "waiting-qr" };
       const token = await login({
         baseUrl: this.config.baseUrl,
         botType: this.config.botType,
         storageDir: this.config.storageDir,
+        abortSignal: abort.signal,
         log: (msg) => console.log(`[dsh-wechat] ${msg}`),
         renderQrUrl: (url) => {
           this.loginState = { ...this.loginState, phase: "waiting-qr", qrUrl: url };
@@ -1622,8 +1775,16 @@ export class WeChatDSHBridge {
       this.loginState = { phase: "logged-in", botId: token.accountId };
       await this.startMonitor();
     } catch (err) {
+      // A cancelled flow is a normal shutdown / re-login, not a failure: the
+      // page must not flash "登录失败" because the app is quitting.
+      if (abort.signal.aborted) {
+        this.loginState = { phase: "idle" };
+        return;
+      }
       this.loginState = { phase: "failed", error: String(err) };
       console.error(`[dsh-wechat] login failed: ${String(err)}`);
+    } finally {
+      if (this.loginAbort === abort) this.loginAbort = null;
     }
   }
 
@@ -2913,7 +3074,7 @@ export class WeChatDSHBridge {
           this.notifiedCrossSessionTurns.set(r.userId, set);
           // Arm the cleanup for every path that marks, so a mark can never
           // outlive its 30s window without a timer to release it.
-          setTimeout(() => this.notifiedCrossSessionTurns.get(r.userId)?.delete(sessionId), 30_000);
+          this.armNotifyDedupeCleanup(r.userId, sessionId);
           // 极简模式: fold this round's completion card into the task's hold
           // instead of emitting one card per auto-continued round.
           if (holdMode) {
@@ -3806,7 +3967,7 @@ export class WeChatDSHBridge {
       set.add(sessionId);
       this.notifiedCrossSessionTurns.set(user.userId, set);
       // Arm the cleanup for every path that marks.
-      setTimeout(() => { this.notifiedCrossSessionTurns.get(user.userId)?.delete(sessionId); }, 30_000);
+      this.armNotifyDedupeCleanup(user.userId, sessionId);
       // 极简模式: hold instead of one card per auto-continued round.
       if (holdMode) {
         this.foldFinalRound(sessionId);

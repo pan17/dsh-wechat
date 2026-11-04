@@ -24,6 +24,38 @@ function getTokenPath(storageDir: string): string {
   return path.join(getAuthDir(storageDir), "token.json");
 }
 
+/** Login was cancelled on purpose (dispose / logout / a new flow). */
+export class LoginCancelledError extends Error {
+  readonly code = "LOGIN_CANCELLED";
+  constructor() {
+    super("login cancelled");
+    this.name = "LoginCancelledError";
+  }
+}
+
+/**
+ * One poll interval, cut short by `signal`. The timer is `unref`'d: a poll
+ * cadence is never a reason to keep a shutting-down process alive.
+ */
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new LoginCancelledError());
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new LoginCancelledError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function loadToken(storageDir: string): TokenData | null {
   const tokenPath = getTokenPath(storageDir);
   if (!fs.existsSync(tokenPath)) return null;
@@ -50,12 +82,19 @@ export async function login(params: {
   storageDir: string;
   log: (msg: string) => void;
   renderQrUrl?: (url: string) => void;
+  /**
+   * Cancels the scan poll (plugin dispose, logout, a superseded re-login).
+   * The loop runs for up to 5 minutes, so it must be cancellable: without it
+   * the plugin keeps a ref'd timer and an open socket per round long after the
+   * host has been told teardown finished, and the process never drains.
+   */
+  abortSignal?: AbortSignal;
 }): Promise<TokenData> {
-  const { baseUrl, botType, storageDir, log, renderQrUrl } = params;
+  const { baseUrl, botType, storageDir, log, renderQrUrl, abortSignal } = params;
 
   log("Starting WeChat QR login...");
 
-  const qrResp = await getBotQrcode({ baseUrl, botType });
+  const qrResp = await getBotQrcode({ baseUrl, botType, abortSignal });
   const qrcodeUrl = qrResp.qrcode_img_content;
 
   log("Please scan the QR code with WeChat:");
@@ -70,7 +109,8 @@ export async function login(params: {
   let refreshCount = 0;
 
   while (Date.now() < deadline) {
-    const statusResp = await getQrcodeStatus({ baseUrl, qrcode: currentQrcode });
+    if (abortSignal?.aborted) throw new LoginCancelledError();
+    const statusResp = await getQrcodeStatus({ baseUrl, qrcode: currentQrcode, abortSignal });
 
     switch (statusResp.status) {
       case "wait":
@@ -84,7 +124,7 @@ export async function login(params: {
           throw new Error("QR code expired multiple times, please retry");
         }
         log(`QR expired, refreshing (${refreshCount}/3)...`);
-        const newQr = await getBotQrcode({ baseUrl, botType });
+        const newQr = await getBotQrcode({ baseUrl, botType, abortSignal });
         currentQrcode = newQr.qrcode;
         if (renderQrUrl) {
           renderQrUrl(newQr.qrcode_img_content);
@@ -109,7 +149,7 @@ export async function login(params: {
       }
     }
 
-    await new Promise((r) => setTimeout(r, 1500));
+    await sleepUnlessAborted(1500, abortSignal);
   }
 
   throw new Error("Login timeout (5 minutes)");

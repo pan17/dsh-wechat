@@ -181,16 +181,25 @@ function buildBaseInfo(): BaseInfo {
 /** What the user sees when the request never reached the gateway. */
 const NETWORK_ERROR_MESSAGE = "网络异常，无法连接微信服务器，请检查网络后重试";
 
-async function apiGet<T>(baseUrl: string, path: string, token?: string): Promise<T> {
+async function apiGet<T>(
+  baseUrl: string,
+  path: string,
+  token?: string,
+  abortSignal?: AbortSignal,
+): Promise<T> {
   const url = `${baseUrl.replace(/\/$/, "")}/${path}`;
   let res: Response;
   let text: string;
   try {
-    res = await fetch(url, { headers: buildHeaders({ token }) });
+    res = await fetch(url, { headers: buildHeaders({ token }), signal: abortSignal });
     // Reading the body is the same network operation: a connection that dies
     // mid-body never delivered the server's answer either.
     text = await res.text();
   } catch (err) {
+    // An abort is the caller withdrawing the request (plugin dispose, a
+    // superseded QR scan), not a network fault — surface it as-is so the
+    // caller can tell "cancelled" from "unreachable".
+    if ((err as Error)?.name === "AbortError") throw err;
     // Was a bare "TypeError: fetch failed" / "terminated"; the original error
     // stays on `cause` for logs. An HTTP status is the server answering, so it
     // keeps its own text below instead.
@@ -200,8 +209,16 @@ async function apiGet<T>(baseUrl: string, path: string, token?: string): Promise
   return JSON.parse(text) as T;
 }
 
+/**
+ * Retry backoff. `unref`'d for the same reason as the request timer above: a
+ * wait is not work, so it must never be the last ref'd handle keeping a
+ * disposed host process alive.
+ */
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 async function apiPost<T>(
@@ -224,6 +241,12 @@ async function apiPost<T>(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // A request timeout only has to *fire*; it must never be the reason a
+    // shutting-down host process cannot drain its event loop. The socket of a
+    // request still in flight keeps the process alive on its own, so `unref`
+    // here changes nothing while the process is running and everything when
+    // the plugin has been disposed.
+    timer.unref?.();
     let externalAbortListener: (() => void) | undefined;
     if (options?.abortSignal) {
       if (options.abortSignal.aborted) {
@@ -353,6 +376,7 @@ export async function getConfig(params: {
   token?: string;
   ilinkUserId: string;
   contextToken?: string;
+  abortSignal?: AbortSignal;
 }): Promise<GetConfigResp> {
   return apiPost<GetConfigResp>(
     params.baseUrl,
@@ -363,6 +387,7 @@ export async function getConfig(params: {
     },
     params.token,
     10_000,
+    { abortSignal: params.abortSignal },
   );
 }
 
@@ -370,6 +395,7 @@ export async function sendTyping(params: {
   baseUrl: string;
   token?: string;
   body: SendTypingReq;
+  abortSignal?: AbortSignal;
 }): Promise<void> {
   await apiPost(
     params.baseUrl,
@@ -377,22 +403,27 @@ export async function sendTyping(params: {
     params.body as unknown as Record<string, unknown>,
     params.token,
     10_000,
+    { abortSignal: params.abortSignal },
   );
 }
 
 export async function getBotQrcode(params: {
   baseUrl: string;
   botType?: string;
+  abortSignal?: AbortSignal;
 }): Promise<{ qrcode: string; qrcode_img_content: string }> {
   return apiGet(
     params.baseUrl,
     `ilink/bot/get_bot_qrcode?bot_type=${params.botType ?? "3"}`,
+    undefined,
+    params.abortSignal,
   );
 }
 
 export async function getQrcodeStatus(params: {
   baseUrl: string;
   qrcode: string;
+  abortSignal?: AbortSignal;
 }): Promise<{
   status: string;
   bot_token?: string;
@@ -403,6 +434,8 @@ export async function getQrcodeStatus(params: {
   return apiGet(
     params.baseUrl,
     `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(params.qrcode)}`,
+    undefined,
+    params.abortSignal,
   );
 }
 

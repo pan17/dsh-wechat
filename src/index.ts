@@ -512,7 +512,21 @@ if (typeof context.inject === "function") {
     console.error(`[dsh-wechat] bridge start failed: ${String(err)}`);
   });
 
-  return () => bridge.stop();
+  const stopBridge = (): Promise<void> => bridge.stop();
+  // Park the teardown on the plugin's OWN fiber (`ctx.effect`) and only fall
+  // back to the returned function. This host's cordis does not turn a
+  // functional plugin's return value into a disposer, so returning it alone
+  // left `bridge.stop()` uncalled: the iLink long poll, its timers and its
+  // socket survived dispose, the host process could never drain its event
+  // loop, and the desktop shell killed it after the 10 s graceful deadline
+  // (which is what refused every in-app update).
+  //
+  // Both paths are registered on purpose: `stop()` is idempotent, so a host
+  // that honours the return value as well cannot tear down twice.
+  if (typeof context.effect === "function") {
+    context.effect(() => stopBridge);
+  }
+  return stopBridge;
 }
 
 function pickDefined(raw: PluginConfig): Partial<WeChatDSHConfig> {

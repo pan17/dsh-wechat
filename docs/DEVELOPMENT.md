@@ -282,6 +282,25 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 
 `tests/skill-list.test.ts`（29 条）逐条钉住：解析、编号/名称解析、越界与歧义、列表渲染（含 25 条上限与单行折叠）、`/raw` 与同名冲突的提示、两种 invocation 形状，以及「`/skill` 之后零转发、零暂存」。
 
+## dispose 与宿主退出
+
+DSH 桌面端把「插件 dispose 完成」当成优雅退出的唯一信号：宿主的 `createProcessShutdown` 在 dispose 成功后**清掉自己的强制退出定时器**，只设 `process.exitCode = 0`，然后完全依赖 Node 事件循环自然排空；10 秒还没排空就 SIGTERM，更新器据此判定「非干净退出」并拒绝安装（[#18](https://github.com/pan17/dsh-wechat/issues/18)）。所以本插件有两条硬约束：
+
+> 1. **清理函数必须挂到 `ctx.effect`。** 这个宿主的 cordis **不把函数式插件的返回值当 disposer**：`apply()` 里 `return () => bridge.stop()` 会被丢掉，宿主那边照样报「teardown 完成」，而长轮询一直在跑。`stop()` 因此做成幂等（`disposePromise`），`ctx.effect` 与返回值两条路都注册，老宿主也不会拆两次。
+> 2. **`stop()` 返回之后，插件不能留下任何被引用（ref'd）的 `Timeout`/`setInterval`/socket。**
+
+第 1 条是 #18 的真正根因，也是排查时最容易看错的一条：只测 `bridge.stop()` 是永远测不出来的——真实宿主里它压根没被调用过。实测（真实桌面宿主 + 假网关）：返回值方案 dispose 永不执行、进程只能等宿主强杀；挂到 `ctx.effect` 后 dispose 35 ms 完成、进程在 shutdown 请求后 216 ms 消失。
+
+落地规则：
+
+- **后台/簿记类定时器一律 `unref()`**：跨会话提醒的 30 秒去重、`apiPost` 的请求超时、打字指示器的 keepalive 与 2 分钟兜底、扫码登录的轮询间隔、打字合并与极简模式的窗口。它们只影响「什么时候做事」，永远不该成为「进程为什么还不退出」的答案。
+- **会长期运行的循环必须可取消**：长轮询（`monitorAbort`）与扫码登录（`loginAbort`）各有一个 `AbortController`，`stop()` / 登出 / 重新扫码都会中止。登录循环最长 5 分钟，之前它完全不可中止。
+- **定时器句柄不要存快照**：会被刷新（clearTimeout + 重新 setTimeout）的定时器要放在可变盒子里（`{ current: Timeout }`），否则 `typingActive` 这类表里存的是第一个句柄，清理时清掉的是早已失效的那个，新句柄会一直挂着。`tests/typing-indicator.test.ts` 用 `vi.getTimerCount()` 钉住了这一点。
+- **dispose 时的尽力而为要有界**：`stopIlink` 触发的「正在输入」CANCEL 是发后不管的请求，`stop()` 给它 1 秒有界等待（`TYPING_DISPOSE_BUDGET_MS`），随后 abort 仍挂着的打字请求。没人回复的网关不能让退出拖满 10 秒。
+- **下次再遇到「进程不退出」**：设 `DSH_WECHAT_TEARDOWN_DEBUG=1` 重启，插件会在启动 / dispose 三个时点把 libuv 句柄快照写进 `<storageDir>/teardown.log`（`Timeout` 带毫秒数，直接指认是谁）。真实宿主里，`teardown.log` 里没有 `dispose:enter` 就等于「dispose 根本没被调用」。
+
+`tests/teardown-handles.test.ts`（含「宿主忽略返回值」的契约用例）与 `tests/typing-indicator.test.ts` 的 TTL 用例守着这条约束。
+
 ## 已知边界
 
 - `/s list`、`/workspace list` 与 `/fork list` 默认各显示 20 行，行末会提示「显示 20/N，看更多: … all（或 … <数量>）」（`/fork list` 是「看更早的」，因为它的窗口取的是**最近** 20 轮）；`all` 不设上限。会话、工作区或轮次很多时，回复会按 `textChunkLimit`（4000 字）拆成多条消息，超出微信 10 条/窗口额度的部分进入 `/next` FIFO 缓存（上限 100 条），需在微信端主动发消息或发 `/next` 继续发送。`/fork show` 的正文**不截断**（要的就是完整内容），超长同样走这条分段 + `/next` 链路。
@@ -318,7 +337,7 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 ```bash
 npm install
 npm run build    # tsc → dist/
-npm test         # vitest（splitText/出站 Markdown 过滤/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词/工作步骤/打字合并/图片与文件合并/脱敏/限流与白名单/权限提权闸门/send_wechat 文件边界/白名单播种/审计与文件权限/出站串行槽/有界缓存/dispose 语义/驱动宿主版本区间/DSH >=0.2.1-0 适配）
+npm test         # vitest（splitText/出站 Markdown 过滤/解析/帧处理/waterfall 竞速/状态存储/命令解析/超时恢复/状态颜色/历史截断/渠道提示词/工作步骤/打字合并/图片与文件合并/脱敏/限流与白名单/权限提权闸门/send_wechat 文件边界/白名单播种/审计与文件权限/出站串行槽/有界缓存/dispose 语义与残留句柄/驱动宿主版本区间/DSH >=0.2.1-0 适配）
 ```
 
 改动代码后需**重启 DSH** 才能让改动生效（插件由 host 进程加载；`dist/client.js` 只影响设置页，同样需要重启）。

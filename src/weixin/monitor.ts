@@ -91,8 +91,18 @@ export function clearSyncBuf(storageDir: string): void {
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error("aborted")); return; }
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => { clearTimeout(t); reject(new Error("aborted")); }, { once: true });
+    // Detach on the normal path too: this signal lives for the whole monitor
+    // run, so a listener per backoff would pile up (and trip Node's
+    // MaxListeners warning) on a channel that keeps retrying.
+    const onAbort = (): void => {
+      clearTimeout(t);
+      reject(new Error("aborted"));
+    };
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
