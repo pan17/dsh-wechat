@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-05
+
 ### Fixed
 
 - **兼容 DSH 0.2.2-rc.1：不再在 `agent/request` 里改模型路由。** 0.2.2 在调用该瀑布之前就固定了本步的 `provider`/`model`/`reasoningEffort`，监听器返回任何不同的值都会直接抛错、整轮请求失败（报错文案明确要求改用 `agent.model.select()`）。
