@@ -1224,6 +1224,19 @@ export class DshOps {
   }
 
   /**
+   * Whether the Host owns per-Session model selection — the `sessionController`
+   * Remote the GUI model picker rides on. DSH 0.2.2 fixes each step's
+   * provider/model/reasoning effort BEFORE the `agent/request` waterfall and
+   * throws when a listener returns a different one, so the legacy in-memory
+   * override must be neither written nor applied on such a host: the durable
+   * `model/selection` is the only route source.
+   */
+  hostOwnsModelSelection(): boolean {
+    const controller = this.get<SessionControllerService>("sessionController");
+    return typeof controller?.selectModel === "function";
+  }
+
+  /**
    * Route one model/effort switch through the Host session controller — the
    * same `session.selectModel` Remote the GUI picker submits. On success the
    * Host records `model/selection`, installs the selection for the next

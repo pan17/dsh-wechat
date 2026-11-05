@@ -364,6 +364,19 @@ bash scripts/ci-local.sh    # Linux / macOS / Windows 的 WSL 里都可用
 
 > **与生态另一种写法的对比**：`@anysearch/anysearch-dsh` 不写 `engines.dsh`，而是对**具体子包**声明 `peerDependencies`（`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-web` 等）且大多用 `"*"`，其 `docs/dsh-compatibility.md` 明确说这是「默认放行新 DSH 版本、矩阵只记录已验证版本而非安装白名单」。两者取舍不同：`"*"` 换来「新宿主版本无需改 manifest」，代价是**放弃版本防护**（`*` 连 `99.0.0` 都放行）；本仓选择精确区间，代价是 DSH 大版本升级时要主动更新声明。注意 anysearch 那套用 `"*"` 无法照搬到一个元包 peer 上——`@deepseek-ai/dsh` 是聚合包，解析它就会拉整棵依赖树。
 
+### 0.2.2 的模型路由边界
+
+0.2.2 收紧了模型选择的所有权，两个位置插件都不能再插手：
+
+- **`preStep`（任何瀑布之前）**要求 Agent 已有路由：`agent.model.current()` 只读已记录的 `model/selection` 或 `AgentOptions`，**不回看日志里的请求头**；缺失时直接抛 `has no provider/model`，这一轮连提示词都组装不到。
+- **`agent/request` 返回值**会被校验：`provider`/`model`/`reasoningEffort` 与 `preStep` 固定的选择不一致就抛错终止整轮（文案明确要求改用 `agent.model.select()`）。该事件在类型里已标 `@deprecated`。
+
+因此本插件的约定是：
+
+- **不在 `agent/request` 里改路由。** 宿主自持选择（`sessionController.selectModel` 存在）时，`agentSetup` 只把选择写进 `system-prompt/assemble` 的 `{{model}}` 变量；路由由宿主按同一条 `modelSelection` 投影决定。没有 `sessionController` 的老宿主仍走原来的内存覆盖（`applyModelOverride`），该分支在新宿主上是空操作。
+- **建会话时补路由。** `AgentStore.ensure` 调 `agents.create` 只传 `sessionId`/`meta`/`setup`，不带 `AgentOptions.provider/model`，微信新建的空会话因此没有任何选择。`agentSetup` 在 `agent.model` 存在且 `current()` 为空时补写一条 `model/selection`，取值顺序是「已有取值不动 → 会话最后一次请求头 → 部署默认」，与 GUI 新建会话写入的是同一条 durable 记录（模型选择器同步可见）。恢复路径走同一个 `setup`，所以 0.2.1 时代建的空会话重启后会自动补上，不必重开。
+
+
 ## 发布
 
 见 [PUBLISH.md](../PUBLISH.md)。

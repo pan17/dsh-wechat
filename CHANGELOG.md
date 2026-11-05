@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **兼容 DSH 0.2.2-rc.1：不再在 `agent/request` 里改模型路由。** 0.2.2 在调用该瀑布之前就固定了本步的 `provider`/`model`/`reasoningEffort`，监听器返回任何不同的值都会直接抛错、整轮请求失败（报错文案明确要求改用 `agent.model.select()`）。
+  - `agentSetup` 在宿主自持模型选择（`sessionController.selectModel` 存在，0.2.1 起）时只保留 `system-prompt/assemble` 里的 `{{model}}` 变量注入，删掉 `agent/request` 监听器：路由和提示词都读同一份 `modelSelection` 投影，本来就不会分叉，多一层改写只会在投影与宿主 step selection 短暂不一致时把整轮打挂。
+  - `applyModelOverride` / `setModelOverride` 在宿主自持选择时变成空操作，并丢弃历史遗留的内存覆盖——`/model switch` 主路径本来就走 `sessionController.selectModel`，遗留覆盖在 0.2.2 上只会触发上面那个抛错。没有 `sessionController` 的老宿主行为不变，仍走原来的内存覆盖。
+- **修复 0.2.2 上新建会话第一句话就报 `agent "..." has no provider/model`。** 0.2.2 在 `preStep` 里、任何瀑布之前就要求 Agent 已有路由，而 `agent.model.current()` 只认已记录的 `model/selection` 或 `AgentOptions`（不回看日志里的请求头）。微信新建会话两样都没有，旧代码靠 `agent/request` 临时补路由，那条路正是上一条堵掉的。
+  - `agentSetup` 现在会在会话完全没有路由时补写一条 `model/selection`：优先用会话最后一次请求头（恢复老会话时保住历史模型），否则回落到部署默认（与 GUI 新建会话一致）；已经有路由的会话不动。写的是宿主自己的 durable 记录，GUI 模型选择器同样看得到。
+  - 恢复路径一并覆盖：重启后重新 resume 就会补上，之前建坏的空会话不必重开。
+
 ## [0.16.0] - 2026-11-04
 
 ### Changed

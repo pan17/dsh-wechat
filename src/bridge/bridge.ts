@@ -7061,6 +7061,12 @@ export class WeChatDSHBridge {
    * last-line defense for the live request; the displayed selection (in
    * `/status` via `resolveEffectiveModel`) reads the effort straight off
    * the override.
+   *
+   * DSH 0.2.2 makes this merge fatal, so it is skipped whenever the Host owns
+   * the selection: the Host captures the step's provider/model/effort before
+   * this waterfall and throws if a listener returns anything else. A leftover
+   * override (recorded before `sessionController` mounted) is dropped instead
+   * of applied, so the durable `model/selection` the GUI shows always wins.
    */
   applyModelOverride(
     config: { provider: string; model: string; reasoningEffort?: string },
@@ -7068,6 +7074,10 @@ export class WeChatDSHBridge {
   ): { provider: string; model: string; reasoningEffort?: string } {
     const override = this.modelOverrides.get(agentId);
     if (!override) return config;
+    if (this.ops.hostOwnsModelSelection()) {
+      this.modelOverrides.delete(agentId);
+      return config;
+    }
     return {
       ...config,
       provider: override.provider,
@@ -7088,6 +7098,10 @@ export class WeChatDSHBridge {
    * `/model switch` writes in the same breath.
    */
   private setModelOverride(agentId: string, override: ModelOverride): void {
+    // Never record one while the Host owns the selection: the Host's durable
+    // `model/selection` is authoritative there, and a second in-memory source
+    // is exactly what DSH 0.2.2 refuses to accept in `agent/request`.
+    if (this.ops.hostOwnsModelSelection()) return;
     this.boundedSet(this.modelOverrides, agentId, override, MODEL_OVERRIDE_MAX_SESSIONS, "modelOverrides");
   }
 

@@ -256,6 +256,74 @@ function setupAgent(agentCtx: unknown, agent?: Agent): Agent | undefined {
   return legacy;
 }
 
+/**
+ * Give a session that has no route at all a durable model selection.
+ *
+ * DSH 0.2.2 stops a step before any waterfall runs when the Agent has no
+ * route: `preStep` reads `agent.model.current()` and throws "has no
+ * provider/model: set AgentOptions.provider and AgentOptions.model or record
+ * a model selection". `current()` only reads a recorded `model/selection` or
+ * `AgentOptions` — never the log's request header. A WeChat-minted session is
+ * created with neither (the bridge never knew the deployment route), and the
+ * `agent/request` rewrite that used to fill it in at request time is gone, so
+ * the first turn of every new session died.
+ *
+ * Record what the session would have run on anyway, in the same cascade the
+ * bridge reports elsewhere: keep an existing route untouched, otherwise take
+ * the resumed session's last request header (a legacy session keeps its
+ * historical model), then the deployment default the GUI's new-session path
+ * uses. Writing the selection is the GUI's own durable record, so the picker
+ * shows it too.
+ */
+function seedModelSelection(
+  ctx: { get?: <T = unknown>(name: string) => T | undefined },
+  agent: Agent | undefined,
+): void {
+  const model = (
+    agent as unknown as
+      | {
+          model?: {
+            current(): unknown;
+            select(selection: ModelSelectionView): void;
+          };
+        }
+      | undefined
+  )?.model;
+  if (!model || typeof model.current !== "function" || typeof model.select !== "function") {
+    return; // pre-0.2.2 host: the request waterfall owns the route instead.
+  }
+  try {
+    if (model.current() !== undefined) return;
+    const logged = (
+      agent as unknown as
+        | {
+            session?: {
+              requestHeader?():
+                | { config?: { provider?: string; model?: string; reasoningEffort?: string } }
+                | undefined;
+            };
+          }
+        | undefined
+    )?.session?.requestHeader?.()?.config;
+    const candidate: ModelSelectionView | undefined =
+      logged?.provider && logged.model
+        ? {
+            provider: logged.provider,
+            model: logged.model,
+            ...(logged.reasoningEffort ? { reasoningEffort: logged.reasoningEffort } : {}),
+          }
+        : ctx.get?.<{ currentSelection(): ModelSelectionView }>(
+            "agentDefaultModel",
+          )?.currentSelection();
+    if (!candidate?.provider || !candidate.model) return;
+    model.select(candidate);
+  } catch (err) {
+    // Non-fatal: the turn will surface the Host's own diagnostic if the
+    // deployment really has no default route to fall back to.
+    console.error(`[dsh-wechat] seed model selection failed: ${String(err)}`);
+  }
+}
+
 export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void> {
   const ctx = agentCtx as {
     get?: <T = unknown>(name: string) => T | undefined;
@@ -287,9 +355,17 @@ export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void
   // resumed — exactly the "GUI switched but WeChat still uses the old model"
   // bug. On older hosts without the controller, the legacy frozen selection
   // stays in place, and the bridge's global `agent/request` override (the
-  // `/model switch` fallback) still wins because it is registered earlier.
+  // `/model switch` fallback) still wins because it is registered earlier;
+  // on a host that owns the selection that override is a no-op instead (see
+  // `applyModelOverride`), so nothing can fight the step's fixed route.
   const controller = ctx.get?.<{ selectModel?: unknown }>("sessionController");
   const hostOwnsSelection = typeof controller?.selectModel === "function";
+
+  // 0.2.2 refuses to start a step for a route-less Agent, before any
+  // waterfall runs; a WeChat-minted session has neither AgentOptions nor a
+  // recorded selection. Record one up front (no-op when the session already
+  // has a route). See `seedModelSelection`.
+  if (hostOwnsSelection) seedModelSelection(ctx, live);
 
   if (!hostOwnsSelection) {
     const logged = live?.session?.requestHeader?.()?.config;
@@ -358,19 +434,19 @@ export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void
     return defaultModel?.currentSelection();
   };
 
-  // Snapshot the selection at the prompt-assembly boundary and reuse that
-  // exact value for the request it belongs to. This mirrors the host's
-  // `installModelSelection`: a switch that lands mid-step takes effect on the
-  // NEXT step, so the system prompt (`{{model}}`) and the request route can
-  // never describe different models within one step.
-  let assembledSelection: ModelSelectionView | undefined;
-
+  // Publish the Host's selection as prompt variables ONLY. On this branch the
+  // Host is the single owner of the route, so the bridge must never rewrite
+  // `agent/request`: DSH 0.2.2 captures the step's provider/model/reasoning
+  // effort BEFORE that waterfall runs and throws when a listener returns a
+  // different one ("use agent.model.select() before step preparation"), which
+  // failed the whole turn. The switch path is `sessionController.selectModel`
+  // and both the route and these variables read the same durable
+  // `modelSelection` projection the GUI shows, so they cannot disagree.
   ctx.on?.("system-prompt/assemble", async (_assembly, _context, next) => {
     const selected = currentSelection();
     const assembled = (await (next as () => Promise<{
       variables?: Record<string, unknown>;
     }>)()) as { variables?: Record<string, unknown> };
-    assembledSelection = selected;
     if (!selected?.provider || !selected.model) return assembled;
     return {
       ...assembled,
@@ -379,22 +455,6 @@ export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void
         provider: selected.provider,
         model: selected.model,
       },
-    };
-  });
-  ctx.on?.("agent/request", async (_payload, next) => {
-    const resolved = (await (next as () => Promise<Record<string, unknown>>)()) as Record<string, unknown>;
-    // Prefer the selection snapshotted with the prompt; only read live when
-    // no assembly ran (defensive: a host without prompt assembly).
-    const selected = assembledSelection ?? currentSelection();
-    if (!selected?.provider || !selected.model) return resolved;
-    const { reasoningEffort: _inherited, ...withoutInheritedEffort } = resolved;
-    return {
-      ...withoutInheritedEffort,
-      provider: selected.provider,
-      model: selected.model,
-      ...(selected.reasoningEffort === undefined
-        ? {}
-        : { reasoningEffort: selected.reasoningEffort }),
     };
   });
 }

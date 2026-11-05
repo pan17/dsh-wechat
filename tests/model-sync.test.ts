@@ -8,20 +8,28 @@
  * produced "I switched the model in the GUI but WeChat still used the old
  * one" (the snapshot kept forcing the model that was current at resume).
  *
- * These tests pin the live read: after the projection changes, the very next
- * `agent/request` waterfall uses the new route, and `system-prompt/assemble`
- * publishes the new `{{model}}` variables.
+ * These tests pin the live read on a Host that owns the selection: the
+ * `system-prompt/assemble` waterfall publishes the current `{{model}}`
+ * variables, while `agent/request` is left alone — DSH 0.2.2 captures the
+ * step's provider/model/reasoning effort BEFORE that waterfall and throws
+ * when a listener returns anything else, failing the whole turn. A switch
+ * therefore surfaces at the next assembly, never by rewriting a request in
+ * flight.
  */
 
 import { describe, expect, it } from "vitest";
 import { agentSetup } from "../src/dsh/sessions.js";
 import { modelSelectionFromProjection } from "../src/dsh/types.js";
 
-function makeAgent(sessionHeader?: { provider: string; model: string; reasoningEffort?: string }) {
+function makeAgent(
+  sessionHeader?: { provider: string; model: string; reasoningEffort?: string },
+  model?: { current(): unknown; select(selection: unknown): void },
+) {
   return {
     id: "session-modelsync",
     status: "idle",
     options: { provider: "magpie", model: "auto/deepseek-v4.1-flash" },
+    ...(model ? { model } : {}),
     session: {
       seq: 1,
       requestHeader: () =>
@@ -111,8 +119,67 @@ describe("modelSelection projection parser", () => {
   });
 });
 
+describe("agentSetup seeds a route the Host will accept", () => {
+  const controllerCtx = {
+    get: (name: string) =>
+      name === "sessionController"
+        ? { selectModel: async () => ({ selected: null }) }
+        : name === "agentDefaultModel"
+          ? {
+              currentSelection: () => ({
+                provider: "magpie",
+                model: "auto/deepseek-v4.1-flash",
+                reasoningEffort: "max",
+              }),
+            }
+          : undefined,
+    on: () => () => {},
+  };
+
+  it("records the deployment default when the session has no route at all", async () => {
+    // Exactly the `/s new` failure on 0.2.2: no recorded selection, no
+    // AgentOptions route, so `preStep` threw before any waterfall ran.
+    const picked: unknown[] = [];
+    const agent = makeAgent(undefined, {
+      current: () => undefined,
+      select: (selection) => picked.push(selection),
+    });
+    await agentSetup(controllerCtx, agent as never);
+    expect(picked).toEqual([
+      { provider: "magpie", model: "auto/deepseek-v4.1-flash", reasoningEffort: "max" },
+    ]);
+  });
+
+  it("keeps an existing route untouched", async () => {
+    const picked: unknown[] = [];
+    const agent = makeAgent(undefined, {
+      current: () => ({ provider: "openai", model: "gpt-4" }),
+      select: (selection) => picked.push(selection),
+    });
+    await agentSetup(controllerCtx, agent as never);
+    expect(picked).toEqual([]);
+  });
+
+  it("prefers a resumed session's last request header over the default", async () => {
+    const picked: unknown[] = [];
+    const agent = makeAgent(
+      { provider: "openai", model: "gpt-4", reasoningEffort: "high" },
+      { current: () => undefined, select: (selection) => picked.push(selection) },
+    );
+    await agentSetup(controllerCtx, agent as never);
+    expect(picked).toEqual([
+      { provider: "openai", model: "gpt-4", reasoningEffort: "high" },
+    ]);
+  });
+
+  it("stays inert on a host whose Agent exposes no model accessor", async () => {
+    const agent = makeAgent(undefined);
+    await expect(agentSetup(controllerCtx, agent as never)).resolves.toBeUndefined();
+  });
+});
+
 describe("agentSetup follows the live host selection", () => {
-  it("captures the selection at assembly and defers a mid-step switch", async () => {
+  it("never rewrites the request on a host that owns the selection", async () => {
     const { listeners, setProjection } = await makeHarness({
       next: {
         provider: "magpie",
@@ -121,52 +188,73 @@ describe("agentSetup follows the live host selection", () => {
       },
       lastUsed: null,
     });
-    const request = listeners["agent/request"]!;
+    // The Host fixes the step route before `agent/request`, so a listener
+    // there would only be able to disagree with it (and get the turn killed).
+    expect(listeners["agent/request"]).toBeUndefined();
+
     const assemble = listeners["system-prompt/assemble"]!;
-    const next = async () => ({
-      provider: "magpie",
-      model: "old-route",
-      reasoningEffort: "low",
+    const next = async () => ({ variables: { provider: "old", model: "old-route" } });
+
+    // Step 1 assembly publishes the projection.
+    await expect(assemble({}, {}, next)).resolves.toEqual({
+      variables: { provider: "magpie", model: "auto/deepseek-v4.1-flash" },
     });
 
-    // Step 1 assembly snapshots flash/max.
-    await assemble({}, {}, async () => ({}));
-    await expect(request({}, next)).resolves.toEqual({
-      provider: "magpie",
-      model: "auto/deepseek-v4.1-flash",
-      reasoningEffort: "max",
-    });
-
-    // A GUI switch lands while step 1 is still running: the request already
-    // assembled must keep its model (no split prompt/route within one step).
+    // A GUI switch lands while step 1 is still running: nothing retracts the
+    // already-assembled prompt, and the next assembly carries the new route.
     setProjection({
       next: { provider: "openai", model: "gpt-4" },
       lastUsed: { provider: "magpie", model: "auto/deepseek-v4.1-flash" },
     });
-    await expect(request({}, next)).resolves.toEqual({
-      provider: "magpie",
-      model: "auto/deepseek-v4.1-flash",
-      reasoningEffort: "max",
-    });
-
-    // Step 2 assembly sees the switch and the following request uses it.
-    await assemble({}, {}, async () => ({}));
-    await expect(request({}, next)).resolves.toEqual({
-      provider: "openai",
-      model: "gpt-4",
+    await expect(assemble({}, {}, next)).resolves.toEqual({
+      variables: { provider: "openai", model: "gpt-4" },
     });
   });
 
   it("falls back to the logged request header when no projection is available", async () => {
     const { listeners } = await makeHarness(undefined);
-    const request = listeners["agent/request"]!;
-    const next = async () => ({
-      provider: "magpie",
-      model: "old-route",
-      reasoningEffort: "low",
-    });
+    expect(listeners["agent/request"]).toBeUndefined();
 
-    await expect(request({}, next)).resolves.toEqual({
+    const assemble = listeners["system-prompt/assemble"]!;
+    const next = async () => ({ variables: { provider: "old", model: "old-route" } });
+    await expect(assemble({}, {}, next)).resolves.toEqual({
+      variables: { provider: "magpie", model: "auto/deepseek-v4.1-flash" },
+    });
+  });
+
+  it("keeps the legacy request rewrite on a host without a session controller", async () => {
+    const listeners: Record<string, (...args: unknown[]) => unknown> = {};
+    const ctx = {
+      get: (name: string) =>
+        name === "agentDefaultModel"
+          ? {
+              currentSelection: () => ({
+                provider: "magpie",
+                model: "auto/deepseek-v4.1-flash",
+              }),
+            }
+          : undefined,
+      on: (event: string, listener: (...args: unknown[]) => unknown) => {
+        listeners[event] = listener;
+        return () => {};
+      },
+    };
+    await agentSetup(
+      ctx,
+      makeAgent({
+        provider: "magpie",
+        model: "auto/deepseek-v4.1-flash",
+        reasoningEffort: "low",
+      }) as never,
+    );
+
+    // Pre-0.2.1 hosts have no per-session selection: the frozen header still
+    // drives the request, exactly as before this change.
+    const request = listeners["agent/request"]!;
+    expect(typeof request).toBe("function");
+    await expect(
+      request({}, async () => ({ provider: "magpie", model: "old-route" })),
+    ).resolves.toEqual({
       provider: "magpie",
       model: "auto/deepseek-v4.1-flash",
       reasoningEffort: "low",
