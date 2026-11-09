@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **修复 0.16.1 在 DSH 0.2.1 上的回归：微信新建会话第一句话报 `has no provider/model ... supply both via the agent/request waterfall`（issue #19）。** 0.2.1 有 `sessionController` 但没有 `agent.model`，新会话既没有 `AgentOptions` 也没有 `request/header`，路由只能由 `agent/request` 瀑布提供；0.16.1 按「宿主自持选择」一刀切删掉了该监听器，于是每条新建会话都空路由。
+  - 判别依据改成 `Agent.model.select` 是否存在，而不是 `sessionController`：存在（0.2.2+）继续走「补写 `model/selection`、不碰请求」；不存在（0.2.1）保留瀑布补路由，取值来自实时 `modelSelection` 投影 → 请求头 → 部署默认，并把该值快照到提示词，保证同一步里 `{{model}}` 和请求不打架。
+  - 两条路径都有用例覆盖：有 `agent.model` 时不得注册 `agent/request`；只有 `sessionController` 时必须注册并由它补出路由。
+
 ## [0.16.1] - 2026-11-05
 
 ### Fixed

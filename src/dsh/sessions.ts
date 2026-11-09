@@ -347,25 +347,35 @@ export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void
     }
   }
 
-  // DSH 0.2.1 owns per-Session model selection in the Host (the GUI's
-  // `session.selectModel` appends `model/selection` and installs the
-  // selection). When that Remote is composed, the bridge must read the same
-  // durable `modelSelection` projection live: a snapshot captured here would
-  // keep forcing the model that happened to be current when the WeChat agent
-  // resumed — exactly the "GUI switched but WeChat still uses the old model"
-  // bug. On older hosts without the controller, the legacy frozen selection
-  // stays in place, and the bridge's global `agent/request` override (the
-  // `/model switch` fallback) still wins because it is registered earlier;
-  // on a host that owns the selection that override is a no-op instead (see
-  // `applyModelOverride`), so nothing can fight the step's fixed route.
+  // Both newer host lines own per-Session model selection, but the route
+  // reaches the request through two different doors, and the bridge must pick
+  // by capability — not by "does sessionController exist":
+  //
+  // - DSH 0.2.2+ (`agent.model` present) records the choice on the Session
+  //   (`model/selection`) and refuses to start a step without one — BEFORE
+  //   any waterfall — then rejects an `agent/request` that disagrees with the
+  //   fixed route. There the bridge may only seed the record and publish
+  //   prompt variables.
+  // - DSH 0.2.1 (sessionController present, no `agent.model`) has no durable
+  //   accessor: a fresh session's route can only come from the `agent/request`
+  //   waterfall (its emptiness check runs AFTER it), so the bridge has to keep
+  //   filling it in. Dropping that listener (dsh-wechat 0.16.1) broke every
+  //   WeChat-created session there with "has no provider/model".
+  //
+  // Both branches read the live `modelSelection` projection rather than a
+  // setup-time snapshot, so a GUI switch reaches WeChat immediately.
   const controller = ctx.get?.<{ selectModel?: unknown }>("sessionController");
   const hostOwnsSelection = typeof controller?.selectModel === "function";
+  const modelAccessor = (
+    live as unknown as { model?: { select?: unknown } } | undefined
+  )?.model;
+  const hostRecordsSelection = typeof modelAccessor?.select === "function";
 
   // 0.2.2 refuses to start a step for a route-less Agent, before any
   // waterfall runs; a WeChat-minted session has neither AgentOptions nor a
   // recorded selection. Record one up front (no-op when the session already
   // has a route). See `seedModelSelection`.
-  if (hostOwnsSelection) seedModelSelection(ctx, live);
+  if (hostRecordsSelection) seedModelSelection(ctx, live);
 
   if (!hostOwnsSelection) {
     const logged = live?.session?.requestHeader?.()?.config;
@@ -434,19 +444,18 @@ export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void
     return defaultModel?.currentSelection();
   };
 
-  // Publish the Host's selection as prompt variables ONLY. On this branch the
-  // Host is the single owner of the route, so the bridge must never rewrite
-  // `agent/request`: DSH 0.2.2 captures the step's provider/model/reasoning
-  // effort BEFORE that waterfall runs and throws when a listener returns a
-  // different one ("use agent.model.select() before step preparation"), which
-  // failed the whole turn. The switch path is `sessionController.selectModel`
-  // and both the route and these variables read the same durable
-  // `modelSelection` projection the GUI shows, so they cannot disagree.
+  // The prompt (`{{model}}`) follows the live selection on both host lines.
+  // The route follows it too on 0.2.1 (the waterfall below); on 0.2.2 the
+  // Host's own step selection already owns the route and rewriting it would
+  // be rejected, so the listener is not registered at all.
+  let assembledSelection: ModelSelectionView | undefined;
+
   ctx.on?.("system-prompt/assemble", async (_assembly, _context, next) => {
     const selected = currentSelection();
     const assembled = (await (next as () => Promise<{
       variables?: Record<string, unknown>;
     }>)()) as { variables?: Record<string, unknown> };
+    if (!hostRecordsSelection) assembledSelection = selected;
     if (!selected?.provider || !selected.model) return assembled;
     return {
       ...assembled,
@@ -457,4 +466,25 @@ export async function agentSetup(agentCtx: unknown, agent?: Agent): Promise<void
       },
     };
   });
+
+  if (!hostRecordsSelection) {
+    // DSH 0.2.1: no durable selection accessor exists, and its emptiness check
+    // runs after this waterfall, so filling the route here is both necessary
+    // and safe. The prompt snapshot keeps `{{model}}` and the request on the
+    // same step (a mid-step switch lands on the next assembly).
+    ctx.on?.("agent/request", async (_payload, next) => {
+      const resolved = (await (next as () => Promise<Record<string, unknown>>)()) as Record<string, unknown>;
+      const selected = assembledSelection ?? currentSelection();
+      if (!selected?.provider || !selected.model) return resolved;
+      const { reasoningEffort: _inherited, ...withoutInheritedEffort } = resolved;
+      return {
+        ...withoutInheritedEffort,
+        provider: selected.provider,
+        model: selected.model,
+        ...(selected.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: selected.reasoningEffort }),
+      };
+    });
+  }
 }

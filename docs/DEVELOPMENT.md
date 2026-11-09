@@ -371,10 +371,14 @@ bash scripts/ci-local.sh    # Linux / macOS / Windows 的 WSL 里都可用
 - **`preStep`（任何瀑布之前）**要求 Agent 已有路由：`agent.model.current()` 只读已记录的 `model/selection` 或 `AgentOptions`，**不回看日志里的请求头**；缺失时直接抛 `has no provider/model`，这一轮连提示词都组装不到。
 - **`agent/request` 返回值**会被校验：`provider`/`model`/`reasoningEffort` 与 `preStep` 固定的选择不一致就抛错终止整轮（文案明确要求改用 `agent.model.select()`）。该事件在类型里已标 `@deprecated`。
 
-因此本插件的约定是：
+因此本插件的约定是（判别依据是 `Agent.model.select` 是否存在，**不是** `sessionController`）：
 
-- **不在 `agent/request` 里改路由。** 宿主自持选择（`sessionController.selectModel` 存在）时，`agentSetup` 只把选择写进 `system-prompt/assemble` 的 `{{model}}` 变量；路由由宿主按同一条 `modelSelection` 投影决定。没有 `sessionController` 的老宿主仍走原来的内存覆盖（`applyModelOverride`），该分支在新宿主上是空操作。
-- **建会话时补路由。** `AgentStore.ensure` 调 `agents.create` 只传 `sessionId`/`meta`/`setup`，不带 `AgentOptions.provider/model`，微信新建的空会话因此没有任何选择。`agentSetup` 在 `agent.model` 存在且 `current()` 为空时补写一条 `model/selection`，取值顺序是「已有取值不动 → 会话最后一次请求头 → 部署默认」，与 GUI 新建会话写入的是同一条 durable 记录（模型选择器同步可见）。恢复路径走同一个 `setup`，所以 0.2.1 时代建的空会话重启后会自动补上，不必重开。
+- **0.2.2+（有 `agent.model`）：不在 `agent/request` 里改路由。** `agentSetup` 补写一条 `model/selection`，并只把选择写进 `system-prompt/assemble` 的 `{{model}}` 变量；路由由宿主按同一条投影决定，改写会被上面那条校验拒绝。
+- **0.2.1（有 `sessionController`、无 `agent.model`）：仍然由瀑布补路由。** 该宿主没有 durable 选择访问器，`prepareRequest` 的空路由检查在瀑布**之后**，所以 `agent/request` 是唯一可用的门。删掉它（0.16.1 干过）会让微信新建会话全部报 `has no provider/model ... supply both via the agent/request waterfall`（issue #19）。取值顺序是实时 `modelSelection` 投影 → 请求头 → 部署默认。
+- **没有 `sessionController` 的老宿主** 同样走瀑布补路由，只是取值为 setup 时的冻结快照；`applyModelOverride` 在这些分支之外仍负责 `/model switch` 的兜底。
+
+- **建会话时补路由（0.2.2+）。** `AgentStore.ensure` 调 `agents.create` 只传 `sessionId`/`meta`/`setup`，不带 `AgentOptions.provider/model`，微信新建的空会话因此没有任何选择。`agentSetup` 在 `agent.model` 存在且 `current()` 为空时补写一条 `model/selection`，取值顺序是「已有取值不动 → 会话最后一次请求头 → 部署默认」，与 GUI 新建会话写入的是同一条 durable 记录（模型选择器同步可见）。恢复路径走同一个 `setup`，所以旧版本建的空会话重启后会自动补上，不必重开。
+
 
 
 ## 发布

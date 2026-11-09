@@ -78,11 +78,20 @@ async function makeHarness(initialProjection: unknown) {
       return () => {};
     },
   };
-  const agent = makeAgent({
-    provider: "magpie",
-    model: "auto/deepseek-v4.1-flash",
-    reasoningEffort: "low",
-  });
+  const agent = makeAgent(
+    {
+      provider: "magpie",
+      model: "auto/deepseek-v4.1-flash",
+      reasoningEffort: "low",
+    },
+    // 0.2.2+ exposes `agent.model`; its presence is what moves the bridge off
+    // the request waterfall (which such a host rejects) and onto the durable
+    // `model/selection` record.
+    {
+      current: () => ({ provider: "magpie", model: "auto/deepseek-v4.1-flash" }),
+      select: () => {},
+    },
+  );
   await agentSetup(ctx, agent as never);
   return {
     agent,
@@ -219,6 +228,38 @@ describe("agentSetup follows the live host selection", () => {
     const next = async () => ({ variables: { provider: "old", model: "old-route" } });
     await expect(assemble({}, {}, next)).resolves.toEqual({
       variables: { provider: "magpie", model: "auto/deepseek-v4.1-flash" },
+    });
+  });
+
+  it("fills the route through the waterfall on a host without agent.model (0.2.1)", async () => {
+    const listeners: Record<string, (...args: unknown[]) => unknown> = {};
+    const ctx = {
+      get: (name: string) =>
+        name === "sessionController"
+          ? { selectModel: async () => ({ selected: null }) }
+          : name === "agentDefaultModel"
+            ? {
+                currentSelection: () => ({
+                  provider: "magpie",
+                  model: "auto/deepseek-v4.1-flash",
+                }),
+              }
+            : undefined,
+      on: (event: string, listener: (...args: unknown[]) => unknown) => {
+        listeners[event] = listener;
+        return () => {};
+      },
+    };
+    // 0.2.1 owns the selection through `sessionController` but has no
+    // `agent.model` accessor, and its emptiness check runs AFTER this
+    // waterfall — so the request listener is the only door left. Dropping it
+    // is what broke WeChat-created sessions in 0.16.1.
+    await agentSetup(ctx, makeAgent(undefined) as never);
+    const request = listeners["agent/request"]!;
+    expect(typeof request).toBe("function");
+    await expect(request({}, async () => ({ provider: "", model: "" }))).resolves.toEqual({
+      provider: "magpie",
+      model: "auto/deepseek-v4.1-flash",
     });
   });
 
