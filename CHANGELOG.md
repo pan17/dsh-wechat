@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-09
+
 ### Fixed
 
 - **修复 0.16.1 在 DSH 0.2.1 上的回归：微信新建会话第一句话报 `has no provider/model ... supply both via the agent/request waterfall`（issue #19）。** 0.2.1 有 `sessionController` 但没有 `agent.model`，新会话既没有 `AgentOptions` 也没有 `request/header`，路由只能由 `agent/request` 瀑布提供；0.16.1 按「宿主自持选择」一刀切删掉了该监听器，于是每条新建会话都空路由。
