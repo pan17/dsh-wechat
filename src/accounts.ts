@@ -15,7 +15,8 @@ interface Account {
   peer?: string;
 }
 interface SessionBinding {
-  accountId: string;
+  // null keeps a former WeChat session from being claimed or routed to the desktop default.
+  accountId: string | null;
   source?: "wechat" | "gui";
 }
 interface Directory {
@@ -30,7 +31,7 @@ export interface SendArgs {
   file_path?: string;
 }
 type Commands = Parameters<WeChatDSHBridge["attachCommands"]>[0];
-type Runtime = { bridge: WeChatDSHBridge; store: ConfigStore };
+type Runtime = { bridge: WeChatDSHBridge; store: ConfigStore; removing?: boolean };
 
 /** One coordinator per host. All ownership changes are synchronous through the
  * atomic rename, so two concurrent WeChat commands cannot both claim a chat. */
@@ -56,7 +57,7 @@ export class WeChatAccounts {
       this.save({
         accounts: enrolled,
         defaultId: defaultId && ids.has(defaultId) ? defaultId : null,
-        bindings: Object.fromEntries(Object.entries(this.directory.bindings).filter(([, b]) => ids.has(b.accountId))),
+        bindings: Object.fromEntries(Object.entries(this.directory.bindings).filter(([, b]) => b.accountId === null || ids.has(b.accountId))),
       });
     }
     for (const row of this.directory.accounts) {
@@ -99,6 +100,7 @@ export class WeChatAccounts {
   get(id: string): Runtime {
     const runtime = this.runtimes.get(id);
     if (!runtime) throw new Error("请先选择有效的微信账号");
+    if (runtime.removing) throw new Error("正在移除微信账号");
     return runtime;
   }
 
@@ -168,6 +170,31 @@ export class WeChatAccounts {
     await this.get(id).bridge.start();
   }
 
+  async remove(id: string) {
+    this.row(id);
+    const runtime = this.get(id);
+    if (!runtime.bridge.isLoggedOut()) throw new Error("请先退出该微信账号，再移除");
+    runtime.removing = true;
+    try {
+      await runtime.bridge.stop();
+      clearAccountFiles(path.join(this.config.storageDir, "accounts", id));
+      const bindings = { ...this.directory.bindings };
+      for (const [session, binding] of Object.entries(bindings)) {
+        if (binding.accountId === id) bindings[session] = { accountId: null };
+      }
+      this.save({
+        accounts: this.directory.accounts.filter(row => row.id !== id),
+        defaultId: this.directory.defaultId === id ? null : this.directory.defaultId,
+        bindings,
+      });
+      this.runtimes.delete(id);
+    } catch (error) {
+      // The directory still contains the logged-out account. Restore its controls for a retry.
+      this.open(id);
+      throw error;
+    }
+  }
+
   rename(id: string, name: string) {
     const value = typeof name === "string" ? name.trim() : "";
     if (!value || value.length > 64 || /[\x00-\x1f]/.test(value)) throw new Error("请输入 1 至 64 字的单行备注名");
@@ -183,7 +210,7 @@ export class WeChatAccounts {
   }
 
   list() {
-    return this.directory.accounts.map(({ id, name }) => ({
+    return this.directory.accounts.filter(row => !this.runtimes.get(row.id)?.removing).map(({ id, name }) => ({
       id, name, connection: this.get(id).bridge.connectionStatus(), default: id === this.directory.defaultId,
     }));
   }
@@ -213,6 +240,8 @@ export class WeChatAccounts {
   }
 
   private claim(id: string, session: string) {
+    const runtime = this.runtimes.get(id);
+    if (!runtime || runtime.removing) return false;
     const current = this.binding(session);
     if (current) return current.accountId === id;
     this.bind(session, { accountId: id });
@@ -226,8 +255,9 @@ export class WeChatAccounts {
   }
 
   owner(session?: string) {
-    const binding = session && this.binding(session);
-    return binding ? this.get(binding.accountId).bridge : undefined;
+    const id = session && this.binding(session)?.accountId;
+    const runtime = id ? this.runtimes.get(id) : undefined;
+    return runtime?.removing ? undefined : runtime?.bridge;
   }
 
   async send(session: string, args: SendArgs) {
@@ -244,15 +274,19 @@ export class WeChatAccounts {
         if (!targets.includes(target)) targets.push(target);
       }
     } else {
+      if (binding?.accountId === null) return { ok: false, message: "此会话原绑定的微信账号已移除，请明确指定接收账号" };
       const id = binding?.source === "wechat" ? binding.accountId : this.directory.defaultId;
       if (!id) return { ok: false, message: "未设置默认接收账号，请询问用户要发送给谁", accounts };
       targets.push(this.row(id));
     }
     // A recipient with permissive file settings must never relax the caller's
     // own file policy. Each recipient also applies its own size and path limits.
-    if (args.file_path && binding) {
-      const refused = await this.get(binding.accountId).bridge.guardOutgoingFile(session, args.file_path);
+    if (args.file_path && binding?.accountId) {
+      const caller = this.owner(session);
+      if (!caller) return { ok: false, message: "此会话绑定的微信账号已不可用" };
+      const refused = await caller.guardOutgoingFile(session, args.file_path);
       if (refused) return { ok: false, message: refused };
+      if (this.owner(session) !== caller) return { ok: false, message: "此会话绑定的微信账号已变更，请重新发送" };
     }
     const results = await Promise.all(targets.map(async ({ id, name }) => {
       try {
@@ -270,4 +304,20 @@ export class WeChatAccounts {
     this.stopped = true;
     await Promise.all([...this.runtimes.values()].map(({ bridge }) => bridge.stop()));
   }
+}
+
+// Remove only plugin-owned state. Chat messages can still reference files in tempfile/.
+function clearAccountFiles(dir: string) {
+  if (!fs.existsSync(dir)) return;
+  if (!fs.lstatSync(dir).isDirectory()) throw new Error("账号数据目录无效");
+  const auth = path.join(dir, "auth");
+  if (fs.existsSync(auth)) {
+    if (!fs.lstatSync(auth).isDirectory()) throw new Error("账号凭据目录无效");
+    fs.rmSync(path.join(auth, "token.json"), { force: true });
+    if (!fs.readdirSync(auth).length) fs.rmdirSync(auth);
+  }
+  for (const file of ["state.json", "config.json", "sync-buf.json", "audit.jsonl", "audit.jsonl.1", "teardown.log"]) {
+    fs.rmSync(path.join(dir, file), { force: true });
+  }
+  if (!fs.readdirSync(dir).length) fs.rmdirSync(dir);
 }

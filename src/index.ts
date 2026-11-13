@@ -401,6 +401,7 @@ if (typeof context.inject === "function") {
       action("config", "POST", async req => ({ ok: true, ...await accounts.configure(selected(req), await readJsonBody(req) as Partial<EditableConfig>) }));
       action("relogin", "POST", req => accounts.get(selected(req)).bridge.relogin());
       action("logout", "POST", req => accounts.get(selected(req)).bridge.logout());
+      action("remove", "POST", async req => { await accounts.remove(selected(req)); return { ok: true }; });
 
       // Standalone QR viewer can also be opened with ?account=<id>.
       webServer.register({

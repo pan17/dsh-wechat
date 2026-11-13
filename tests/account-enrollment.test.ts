@@ -39,6 +39,7 @@ it("only confirmed accounts join the directory, and only connected accounts appe
     expect(await list()).toEqual([original]);
     expect(manager.list()[0]?.default).toBe(false);
     expect(manager.owner("chat")).toBe(manager.get(original).bridge);
+    await expect(manager.remove(original)).rejects.toThrow("请先退出");
     const canceled = manager.add();
     await manager.cancelLogin(canceled);
     const fresh = manager.add();
@@ -55,6 +56,29 @@ it("only confirmed accounts join the directory, and only connected accounts appe
     await manager.get(fresh).bridge.logout();
     expect(await list()).toEqual([original]);
     expect(manager.list().map(row => row.id)).toEqual([original, fresh]);
+    await manager.get(original).bridge.logout();
+    manager.setDefault(original);
+    const accountDir = path.join(dir, "accounts", original);
+    const attachments = path.join(accountDir, "tempfile");
+    fs.mkdirSync(attachments);
+    fs.writeFileSync(path.join(attachments, "photo.jpg"), "original attachment");
+    await manager.configure(original, { cwd: dir });
+    await manager.remove(original);
+    expect(manager.list().map(row => [row.id, row.default])).toEqual([[fresh, false]]);
+    expect(fs.existsSync(path.join(accountDir, "config.json"))).toBe(false);
+    expect(fs.existsSync(path.join(accountDir, "state.json"))).toBe(false);
+    expect(fs.readFileSync(path.join(attachments, "photo.jpg"), "utf8")).toBe("original attachment");
+    expect(manager.owner("chat")).toBeUndefined();
+    manager.setDefault(fresh);
+    const reloaded = new WeChatAccounts({ get: () => undefined, on: () => () => {} }, { ...defaultConfig(), storageDir: dir });
+    try {
+      expect(reloaded.list().map(row => row.id)).toEqual([fresh]);
+      expect((await reloaded.send("chat", { text: "old reply" })).message).toContain("已移除");
+      reloaded.inherit("child", { origin: "subagent", parentSession: "chat" });
+      expect((await reloaded.send("child", { text: "old reply" })).message).toContain("已移除");
+      await reloaded.remove(fresh);
+      expect(reloaded.list()).toEqual([]);
+    } finally { await reloaded.stop(); }
   } finally {
     confirm();
     await manager.stop();

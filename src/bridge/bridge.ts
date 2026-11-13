@@ -1214,6 +1214,10 @@ export class WeChatDSHBridge {
     return this.loginState.phase === "logged-in" && this.monitorRunning && !this.tokenInvalid && !this.tokenGiveUp;
   }
 
+  isLoggedOut(): boolean {
+    return this.loginState.phase === "idle" && !this.token && !this.loginAbort;
+  }
+
   connectionStatus(): string {
     if (this.tokenGiveUp) return "需重新扫码";
     if (this.tokenInvalid) return "连接恢复中";
@@ -1229,6 +1233,7 @@ export class WeChatDSHBridge {
     }
     return {
       ...this.loginState,
+      canRemove: this.isLoggedOut(),
       monitorRunning: this.monitorRunning,
       connection: this.connectionStatus(),
       queued: this.outboundCache.length,

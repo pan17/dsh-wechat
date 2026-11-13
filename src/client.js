@@ -780,7 +780,7 @@ window.__ModuleLoader__.load({
 					),
 					error && createElement("div", { className: "wx_err", role: "alert" }, error),
 				),
-				account && createElement(AccountPanel, { key: account.id, accountId: account.id }),
+				account && createElement(AccountPanel, { key: account.id, accountId: account.id, accountName: account.name, reloadAccounts: reload }),
 			);
 		}
 
@@ -818,10 +818,11 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		function AccountPanel({ accountId }) {
+		function AccountPanel({ accountId, accountName, reloadAccounts }) {
 			const accountApi = react.useCallback((path, options) => api(path + "?account=" + encodeURIComponent(accountId), options), [accountId]);
 			const [status, setStatus] = react.useState(null);
 			const [busy, setBusy] = react.useState("");
+			const [confirmRemoval, setConfirmRemoval] = react.useState(false);
 			const [msg, setMsg] = react.useState({ kind: "", text: "" });
 			// Editable form state (initialized from status.config).
 			const [form, setForm] = react.useState(null);
@@ -911,13 +912,15 @@ window.__ModuleLoader__.load({
 				return () => clearInterval(id);
 			}, [status?.phase, refresh]);
 
-			const run = async (action, next) => {
+			const run = async (action) => {
 				setBusy(action);
+				setConfirmRemoval(false);
 				setMsg({ kind: "", text: "" });
 				try {
 					const r = await accountApi(action, { method: "POST" });
 					setMsg(r.ok ? { kind: "ok", text: r.body.message || "完成" } : { kind: "err", text: r.body.message || `失败 (HTTP ${r.status})` });
-					if (r.ok) refresh();
+					if (action !== "/remove" || !r.ok) refresh();
+					await reloadAccounts();
 				} catch (e) {
 					setMsg({ kind: "err", text: String(e) });
 				}
@@ -1089,9 +1092,19 @@ window.__ModuleLoader__.load({
 						)
 						: null,
 					createElement("div", { className: "wx_row" },
-						createElement("button", { className: "wx_btn", onClick: () => run("/relogin"), disabled: busy !== "" }, busy === "/relogin" ? "…" : "重新扫码"),
-						createElement("button", { className: "wx_btn danger", onClick: () => { if (confirm("确定退出所选微信账号？该账号的待发消息将清空。")) run("/logout"); }, disabled: busy !== "" }, busy === "/logout" ? "…" : "退出登录"),
+						createElement("button", { className: "wx_btn", onClick: () => run("/relogin"), disabled: !status || busy !== "" }, busy === "/relogin" ? "…" : "重新扫码"),
+						status && (status.canRemove
+							? createElement("button", { className: "wx_btn danger", disabled: busy !== "" || confirmRemoval, onClick: () => setConfirmRemoval(true) }, "移除账号")
+							: createElement("button", { className: "wx_btn danger", disabled: busy !== "", onClick: () => { if (confirm(`确定退出微信账号「${accountName}」？该账号的待发消息将清空。`)) run("/logout"); } }, busy === "/logout" ? "…" : "退出登录")),
 						createElement("span", { className: "wx_meta" }, "新安装或者更新本插件后，建议重启DSH再使用"),
+					),
+					status?.canRemove && confirmRemoval && createElement("div", { className: "wx_sub", role: "group", "aria-label": "确认移除微信账号" },
+						createElement("strong", null, `确定移除微信账号「${accountName}」吗？`),
+						createElement("div", { className: "wx_meta" }, "将清除该账号的插件配置和微信会话绑定。DSH 聊天记录、历史附件和工作目录中的文件会保留。"),
+						createElement("div", { className: "wx_row" },
+							createElement("button", { type: "button", className: "wx_btn", autoFocus: true, onClick: () => setConfirmRemoval(false) }, "取消"),
+							createElement("button", { type: "button", className: "wx_btn danger", onClick: () => run("/remove") }, "确认移除"),
+						),
 					),
 
 					createElement("div", { className: "wx_divider" }),
