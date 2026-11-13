@@ -81,6 +81,8 @@ export async function login(params: {
   botType?: string;
   storageDir: string;
   log: (msg: string) => void;
+  scanned?: () => void;
+  acceptIdentity?: (token: TokenData, persist: () => void) => void;
   renderQrUrl?: (url: string) => void;
   /**
    * Cancels the scan poll (plugin dispose, logout, a superseded re-login).
@@ -116,6 +118,7 @@ export async function login(params: {
       case "wait":
         break;
       case "scaned":
+        params.scanned?.();
         log("QR scanned, please confirm in WeChat...");
         break;
       case "expired": {
@@ -142,7 +145,11 @@ export async function login(params: {
           userId: statusResp.ilink_user_id!,
           savedAt: new Date().toISOString(),
         };
-        saveToken(storageDir, tokenData);
+        if (abortSignal?.aborted) throw new LoginCancelledError();
+        if (!tokenData.accountId || !tokenData.token) throw new Error("扫码响应缺少账号或令牌，请重新扫码");
+        const persist = () => saveToken(storageDir, tokenData);
+        if (params.acceptIdentity) params.acceptIdentity(tokenData, persist);
+        else persist();
         log(`Bot ID: ${tokenData.accountId}`);
         log(`Token saved to ${getTokenPath(storageDir)}`);
         return tokenData;

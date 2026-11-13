@@ -21,7 +21,9 @@ dsh plugin --profile desktop add dsh-wechat
 dsh plugin --profile desktop list --depth 0    # 查看已装版本
 ```
 
-安装后打开 **设置 → WeChat** 扫码登录。
+安装后打开 **设置 → WeChat** 扫码登录。接入第二个微信时，点「添加账号」，用第二个微信扫码确认。选中账号后，可以设置备注名和工作目录。每个账号独立收发消息，主动推送可按备注名指定一个或多个接收账号。
+
+**从单账号版升级**：原版默认保存在 `~/.dsh-wechat/` 的登录信息、配置和会话绑定需要重新设置。升级后请重新扫码，按需用 `/s list` 和 `/s switch <编号>` 接回原来的 DSH 对话。旧目录和 DSH 聊天记录会保留。
 
 ## 微信命令
 

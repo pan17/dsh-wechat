@@ -9,11 +9,11 @@
  * constructed by local vendors or structural shapes.
  */
 
-import { WeChatDSHBridge } from "./bridge/bridge.js";
+import { WeChatAccounts, type SendArgs } from "./accounts.js";
 import { formatHelp } from "./bridge/slash.js";
 import { helpCatalog } from "./help-catalog.js";
-import { ConfigStore, type EditableConfig } from "./config-store.js";
-import { defaultConfig, normalizeWorkStepsConfig, type WeChatDSHConfig, type WorkStepsMode } from "./config.js";
+import { type EditableConfig } from "./config-store.js";
+import { defaultStorageDir, defaultConfig, normalizeWorkStepsConfig, type WeChatDSHConfig, type WorkStepsMode } from "./config.js";
 import { qrSvgFor } from "./qr.js";
 import { sessionIdFrom, sessionIdFromAssembleContext, weChatSurfaceText } from "./surface-prompt.js";
 export { sessionIdFrom };
@@ -65,8 +65,6 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
     ...defaultConfig(),
     ...pickDefined(raw as PluginConfig),
   };
-  const configStore = new ConfigStore(baseConfig.storageDir);
-  const config = configStore.resolve(baseConfig);
   const context = ctx as {
     get<T = unknown>(name: string): T | undefined;
     on(
@@ -84,7 +82,14 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
     effect?: (body: () => unknown) => unknown;
   };
 
-  const bridge = new WeChatDSHBridge(context, config, undefined, configStore);
+  if (!rawConfig.storageDir) baseConfig.storageDir = defaultStorageDir(context.get<{ home?: string }>("homePaths")?.home);
+  const accounts = new WeChatAccounts(context, baseConfig);
+  const inherit = (session: unknown) => {
+    const value = session as { header?: { origin?: string; parentSession?: string } } | undefined;
+    const id = sessionIdFrom(session);
+    if (id) accounts.inherit(id, value?.header);
+  };
+  context.on("session/created", inherit);
 
   // ─── Session event feed: assistant output → WeChat ───
   context.on("session/event", (session, event) => {
@@ -93,16 +98,17 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
       console.warn("[dsh-wechat] session/event dropped: no session id on payload");
       return;
     }
-    bridge.handleSessionEvent(sessionId, event as { type: string; [k: string]: unknown });
+    inherit(session);
+    accounts.owner(sessionId)?.handleSessionEvent(sessionId, event as { type: string; [k: string]: unknown });
   });
   console.log("[dsh-wechat] session/event listener attached");
   context.on("agent/assistant-stream", (payload) => {
     const { agent, frame } = payload as { agent?: { id?: string }; frame?: import("./dsh/types.js").AssistantStreamFrame };
-    if (agent?.id && frame) bridge.handleAssistantStream(agent.id, frame);
+    if (agent?.id && frame) accounts.owner(agent.id)?.handleAssistantStream(agent.id, frame);
   });
   context.on("session/disposed", (session) => {
     const sessionId = sessionIdFrom(session);
-    if (sessionId) bridge.clearSessionOutput(sessionId);
+    if (sessionId) accounts.owner(sessionId)?.clearSessionOutput(sessionId);
   });
 
   // ─── Agent idleness → 极简模式 (per-task hold) quiescence ───
@@ -116,14 +122,14 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
     const sessionId = data?.agent?.id;
     const status = data?.status;
     if (!sessionId || !status) return;
-    bridge.handleAgentStatus(sessionId, status);
+    accounts.owner(sessionId)?.handleAgentStatus(sessionId, status);
   });
 
   // ─── Agent errors → WeChat notification ───
   context.on("agent/error", (payload) => {
     const agentId = (payload as { agent?: { id?: string } })?.agent?.id;
     if (!agentId) return;
-    bridge.handleAgentError(agentId, (payload as { error?: unknown })?.error);
+    accounts.owner(agentId)?.handleAgentError(agentId, (payload as { error?: unknown })?.error);
   });
 
   // ─── Model overrides: /model switch applies to the live agent's next
@@ -133,7 +139,8 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
     const agentId = (payload as { agent?: { id?: string } })?.agent?.id;
     const nextFn = next as () => Promise<unknown>;
     const config = await nextFn();
-    if (!agentId || !bridge.userForAgent(agentId)) return config;
+    const bridge = accounts.owner(agentId);
+    if (!agentId || !bridge?.userForAgent(agentId)) return config;
     return bridge.applyModelOverride(config as { provider: string; model: string }, agentId);
   });
 
@@ -161,15 +168,15 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
         const dispose = toolsService.register({
           name: "send_wechat",
           description:
-            "Send a text message or a local file to a WeChat user. " +
-            "If the calling session is bound to a WeChat user, the message goes to that user; " +
-            "otherwise it goes to the first known WeChat user (single-user deployments are the norm). " +
-            "Use this to proactively push results, confirmations, or files to WeChat. " +
-            "A file must live inside the calling session's working directory or a registered " +
-            "workspace, and must be under the configured size limit; anything else is refused.",
+            "List currently connected WeChat accounts with list_accounts=true. To send text or a file to named accounts, " +
+            "pass their exact names or ids in recipients. For an ordinary reply omit recipients. A WeChat task " +
+            "replies to its source; a desktop task uses the optional default. Ask the user if no target resolves. " +
+            "Group delivery means individual messages to the explicitly requested accounts. Report queued and failed deliveries separately.",
           parameters: {
             type: "object",
             properties: {
+              list_accounts: { type: "boolean", description: "List account names, IDs, connection and default without sending." },
+              recipients: { type: "array", items: { type: "string" }, description: "Explicit receiver names or IDs. Omit for automatic routing." },
               text: {
                 type: "string",
                 description: "The text message to send to WeChat.",
@@ -190,12 +197,19 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
               properties: {
                 ok: { type: "boolean" },
                 message: { type: "string" },
+                accounts: { type: "array", items: { type: "object", properties: {
+                  id: { type: "string" }, name: { type: "string" }, connection: { type: "string" }, default: { type: "boolean" },
+                } } },
+                results: { type: "array", items: { type: "object", properties: {
+                  status: { type: "string", enum: ["sent", "queued", "failed"] }, sent: { type: "integer" }, queued: { type: "integer" },
+                  id: { type: "string" }, name: { type: "string" }, ok: { type: "boolean" }, message: { type: "string" },
+                } } },
               },
             },
             render: (_args: unknown, value: unknown) => [{ type: "text", text: JSON.stringify(value) }],
           },
-          async execute(args: { text?: string; file_path?: string }, exec: { agent?: { id?: string } }) {
-            return bridge.handleSendWeChat(exec.agent?.id ?? "", args);
+          async execute(args: SendArgs, exec: { agent?: { id?: string } }) {
+            return accounts.send(exec.agent?.id ?? "", args);
           },
         });
         return () => {
@@ -225,6 +239,8 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
   context.on("approval/request", async (req, next) => {
     const nextFn = next as () => Promise<"allowed-once" | "rejected" | "cancelled" | "unavailable">;
     try {
+      const bridge = accounts.owner(sessionIdFromAssembleContext(req));
+      if (!bridge) return nextFn();
       return await bridge.answerApprovalRequest(req as never, nextFn);
     } catch (err) {
       console.error(`[dsh-wechat] approval/request answerer failed: ${String(err)}`);
@@ -234,6 +250,8 @@ export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise
   context.on("user-questions/request", async (req, next) => {
     const nextFn = next as () => Promise<unknown>;
     try {
+      const bridge = accounts.owner(sessionIdFromAssembleContext(req));
+      if (!bridge) return nextFn();
       return await bridge.answerQuestionRequest(req as never, nextFn as never);
     } catch (err) {
       // WeChat /rq cancels by rejecting the waiter; rethrow so the Host
@@ -271,7 +289,7 @@ if (typeof context.inject === "function") {
     // Cast through the bridge's structural surface — we never reference
     // the actual `@deepseek-ai/dsh-commands` types here, so zero runtime
     // dep is added.
-    bridge.attachCommands(commands as never);
+    accounts.attachCommands(commands as never);
     console.log("[dsh-wechat] 原生命令层已挂载 (/plan、/goal 等通过 ctx.commands 分发)");
   });
 } else {
@@ -313,7 +331,9 @@ if (typeof context.inject === "function") {
         order: 50,
         text: (context) => {
           const sessionId = sessionIdFromAssembleContext(context);
-          const source = sessionId ? bridge.surfaceSourceFor(sessionId) : undefined;
+          const bridge = accounts.owner(sessionId);
+          if (!bridge || !sessionId) return "";
+          const source = bridge.surfaceSourceFor(sessionId);
           const cfg = bridge.getConfig();
           return weChatSurfaceText({
             enabled: cfg.surfacePromptEnabled,
@@ -346,7 +366,44 @@ if (typeof context.inject === "function") {
       }>("webServer");
       if (!webServer) return;
 
-      // QR login page (standalone viewer; the settings page is the primary UI).
+      // Plugin routes live outside /api. Apply the same browser admission as
+      // DSH before returning QR codes, reading settings or accepting changes.
+      const admitted = (req: unknown, res: unknown) => {
+        const connection = context.get<{ requestRejection?: (req: unknown) => number | undefined }>("connection");
+        const rejected = connection?.requestRejection?.(req);
+        if (rejected) sendJson(res, rejected, { ok: false, message: "请从已登录的 DSH 设置页访问" });
+        return !rejected;
+      };
+      const selected = (req: unknown) => new URL((req as { url?: string }).url ?? "/", "http://localhost").searchParams.get("account") ?? "";
+      const action = (route: string, method: string, run: (req: unknown) => unknown) => {
+        webServer.register({ kind: "exact", path: "/wechat/api/" + route, handler: async (req, res) => {
+          if (!admitted(req, res)) return;
+          if ((req as { method?: string }).method !== method) return sendJson(res, 405, { ok: false, message: "请求方法无效" });
+          try { sendJson(res, 200, await run(req)); }
+          catch (error) { sendJson(res, 400, { ok: false, message: String(error) }); }
+        } });
+      };
+      action("accounts", "GET", () => ({ accounts: accounts.list(), pending: accounts.pendingLogin() }));
+      action("cancel-login", "POST", async req => { await accounts.cancelLogin(selected(req)); return { ok: true }; });
+      action("retry-login", "POST", async req => { await accounts.retryLogin(selected(req)); return { ok: true }; });
+      action("add", "POST", () => ({ id: accounts.add() }));
+      action("rename", "POST", async req => {
+        const { name } = await readJsonBody(req) as { name: string };
+        accounts.rename(selected(req), name);
+        return { ok: true };
+      });
+      action("default", "POST", async req => {
+        const { id } = await readJsonBody(req) as { id: string | null };
+        accounts.setDefault(id);
+        return { ok: true };
+      });
+      action("status", "GET", req => accounts.get(selected(req)).bridge.getStatus());
+      action("config", "POST", async req => ({ ok: true, ...await accounts.configure(selected(req), await readJsonBody(req) as Partial<EditableConfig>) }));
+      action("relogin", "POST", req => accounts.get(selected(req)).bridge.relogin());
+      action("logout", "POST", req => accounts.get(selected(req)).bridge.logout());
+      action("remove", "POST", async req => { await accounts.remove(selected(req)); return { ok: true }; });
+
+      // Standalone QR viewer can also be opened with ?account=<id>.
       webServer.register({
         kind: "exact",
         path: "/wechat/qr",
@@ -362,8 +419,11 @@ if (typeof context.inject === "function") {
       webServer.register({
         kind: "exact",
         path: "/wechat/api/qr-image",
-        handler: (_req, res) => {
-          const status = bridge.getStatus() as { qrUrl?: string };
+        handler: (req, res) => {
+          if (!admitted(req, res)) return;
+          const id = selected(req);
+          if (accounts.pendingLogin()?.id !== id && !accounts.list().some(r => r.id === id)) return sendJson(res, 404, {});
+          const status = accounts.get(id).bridge.getLoginState();
           const response = res as HttpResponse;
           if (!status.qrUrl) {
             response.statusCode = 404;
@@ -378,23 +438,6 @@ if (typeof context.inject === "function") {
           response.end(qrSvgFor(status.qrUrl));
         },
       });
-      // QR page poll endpoint (phase/qrUrl/botId/error).
-      webServer.register({
-        kind: "exact",
-        path: "/wechat/status",
-        handler: (_req, res) => {
-          sendJson(res, 200, bridge.getStatus());
-        },
-      });
-
-      // Settings-page API.
-      webServer.register({
-        kind: "exact",
-        path: "/wechat/api/status",
-        handler: (_req, res) => {
-          sendJson(res, 200, bridge.getStatus());
-        },
-      });
       webServer.register({
         kind: "exact",
         path: "/wechat/api/help",
@@ -407,86 +450,11 @@ if (typeof context.inject === "function") {
           sendJson(res, 200, { ok: true, text: formatHelp(), catalog: helpCatalog() });
         },
       });
-      webServer.register({
-        kind: "exact",
-        path: "/wechat/api/config",
-        handler: async (req, res) => {
-          try {
-            const patch = (await readJsonBody(req)) as Partial<EditableConfig>;
-            const stored = configStore.update(patch);
-            const result = await bridge.updateConfig(stored);
-            sendJson(res, 200, { ok: true, ...result });
-          } catch (err) {
-            sendJson(res, 400, { ok: false, message: String(err) });
-          }
-        },
-      });
-      webServer.register({
-        kind: "exact",
-        path: "/wechat/api/relogin",
-        handler: async (_req, res) => {
-          const result = await bridge.relogin();
-          sendJson(res, 200, { ok: result.ok, message: result.message });
-        },
-      });
-      webServer.register({
-        kind: "exact",
-        path: "/wechat/api/logout",
-        handler: async (_req, res) => {
-          const result = await bridge.logout();
-          sendJson(res, 200, { ok: result.ok, message: result.message });
-        },
-      });
-      // Per-user toggles (silent / crossSessionNotify) for the WebUI
-      webServer.register({
-        kind: "prefix",
-        path: "/wechat/api/user/",
-        handler: async (req, res) => {
-          try {
-            const httpReq = req as { url?: string; method?: string; path?: string };
-            const rawUrl = (httpReq.url ?? httpReq.path ?? "") as string;
-            const prefix = "/wechat/api/user/";
-            const after = rawUrl.startsWith(prefix) ? rawUrl.slice(prefix.length) : rawUrl.split("/").pop() ?? "";
-            const userId = decodeURIComponent(after.split("?")[0]!.split("#")[0]!.trim());
-            if (!userId) {
-              sendJson(res, 400, { ok: false, message: "缺少 userId" });
-              return;
-            }
-            const patch = (await readJsonBody(req)) as { silent?: boolean; crossSessionNotify?: string };
-            const normalized: { silent?: boolean; crossSessionNotify?: "inherit" | "on" | "off" } = {};
-            if (typeof patch.silent === "boolean") normalized.silent = patch.silent;
-            if (patch.crossSessionNotify === "on" || patch.crossSessionNotify === "off" || patch.crossSessionNotify === "inherit") {
-              normalized.crossSessionNotify = patch.crossSessionNotify;
-            }
-            const result = bridge.updateUserConfig(userId, normalized);
-            sendJson(res, result.ok ? 200 : 400, result);
-          } catch (err) {
-            sendJson(res, 400, { ok: false, message: String(err) });
-          }
-        },
-      });
-      webServer.register({
-        kind: "exact",
-        path: "/wechat/api/user",
-        handler: async (req, res) => {
-          try {
-            const patch = (await readJsonBody(req)) as { userId?: string; silent?: boolean; crossSessionNotify?: string };
-            const userId = typeof patch.userId === "string" ? patch.userId.trim() : "";
-            if (!userId) {
-              sendJson(res, 400, { ok: false, message: "缺少 userId" });
-              return;
-            }
-            const normalized: { silent?: boolean; crossSessionNotify?: "inherit" | "on" | "off" } = {};
-            if (typeof patch.silent === "boolean") normalized.silent = patch.silent;
-            if (patch.crossSessionNotify === "on" || patch.crossSessionNotify === "off" || patch.crossSessionNotify === "inherit") {
-              normalized.crossSessionNotify = patch.crossSessionNotify;
-            }
-            const result = bridge.updateUserConfig(userId, normalized);
-            sendJson(res, result.ok ? 200 : 400, result);
-          } catch (err) {
-            sendJson(res, 400, { ok: false, message: String(err) });
-          }
-        },
+      action("user", "POST", async req => {
+        const patch = await readJsonBody(req) as { userId: string; silent?: boolean; crossSessionNotify?: "inherit" | "on" | "off" };
+        const result = accounts.get(selected(req)).bridge.updateUserConfig(patch.userId, patch);
+        if (!result.ok) throw new Error(result.message);
+        return { ok: true, message: result.message };
       });
       // The port is chosen at listen time (3080 only when free), so print the
       // origin the server actually bound instead of a hardcoded guess. The
@@ -508,11 +476,11 @@ if (typeof context.inject === "function") {
   }
 
   // Start the bridge (token resume or QR login), stop on dispose.
-  void bridge.start().catch((err) => {
+  void accounts.start().catch((err) => {
     console.error(`[dsh-wechat] bridge start failed: ${String(err)}`);
   });
 
-  const stopBridge = (): Promise<void> => bridge.stop();
+  const stopBridge = (): Promise<void> => accounts.stop();
   // Park the teardown on the plugin's OWN fiber (`ctx.effect`) and only fall
   // back to the returned function. This host's cordis does not turn a
   // functional plugin's return value into a disposer, so returning it alone
@@ -609,7 +577,17 @@ const QR_PAGE = `<!DOCTYPE html>
 <script>
   async function poll() {
     try {
-      const res = await fetch('/wechat/status');
+      let id = new URLSearchParams(location.search).get('account');
+      if (!id) {
+        const list = await (await fetch('/wechat/api/accounts')).json();
+        if (list.pending) id = list.pending.id;
+        else if (list.accounts.length === 1) id = list.accounts[0].id;
+        else {
+          document.getElementById('state').textContent = '请在「设置 → WeChat」中选择要扫码的账号';
+          return;
+        }
+      }
+      const res = await fetch('/wechat/api/status?account=' + encodeURIComponent(id));
       const data = await res.json();
       const state = document.getElementById('state');
       const qr = document.getElementById('qr');
@@ -632,7 +610,7 @@ const QR_PAGE = `<!DOCTYPE html>
         state.textContent = data.qrUrl ? '请用微信扫描下方二维码' : '正在获取二维码…';
       }
       if (data.qrUrl) {
-        qr.src = '/wechat/api/qr-image?v=' + encodeURIComponent(data.qrUrl);
+        qr.src = '/wechat/api/qr-image?account=' + encodeURIComponent(id) + '&v=' + encodeURIComponent(data.qrUrl);
         qr.style.display = 'block';
       }
     } catch (e) {

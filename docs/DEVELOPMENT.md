@@ -37,7 +37,7 @@
   | 安全边界 | `allowRemotePermissionEscalation` / `allowAnyFilePath` / `maxOutgoingFileBytes` |
 
   展开状态记在浏览器 localStorage（`dsh-wechat/settings-open`），不进 `config.json`；存储不可用时退化为「能展开但不记忆」，不会报错。
-- **保存** — 底部 `保存配置` 一次提交全部字段；有改动未保存时按钮旁显示 `● 有未保存的修改`。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` / `finalOnlyIdleMs` / `finalOnlyCeilingMs` 仍可写 `~/.dsh-wechat/config.json` 或插件行 `config:`，设置页保存不会覆盖它们；`finalOnlyIdleMs` / `finalOnlyCeilingMs` 是极简模式的静默期与硬顶。网关参数变更会自动重启长轮询；存储于 `~/.dsh-wechat/config.json` 与 `state.json`
+- **保存** — 底部 `保存配置` 一次提交全部字段；有改动未保存时按钮旁显示 `● 有未保存的修改`。`baseUrl` / `cdnBaseUrl` / `botType` / `textChunkLimit` / `finalOnlyIdleMs` / `finalOnlyCeilingMs` 仍可写 账号目录中的 `config.json` 或插件行 `config:`，设置页保存不会覆盖它们；`finalOnlyIdleMs` / `finalOnlyCeilingMs` 是极简模式的静默期与硬顶。网关参数变更会自动重启长轮询；存储于 账号目录中的 `config.json` 与 `state.json`
 - **指令帮助** — 卡片标题行的 **指令帮助** 按钮展开一份说明书：顶部一句说明 → 搜索框 + 全部展开/收起 → 6 个按用途分的组（常用 / 会话与项目 / 模型与权限 / 输出节奏 / 引用与回看 / 待处理卡片）→ 23 条指令，每条一句简短说明 + 行尾 **?**。**?** 悬浮出前 2 条示例并提示「共 N 条示例，展开查看全部」；点整行（或直接点 ?）展开该指令的**全部**示例，每条示例可点击复制。展开状态记在 `dsh-wechat/help-open`，不进 `config.json`。同一份文案也渲染成微信 `/help`（见下一节），DSH 原生命令仍只在微信 `/help` 末尾按当前 profile 列出。文案要求**简单但不口语**：说清做什么，不写语气词与比喻
 - **已知限制** — 页面底部的告警盒，同样可折叠（默认收起），列出 iLink 的 10 条窗口、24 小时互动窗口，以及「出站语音气泡不可渲染」（见「已知边界」里的语音条目）
 
@@ -78,7 +78,9 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 
 ## 配置参考
 
-优先级：内置默认 ← 插件行 `config:` ← `~/.dsh-wechat/config.json`（设置页写入，覆盖前两者）。插件行可带 `config:`：
+默认在 DSH 主目录下的 `dsh-wechat/accounts.json` 记录账号和会话归属。下文的「账号目录」指 `<storageDir>/accounts/<账号 ID>/`。
+
+优先级：内置默认 ← 插件行 `config:` ← 账号目录中的 `config.json`（设置页写入，覆盖前两者）。插件行可带 `config:`：
 
 ```yaml
 # 例：追加到 profile 的 cordis.patch.yml
@@ -92,7 +94,7 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 | `baseUrl` | `https://ilinkai.weixin.qq.com` | iLink 网关 |
 | `cdnBaseUrl` | `https://novac2c.cdn.weixin.qq.com/c2c` | 媒体 CDN |
 | `botType` | `"3"` | iLink bot 类型 |
-| `storageDir` | `~/.dsh-wechat` | token/sync-buf/会话映射/临时文件 |
+| `storageDir` | `<DSH 主目录>/dsh-wechat` | 多账号存储根目录，各账号分别保存登录凭据、轮询进度、会话状态及临时文件 |
 | `cwd` | `process.cwd()` | 新会话工作目录 |
 | `textChunkLimit` | `4000` | 微信单条消息长度上限 |
 | `cardTimeoutMs` | `1800000` | 提问/权限卡软超时（30 分钟） |
@@ -315,14 +317,14 @@ DSH 桌面端把「插件 dispose 完成」当成优雅退出的唯一信号：�
 - `allowedUsers` 为空时是**现有行为**（首个给你发消息的人成为绑定对端），不是「拒绝所有人」——这样老部署升级后不会突然失联；要收紧就填名单，未列出的 id 会在去重/建会话/命令分发之前被拦下并记日志，绝不会得到回复。⚠️ **升级播种会改变这一状态**：`config.json` 里从未配置过该键、而 `state.json` 已有绑定用户时，启动会把该绑定用户写进名单（并在微信里提示一次）——这正是为了堵住「升级后第一个陌生人接管 bot」，但也意味着升级后**其他人**发消息会被忽略；要放开就在设置页清空该字段（显式存过 `[]` 后不会被再次播种）。
 - 打字合并（`mergeEnabled`）**默认关闭**：每条微信消息各自一轮，与旧版行为一致。开启后（`/merge on` 或设置页）窗口内的多条会合并成一轮，代价是每条消息多等一个静默窗口；它对语义的影响是「一轮里可能包含多条用户消息」，需要每条消息单独成轮时保持关闭或发 `/merge off`。图片/文件类消息是否参与由「图片/文件合并」（`mediaMergeEnabled`）单独决定：该开关关闭时，媒体到达会先把已输入的文字作为一轮冲刷出去，再自己作为一轮，因此一次「文字 + 图片」仍产生两轮；`..` 暂挂的批次仍受条数上限与 3 分钟强制放行约束，不会无限期等下去。
 - 图片/文件合并（`mediaMergeEnabled`）同样**默认关闭**。开启后只暂存**不带文字说明**的图片/文件/视频：同一条消息里既有图又有字时立即发送（它已经说明了意图，再等只会加延迟），语音（无转写）永远不参与。暂存**不写 `state.json`**，插件重启即丢（与打字合并缓冲、`/at` 暂存同一理由：一次「等一下」的意图不该跨越重启复活）；登出 / 重新扫码 / 换绑直接丢弃，且因为**下载推迟到真正投递时**，丢弃既不会留下临时文件，也不会为没人接收的附件花一次 CDN 请求。附件的等待上限取 `mediaHoldMs` 与 `mergeForcedReleaseMs` 中**更短**的那个（两者默认都是 3 分钟，所以默认就等于「一轮最多能被挂多久」）；slash 命令（`/status`、`/at` 等）不会冲刷暂存附件，唯一例外是 `/media off` 与设置页关掉该开关——那是「别再等我了」，不是「把图扔了」，所以会先发出再关闭。
-- 附件交付措辞（`mediaAtRefEnabled`）只决定**措辞**，不决定内容：两种方式都先存到 `~/.dsh-wechat/tempfile/`，再把**指针**交给模型。`路径`（默认）是「文件已保存到: 路径」的单行纯文本，不再附加「你可以使用这个路径…」的说明（那是引用提示词已经在说的事），任何宿主上都能正常阅读；`@引用`（需 `/media at` 开启）按宿主 `dsh-file-reference` 的 grammar 生成（Windows 反斜杠转 `/`，含空格写成 `@"…"`），由 `dsh-file-reference-local` 的 `FILE_REFERENCE_PROMPT` 要求模型自己 `read`，在 GUI 里是一个可点开的 chip，与拖文件完全一致（微信端 `/at f` 也走同一套拼写层）——代价是它依赖该插件被挂载，没挂载时气泡里只会是一行裸 `@C:/…`，这正是默认关闭的理由。**两种方式都不会把文件内容放进消息**：那既是「一个文件不该在聊天里出现两遍」的产品判断，也是一条硬边界——0.12 会把文本文件内容整段内联（且没有上限，一个 4 MB 的 `.log` 能直接撑爆上下文），0.13.0 删掉了那段代码，只剩这个措辞开关。路径含引号或控制字符时退回普通路径写法（不会产出会被截断成散文的 mention）。
+- 附件交付措辞（`mediaAtRefEnabled`）只决定**措辞**，不决定内容：两种方式都先存到 账号目录的 `tempfile/`，再把**指针**交给模型。`路径`（默认）是「文件已保存到: 路径」的单行纯文本，不再附加「你可以使用这个路径…」的说明（那是引用提示词已经在说的事），任何宿主上都能正常阅读；`@引用`（需 `/media at` 开启）按宿主 `dsh-file-reference` 的 grammar 生成（Windows 反斜杠转 `/`，含空格写成 `@"…"`），由 `dsh-file-reference-local` 的 `FILE_REFERENCE_PROMPT` 要求模型自己 `read`，在 GUI 里是一个可点开的 chip，与拖文件完全一致（微信端 `/at f` 也走同一套拼写层）——代价是它依赖该插件被挂载，没挂载时气泡里只会是一行裸 `@C:/…`，这正是默认关闭的理由。**两种方式都不会把文件内容放进消息**：那既是「一个文件不该在聊天里出现两遍」的产品判断，也是一条硬边界——0.12 会把文本文件内容整段内联（且没有上限，一个 4 MB 的 `.log` 能直接撑爆上下文），0.13.0 删掉了那段代码，只剩这个措辞开关。路径含引号或控制字符时退回普通路径写法（不会产出会被截断成散文的 mention）。
 - 记忆表有界：跨会话完成卡的正文预览（每会话一条，上限 64 个会话）、`/s list` 的最近活动时间（上限 512 个会话）、`/model` 覆盖（上限 128 个会话）、微信消息来源标记（上限 512 条 / 10 分钟 TTL）都是**缓存**——被淘汰只会让该行退回默认显示（创建时间、部署默认模型、按会话 id 显示标题），不会丢失队列里的任何消息。出站队列的内存边界仍是硬上限 400 条（`MAX_OUTBOUND_QUEUE_HARD`），重启后**完整**恢复（此前只恢复最后 100 条，第 101–400 条会被静默丢弃）。
 - 打字合并的缓冲区**不因 slash 命令而提前释放**：`/status`、`/next` 等命令照常立即执行，缓冲的文本仍由静默窗口 / 条数上限 / 强制放行三者之一释放（因此不会丢，只是可能晚几秒）。插件 dispose 会先把缓冲区投递再注销交互；登出 / 重新扫码 / 换绑则**丢弃**（身份变了，别人说的话不该发给下一个绑定者）。
 - `/at` 是**暂存式**：命令本身不改写当前消息，引用落在**下一条**投递给 agent 的消息上（打字合并开启时落在合并后的那一批），投递成功即清空；agent 创建/恢复失败时**不清空**，重发正文即可。暂存只在内存里（不写 `state.json`）：插件重启后失效——一条引用是「这一次」的意图，重启后大概率已不是同一件事，复活它只会把无关上下文塞进新的一轮。`/at` 命令本身不冲刷打字合并缓冲区（与 `/status` 等一致）。会话引用依赖宿主挂载 `dsh-session-reference`，未挂载时明确拒绝（否则 mention 会被当成普通文本转发，模型只看到一个 base64 串）；文件引用只是 `@路径` 文本，不需要任何服务即可生效，**不受工作区限制**：`@文件` 是交给模型的指针，不是 bridge 自己去读内容，宿主 `FILE_REFERENCE_PROMPT` 明确写了「绝对路径指代宿主机上的文件或目录」，能不能打开由 agent 自己的沙箱策略决定——这与 `send_wechat`（bridge 亲自读字节发出去）是两条不同的边界。路径两端的不可见格式字符（从资源管理器/浏览器复制路径常带 U+202A 等）会自动剥掉，中文输入法打出的弯引号 `“…”` 也接受。⚠️ 会话引用在**发送时**由宿主读取：若被引用的会话在这 10 分钟内被删除，宿主会以 `SESSION_REFERENCE_READ_FAILED` 终止该轮——这是宿主语义，微信端只能在 `/at` 阶段挡住「引用自己 / 超过 3 个 / 服务缺失」这三类可预见的失败。
-- `~/.dsh-wechat` 与其下文件（`auth/token.json`、`state.json`、`config.json`、`sync-buf.json`、`audit.jsonl`）以 `0700` / `0600` 创建。⚠️ **Windows 上 Node 忽略 mode 参数**（`chmod` 只能切只读位），实际保护来自 `%USERPROFILE%` 继承的 ACL（仅本人、`SYSTEM`、`Administrators` 可读）——这是依赖继承 ACL，不是本插件自己设的权限。审计文件按 1 MiB 轮转为 `audit.jsonl.1`（只保留一份历史），轮转会记一行日志。
+- 账号目录与其下文件（`auth/token.json`、`state.json`、`config.json`、`sync-buf.json`、`audit.jsonl`）以 `0700` / `0600` 创建。⚠️ **Windows 上 Node 忽略 mode 参数**（`chmod` 只能切只读位），实际保护来自 `%USERPROFILE%` 继承的 ACL（仅本人、`SYSTEM`、`Administrators` 可读）——这是依赖继承 ACL，不是本插件自己设的权限。审计文件按 1 MiB 轮转为 `audit.jsonl.1`（只保留一份历史），轮转会记一行日志。
 - 审批/提问卡挂在 Host 的 `approval/request` 与 `user-questions/request` waterfall 上，与 GUI 竞速；无微信 peer 时立即 `next()`，软超时只撤微信卡、不替用户决策。微信先答时会 abort 传给 GUI 的 `request.signal`（不碰 turn 的 `exec.signal`），Web composer 卡随 Gateway `cancel` 帧收起。DSH 重启后未决卡片随 turn 消失（上游已知限制）。
 - 微信回答卡片后的回执**每条占一次微信发送额度**（10 条/窗口）。一次 `P1=1 P2=2` 会发 2 条回执；额度用尽时回执与其他出站消息一样进入 `/next` FIFO 缓存，不会被丢弃。`P{n}` 是整批处理开始时快照的编号（卡片在结算时即被摘除，现算取不到编号、回执会退化成不带编号的文案）。跨会话卡的 `❗来自其他会话` 只是正文提示标记，不影响编号或回复语法。
-- `send_wechat` 工具对所有 agent 可见；任何会话的 agent 都能调用——绑定会话发送到绑定用户，未绑定会话回退到首个已知微信用户（单用户部署默认行为）。单用户模式下，工具推送与 assistant 回复共享唯一一份微信 10 条/窗口限流预算：超限或发送失败自动进入 `/next` FIFO 缓存队列。计数和队列持久化到 `state.json`，普通 DSH 更新或重启后继续沿用；下一条微信入站会重置窗口并自动补发。微信真实限流响应（HTTP 200 + `ret: -2` / `prepare failed`）也会被识别并缓存，不再误判成功。
+- `send_wechat` 工具对所有 agent 可见；通过 `list_accounts` 查看已连接账号，通过 `recipients` 按备注名或 ID 向一个或多个账号发送。省略接收账号时，微信发起的请求回到来源账号，电脑端使用设置中的默认接收账号；未设默认时工具返回可选账号。每个账号分别维护自己的微信 10 条/窗口限流预算，工具推送和助手回复共用该账号的额度：超限或发送失败自动进入 `/next` FIFO 缓存队列。计数和队列持久化到 `state.json`，普通 DSH 更新或重启后继续沿用；下一条微信入站会重置窗口并自动补发。微信真实限流响应（HTTP 200 + `ret: -2` / `prepare failed`）也会被识别并缓存，不再误判成功。
 - **出站语音（`voice_item` / `type=3`）在 iLink bot 通道不可渲染**：`sendMediaMessage` 的 VOICE 分支能上传成功、服务端返回 `ret: 0`、审计也记成 `sent`，但微信客户端把整条消息丢弃——没有气泡、没有占位、也没有红色感叹号。issue #17 用 8 组 `voice_item` 字段组合（含把微信自己发出的语音字节原样回发、`message_type: USER`）逐一验证过，结论是 bot 消息在客户端侧没有 type=3 的渲染器，语音在这条通道上是**入站专用**（入站语音转文字）。所以 `mediaTypeForFile()` 只映射图片与视频，**不要**把 `.silk` 或音频扩展名加进 VOICE 分支：那不会报错，只会静默丢消息；要发音频就走 `FILE`，mp3 在微信里点开能正常播放。
 - `/preset switch` 是**会话级**的：它走宿主自己的 `agentPresets.select`（与 GUI 的预设选择器同一条调用），既重绑当前 Agent 的组成，也追加持久化事件 `agent-preset/selected`，所以重启/恢复后仍是新预设，`/s list` 与 `/status` 立刻显示新值。DSH 只允许在会话的第一条消息之前改预设，因此已开始的会话会被**明确拒绝**并提示 `/s new`，而不是把它悄悄记成「下个会话生效」。判定用的就是宿主自己的谓词：`sessionProjections.stateOf(session, "turnBoundary")`（`openTurnStartSeq !== null || lastTurn > 0`），旧宿主没有 `stateOf` 时回落到事件日志里是否有 `turn/start` / `user/message` / `assistant/message`。
 - `/preset default` 是**部署级**的：写入 DSH 设置文档——按设置服务公布的命名空间写 `agent-preset-registry.selectedDefault`（保留旧版 `agent-presets.default` 回退），GUI 设置页与微信双端读写同一事实源，只影响此后新建的会话；裸 `/preset default` 只读不回写。写入被拒绝时明确提示「默认 Preset 切换失败，默认 Preset 未更改」，不再误报成功。**一次聊天消息不会改变全局默认以外的任何东西**：`switch` 绝不写设置文档，`default` 绝不改当前会话。

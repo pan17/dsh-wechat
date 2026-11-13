@@ -806,7 +806,7 @@ export class DshOps {
       const runtime = await this.sessionLog();
       if (runtime) {
         try {
-          const hint = runtime.readSessionUsedHint(cwd, sessionId, undefined);
+          const hint = runtime.readSessionUsedHint(cwd, sessionId, this.get<{ home?: string }>("homePaths")?.home);
           if (hint.status === "used") {
             return { ok: true, lastUserMessageTime: hint.time ?? header?.createdAt ?? 1 };
           }
@@ -858,7 +858,7 @@ export class DshOps {
       try {
         // `undefined` here means "no prompt in the cheap tail" (or blank),
         // not "try the full inspect". `/s list` falls back to createdAt.
-        return runtime.readSessionRecency(cwd, sessionId, undefined);
+        return runtime.readSessionRecency(cwd, sessionId, this.get<{ home?: string }>("homePaths")?.home);
       } catch {
         return undefined;
       }
@@ -895,7 +895,7 @@ export class DshOps {
     const runtime = await this.sessionLog();
     if (!runtime) return hint;
     try {
-      const facts = runtime.readSessionListFacts(resolvedCwd, sessionId, undefined);
+      const facts = runtime.readSessionListFacts(resolvedCwd, sessionId, this.get<{ home?: string }>("homePaths")?.home);
       return {
         ...hint,
         ...facts,

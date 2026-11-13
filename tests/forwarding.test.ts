@@ -92,6 +92,42 @@ describe("WeChat → agent forwarding chain", () => {
     expect((sent.content as Array<{ type: string; text?: string }>)[0]!.text).toBe("帮我看看这个项目");
   });
 
+  it("an archived session warns its WeChat sender while another account continues", async () => {
+    const archived = new Set<string>(["archived"]);
+    const second = makeMockAgent("active");
+    const other = makeBridge(second);
+    const bind = (instance: WeChatDSHBridge, userId: string, sessionId: string) => {
+      const internal = instance as unknown as {
+        ops: { archivedSessionIds(): readonly string[] };
+        state: { ensureUser(id: string, cwd: string): unknown; update(id: string, patch: { sessionId: string }): void };
+        handleMessage(message: unknown): Promise<void>;
+      };
+      vi.spyOn(internal.ops, "archivedSessionIds").mockImplementation(() => [...archived]);
+      internal.state.ensureUser(userId, "/work");
+      internal.state.update(userId, { sessionId });
+      return (text: string) => internal.handleMessage({ ...wechatTextMessage(text), from_user_id: userId });
+    };
+    const sendFirst = bind(bridge, "u1", "archived");
+    const sendSecond = bind(other, "u2", "active");
+    await Promise.all([sendFirst("第一条"), sendSecond("第二条")]);
+    expect(mock.received).toHaveLength(0);
+    expect(second.received).toHaveLength(1);
+    expect(sendTextMessage.mock.calls.map(call => call.slice(0, 2))).toEqual([
+      ["u1", expect.stringContaining("/s new")],
+    ]);
+
+    // An archive between enqueue and the host pre-step must also return a
+    // receipt, once, to the owner of the rejected turn.
+    archived.add("active");
+    const blocked = { type: "turn/end", seq: 7, data: { reason: { kind: "blocked" } } };
+    other.handleSessionEvent("active", blocked);
+    other.handleSessionEvent("active", blocked);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(sendTextMessage.mock.calls.slice(1).map(call => call.slice(0, 2))).toEqual([
+      ["u2", expect.stringContaining("已归档")],
+    ]);
+  });
+
   it("assistant/message event is forwarded to WeChat via sendTextMessage", async () => {
     // Register the user binding the way handleMessage does.
     const anyBridge = bridge as unknown as {

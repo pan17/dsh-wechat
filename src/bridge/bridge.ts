@@ -145,6 +145,7 @@ import {
 
 /** WeChat gateway continuous-message limit per user interaction window. */
 const MSG_LIMIT_MAX = 10;
+const ARCHIVED_SESSION_REPLY = "当前微信绑定的 DSH 会话已归档，无法继续回复。可在 DSH 中取消归档，或在这里发 /s new 开始新会话，然后重发原消息。";
 const MSG_LIMIT_WARN = 7;
 /**
  * Code points of an assistant message quoted in a cross-session notice.
@@ -220,6 +221,13 @@ interface ModelOverride {
   provider: string;
   model: string;
   reasoningEffort?: string;
+}
+
+export interface AccountBinding {
+  claim(sessionId: string): boolean;
+  foreign(sessionId: string): boolean;
+  acceptIdentity(token: TokenData, persist?: () => void): void;
+  recordSource(sessionId: string, source: "wechat" | "gui"): void;
 }
 
 export interface LoginState {
@@ -827,6 +835,7 @@ export class WeChatDSHBridge {
     config: WeChatDSHConfig,
     commandsCtx?: NativeCommandsSurface | null,
     configStore?: ConfigStore,
+    private readonly account?: AccountBinding,
   ) {
     this.ctx = ctx;
     this.config = config;
@@ -834,9 +843,9 @@ export class WeChatDSHBridge {
     this.state = new StateStore(config.storageDir);
     this.audit = new AuditLog(config.storageDir, (message) => this.log(message));
     this.migrateWorkStepsFromUsers();
-    this.seedAllowlistFromPeer();
+    if (!account) this.seedAllowlistFromPeer();
     this.restoreOutboundState();
-    this.agents = new AgentStore(ctx);
+    this.agents = new AgentStore(ctx, account?.claim);
     this.ops = new DshOps(ctx);
     if (commandsCtx) this.commandsCtx = commandsCtx;
   }
@@ -1201,6 +1210,21 @@ export class WeChatDSHBridge {
     return this.config;
   }
 
+  isConnected(): boolean {
+    return this.loginState.phase === "logged-in" && this.monitorRunning && !this.tokenInvalid && !this.tokenGiveUp;
+  }
+
+  isLoggedOut(): boolean {
+    return this.loginState.phase === "idle" && !this.token && !this.loginAbort;
+  }
+
+  connectionStatus(): string {
+    if (this.tokenGiveUp) return "需重新扫码";
+    if (this.tokenInvalid) return "连接恢复中";
+    if (this.loginState.phase === "logged-in") return this.monitorRunning ? "已连接" : "未连接";
+    return { idle: "已退出", "waiting-qr": "待扫码", scaned: "待确认", failed: "登录失败" }[this.loginState.phase];
+  }
+
   /** Full status snapshot for the settings page / QR page. */
   getStatus(): Record<string, unknown> {
     const editable: Record<string, unknown> = {};
@@ -1209,7 +1233,10 @@ export class WeChatDSHBridge {
     }
     return {
       ...this.loginState,
+      canRemove: this.isLoggedOut(),
       monitorRunning: this.monitorRunning,
+      connection: this.connectionStatus(),
+      queued: this.outboundCache.length,
       userCount: this.state.all().length,
       users: this.state.all().map((u) => ({
         userId: u.userId,
@@ -1507,8 +1534,10 @@ export class WeChatDSHBridge {
   }
 
   /** Start the bridge: resume with a stored token or begin QR login. */
-  async start(): Promise<void> {
-    this.token = loadToken(this.config.storageDir);
+  async start(scanIfMissing = true): Promise<void> {
+    const storedToken = loadToken(this.config.storageDir);
+    if (storedToken) this.account?.acceptIdentity(storedToken);
+    this.token = storedToken;
     this.tokenInvalid = false;
     this.tokenGiveUp = false;
     probeTeardown(this.config.storageDir, "start", { loggedIn: this.token !== null });
@@ -1518,15 +1547,18 @@ export class WeChatDSHBridge {
       await this.startMonitor();
     } else {
       // No bot token: the next QR login may be a different WeChat account.
-      this.resetPeerBinding("start-without-token");
-      void this.startLoginFlow();
+      if (!this.account) this.resetPeerBinding("start-without-token");
+      if (scanIfMissing) void this.startLoginFlow();
     }
   }
 
   /** First persisted user is the single peer (legacy multi-user files keep only the first). */
   private lockPeerFromState(): void {
     const first = this.state.all()[0];
-    if (first) this.peerUserId = first.userId;
+    if (first) {
+      this.peerUserId = first.userId;
+      this.wireContextToken = first.contextToken ?? null;
+    }
   }
 
   /**
@@ -1621,7 +1653,9 @@ export class WeChatDSHBridge {
    */
   async reconnect(): Promise<{ ok: boolean; message: string }> {
     this.stopIlink("reconnect");
-    this.token = loadToken(this.config.storageDir);
+    const storedToken = loadToken(this.config.storageDir);
+    if (storedToken) this.account?.acceptIdentity(storedToken);
+    this.token = storedToken;
     this.tokenInvalid = false;
     this.tokenGiveUp = false;
     if (this.token) {
@@ -1630,7 +1664,7 @@ export class WeChatDSHBridge {
       await this.startMonitor();
       return { ok: true, message: `已重连 (Bot: ${this.token.accountId})` };
     }
-    this.resetPeerBinding("reconnect-without-token");
+    if (!this.account) this.resetPeerBinding("reconnect-without-token");
     void this.startLoginFlow();
     return { ok: true, message: "未找到登录令牌，已开始扫码登录" };
   }
@@ -1689,7 +1723,14 @@ export class WeChatDSHBridge {
     this.dropAllPendingRefs();
     this.discardPendingFinal();
     try {
-      this.state.clearUsers();
+      if (this.account) {
+        // An account slot can only reauthenticate its original identity. Keep
+        // chat bindings, but credentials and reply context belong to this login.
+        const peer = this.state.all()[0];
+        if (peer) this.state.update(peer.userId, { contextToken: undefined });
+      } else {
+        this.state.clearUsers();
+      }
     } catch (err) {
       this.log(`failed to clear persisted users on ${reason}: ${String(err)}`);
     }
@@ -1761,15 +1802,20 @@ export class WeChatDSHBridge {
         botType: this.config.botType,
         storageDir: this.config.storageDir,
         abortSignal: abort.signal,
+        acceptIdentity: this.account?.acceptIdentity,
+        scanned: () => { if (!abort.signal.aborted) this.loginState = { ...this.loginState, phase: "scaned" }; },
         log: (msg) => console.log(`[dsh-wechat] ${msg}`),
         renderQrUrl: (url) => {
+          if (abort.signal.aborted) return;
           this.loginState = { ...this.loginState, phase: "waiting-qr", qrUrl: url };
           // Always log the URL: the web page at /wechat/qr is the primary
           // viewer, but a terminal user can open the link directly.
           console.log(`[dsh-wechat] QR URL: ${url}`);
         },
       });
+      if (abort.signal.aborted) return;
       this.token = token;
+      if (this.account) this.lockPeerFromState();
       this.tokenInvalid = false;
       this.tokenGiveUp = false;
       this.loginState = { phase: "logged-in", botId: token.accountId };
@@ -1778,7 +1824,7 @@ export class WeChatDSHBridge {
       // A cancelled flow is a normal shutdown / re-login, not a failure: the
       // page must not flash "登录失败" because the app is quitting.
       if (abort.signal.aborted) {
-        this.loginState = { phase: "idle" };
+        if (!this.loginAbort || this.loginAbort === abort) this.loginState = { phase: "idle" };
         return;
       }
       this.loginState = { phase: "failed", error: String(err) };
@@ -1972,6 +2018,7 @@ export class WeChatDSHBridge {
       });
       return;
     }
+    if (this.account && this.token?.userId && this.token.userId !== msg.from_user_id) return;
     if (this.peerUserId && this.peerUserId !== msg.from_user_id) return;
     const key = this.inboundKey(msg);
     const now = Date.now();
@@ -2017,6 +2064,9 @@ export class WeChatDSHBridge {
     this.cacheNoticeSent = false;
 
     const user = this.ensureBoundUser(userId);
+    if (this.wireContextToken && user.contextToken !== this.wireContextToken) {
+      this.state.update(userId, { contextToken: this.wireContextToken });
+    }
     this.persistOutboundState(userId);
     // S3 one-time notice: the allowlist was seeded on upgrade, and the peer
     // should learn about it exactly once (see `notifyAllowlistSeed`).
@@ -2475,9 +2525,15 @@ export class WeChatDSHBridge {
     // message's text blocks by joining them with an EMPTY string, and the
     // `@文件` grammar only fires at a whitespace boundary — see
     // `MENTION_BLOCK_BREAK` in `at-refs.ts`.
+    if (staged?.sessions.some((ref) => this.account?.foreign(ref.sessionId))) {
+      this.dropPendingRefs(user.userId);
+      await this.sendReply(user.userId, "引用的会话已归属其他账号，请重新发送消息。");
+      return;
+    }
     const mentionBlock = staged ? buildMentionBlock(stagedRefList(staged)) : undefined;
     if (mentionBlock) blocks.push({ type: "text", text: mentionBlock });
     this.markSessionSource(user.sessionId, "wechat");
+    if (agent.status !== "running") this.account?.recordSource(user.sessionId, "wechat");
     // Busy-time delivery follows the DSH `ui-conversation.busyEnter` setting
     // (the GUI's 「繁忙时 Enter 键行为」 row): while the agent is running,
     // `queue` keeps the historical follow-up-turn behavior and `steer`
@@ -2595,6 +2651,10 @@ export class WeChatDSHBridge {
    *   - voice / anything else → never held.
    */
   private async enqueueInbound(user: UserState, msg: WeixinMessage): Promise<void> {
+    if (this.ops.archivedSessionIds().includes(user.sessionId)) {
+      await this.sendReply(user.userId, ARCHIVED_SESSION_REPLY);
+      return;
+    }
     const text = extractText(msg.item_list);
     const items = msg.item_list ?? [];
     const hasItemMedia = items.some((item) => item.type !== undefined && item.type !== MessageItemType.TEXT);
@@ -2996,6 +3056,7 @@ export class WeChatDSHBridge {
         // so it only corrects sessions whose splice event was missed).
         const id = typeof data.id === "string" ? data.id : undefined;
         const isWechatEcho = id !== undefined && this.wechatMessageIds.has(id);
+        this.account?.recordSource(sessionId, isWechatEcho ? "wechat" : "gui");
         if (isWechatEcho) {
           this.markSessionSource(sessionId, "wechat");
           this.wechatMessageIds.delete(id);
@@ -3039,6 +3100,23 @@ export class WeChatDSHBridge {
     }
 
     const user = this.userForAgent(sessionId);
+    // The host can reject a queued turn if the session was archived after
+    // enqueue. A blocked turn has no assistant message or agent/error event.
+    if (event.type === "turn/end" && (event.data as { reason?: { kind?: string } })?.reason?.kind === "blocked") {
+      this.clearSessionOutput(sessionId);
+      this.dropPendingFinal(sessionId);
+      if (user) {
+        this.endTyping(user.userId, "turn-end");
+        this.clearCrossSessionTurnNotified(user.userId, sessionId);
+        if (this.surfaceSourceFor(sessionId) === "wechat") {
+          const message = this.ops.archivedSessionIds().includes(sessionId)
+            ? ARCHIVED_SESSION_REPLY
+            : "DSH 阻止了本轮继续执行。请在 DSH 中查看当前会话，再重发消息。";
+          this.pushOutput(user.userId, message);
+        }
+      }
+      return;
+    }
     if (!user) {
       this.clearSessionOutput(sessionId);
       if (event.type === "turn/end") {
@@ -3905,6 +3983,8 @@ export class WeChatDSHBridge {
   }
 
   private async resolveCrossSessionRecipients(sessionId: string): Promise<UserState[]> {
+    // With an account coordinator the host already checked durable session ownership.
+    if (this.account) return this.state.all();
     const record = await this.ops.findSessionRecord(sessionId);
     if (!record) return [];
     const recipients: UserState[] = [];
@@ -4970,7 +5050,7 @@ export class WeChatDSHBridge {
     // Prefer the workspace's newest non-archived candidate session.
     const ws = this.ops.listWorkspaces().find((w) => w.path === workspacePath);
     const archived = new Set(this.ops.archivedSessionIds());
-    const candidate = ws?.sessionIds.find((id) => !archived.has(id));
+    const candidate = ws?.sessionIds.find((id) => !archived.has(id) && (!this.account || this.account.claim(id)));
     if (candidate) {
       user.sessionId = candidate;
     }
@@ -5145,11 +5225,15 @@ export class WeChatDSHBridge {
         // One log fold per displayed row (title + live preset). A second
         // `/s list` is a stat: session-log.cjs caches by (path, size, mtime).
         const [facts, presets] = await Promise.all([
-          Promise.all(recent.map((r) => this.ops.readSessionListFacts(r.header.id, r.header.cwd, r.header))),
+          Promise.all(recent.map((r) => this.account?.foreign(r.header.id) ? undefined : this.ops.readSessionListFacts(r.header.id, r.header.cwd, r.header))),
           this.ops.listPresets(),
         ]);
         for (let i = 0; i < recent.length; i++) {
           const record = recent[i]!;
+          if (this.account?.foreign(record.header.id)) {
+            lines.push(`${i + 1}. 🔒 其他微信账号的会话（不能切换）`);
+            continue;
+          }
           const row = facts[i];
           const marker = record.header.id === user.sessionId ? " ◀ 当前" : "";
           const pin = pinnedIds.has(record.header.id) ? "📌 " : "";
@@ -5199,6 +5283,10 @@ export class WeChatDSHBridge {
           return;
         }
         const record = recent[index - 1]!;
+        if (this.account && !this.account.claim(record.header.id)) {
+          await this.sendReply(userId, "该会话已归属其他微信账号，不能切换。仍在原会话。");
+          return;
+        }
         this.lastSessionListByUser.delete(user.userId);
         this.clearSessionOutput(user.sessionId);
         user.sessionId = record.header.id;
@@ -5240,7 +5328,7 @@ export class WeChatDSHBridge {
         // when none exists create a fresh one. A corrupt / unreadable log is
         // NOT blank — staying on it would lock the user out of every later
         // message (resume fails, binding never changes).
-        if (user.sessionId) {
+        if (user.sessionId && !this.ops.archivedSessionIds().includes(user.sessionId)) {
           const current = await this.ops.inspectSessionActivity(user.sessionId, user.cwd);
           if (current.ok && current.lastUserMessageTime === undefined) {
             const agent = this.agents.get(user);
@@ -5409,6 +5497,10 @@ export class WeChatDSHBridge {
       return;
     }
     const childId = outcome.sessionId;
+    if (this.account && !this.account.claim(childId)) {
+      await this.sendReply(userId, "分叉会话已归属其他微信账号，不能切换。");
+      return;
+    }
     if (sourceTitle) {
       // Cosmetic only: a rename failure leaves a usable child with an
       // inherited title, which is not worth failing the fork over.
@@ -5489,6 +5581,11 @@ export class WeChatDSHBridge {
         return;
       }
       targetId = recent[index - 1]!.header.id;
+    }
+
+    if (this.account?.foreign(targetId)) {
+      await this.sendReply(userId, "该会话已归属其他微信账号，不能修改置顶状态。");
+      return;
     }
 
     // A host without the pin API has no meaningful pin set: reading it would
@@ -5627,12 +5724,12 @@ export class WeChatDSHBridge {
         const recorded = r.header.cwd;
         return typeof recorded === "string" && recorded.length > 0
           && resolved.get(recorded) === target
-          && r.header.id !== excludeId;
+          && r.header.id !== excludeId && !this.account?.foreign(r.header.id);
       })
       .sort((a, b) => b.header.createdAt - a.header.createdAt);
     for (const record of candidates) {
       const activity = await this.ops.inspectSessionActivity(record.header.id, record.header.cwd, record.header);
-      if (activity.ok && activity.lastUserMessageTime === undefined) return record.header.id;
+      if (activity.ok && activity.lastUserMessageTime === undefined && (!this.account || this.account.claim(record.header.id))) return record.header.id;
     }
     return undefined;
   }
@@ -6143,6 +6240,10 @@ export class WeChatDSHBridge {
       return;
     }
     const sessionId = resolved.sessionId;
+    if (this.account?.foreign(sessionId)) {
+      await this.sendReply(userId, "该会话已归属其他微信账号，不能引用。");
+      return;
+    }
     if (user.sessionId && sessionId === user.sessionId) {
       await this.sendReply(
         userId,
@@ -6297,7 +6398,7 @@ export class WeChatDSHBridge {
     if (!resolver || !agent) return undefined;
     try {
       const candidates = await resolver.listCandidates(agent, target, 10);
-      return candidates.map((candidate) => ({
+      return candidates.filter((candidate) => !this.account?.foreign(candidate.sessionId)).map((candidate) => ({
         sessionId: candidate.sessionId,
         label: candidate.displayTitle ?? candidate.label,
         ...(candidate.cwd ? { cwd: candidate.cwd } : {}),
@@ -6313,6 +6414,7 @@ export class WeChatDSHBridge {
     rows: SessionRecord[],
     target: string,
   ): Promise<Array<SessionRecord & { title?: string }>> {
+    rows = rows.filter((row) => !this.account?.foreign(row.header.id));
     const needle = target.toLocaleLowerCase();
     const facts = await Promise.all(
       rows.map((record) => this.ops.readSessionTitle(record.header.id, record.header.cwd, record.header)),
@@ -6513,10 +6615,9 @@ export class WeChatDSHBridge {
    * allows). Always `/`-separated so a mention never depends on the host OS.
    */
   private async relativeRefPath(cwd: string, absolute: string): Promise<string> {
-    const canonical = await this.canonicalizePaths([cwd]);
-    const root = canonical.get(cwd) ?? path.resolve(cwd);
-    if (!isPathInside(root, absolute)) return absolute.split(path.sep).join("/");
-    const rel = path.relative(root, absolute);
+    const [root, target] = await Promise.all([canonicalPath(cwd), canonicalPath(absolute)]);
+    if (!isPathInside(root, target)) return absolute.split(path.sep).join("/");
+    const rel = path.relative(root, target);
     return rel === "" ? "." : rel.split(path.sep).join("/");
   }
 
@@ -7609,7 +7710,7 @@ export class WeChatDSHBridge {
    * @returns `undefined` when the file may be sent, else the refusal message
    *   the tool returns verbatim.
    */
-  private async guardOutgoingFile(senderAgentId: string, filePath: string): Promise<string | undefined> {
+  async guardOutgoingFile(senderAgentId: string, filePath: string): Promise<string | undefined> {
     let stat: fs.Stats;
     try {
       stat = await fs.promises.stat(filePath);
@@ -7658,7 +7759,7 @@ export class WeChatDSHBridge {
    * check happens against the CALLER, not against the recipient fallback, so
    * an unbound session cannot borrow another session's roots.
    */
-  async handleSendWeChat(agentId: string, args: { text?: string; file_path?: string }): Promise<{ ok: boolean; message: string }> {
+  async handleSendWeChat(agentId: string, args: { text?: string; file_path?: string }): Promise<{ ok: boolean; message: string; sent?: number; queued?: number }> {
     const user = this.resolveUserForAgent(agentId);
     if (!user) {
       return { ok: false, message: "no WeChat user has interacted yet; a WeChat message must arrive before send_wechat can be used" };
@@ -7731,11 +7832,11 @@ export class WeChatDSHBridge {
         if (size !== undefined && size > max) {
           return { ok: false, message: `file too large: ${filePath} is ${size} bytes (limit ${max}; raise maxOutgoingFileBytes in the plugin settings)` };
         }
-        return { ok: false, message: `file not found: ${filePath}` };
+        return { ok: false, message: size === undefined ? `file not found: ${filePath}` : `WeChat could not send ${fileName}` };
       }
       return outcome === "sent"
-        ? { ok: true, message: `sent ${kind} ${fileName}` }
-        : { ok: true, message: this.tokenInvalid
+        ? { ok: true, sent: 1, queued: 0, message: `sent ${kind} ${fileName}` }
+        : { ok: true, sent: 0, queued: 1, message: this.tokenInvalid
           ? `queued ${kind} ${fileName}; WeChat session timed out, will send after recover`
           : `queued ${kind} ${fileName}; delivery deferred by WeChat rate limiting, the user can flush with /next` };
     }
@@ -7750,12 +7851,12 @@ export class WeChatDSHBridge {
         } else if (outcome === "cached") {
           queued++;
         } else {
-          return { ok: false, message: this.tokenGiveUp ? "WeChat bot token is invalid; re-scan the QR code" : "failed to send WeChat message" };
+          return { ok: false, sent, queued, message: this.tokenGiveUp ? "WeChat bot token is invalid; re-scan the QR code" : "failed to send WeChat message" };
         }
       }
       return queued === 0
-        ? { ok: true, message: `sent ${sent} message(s)` }
-        : { ok: true, message: this.tokenInvalid
+        ? { ok: true, sent, queued, message: `sent ${sent} message(s)` }
+        : { ok: true, sent, queued, message: this.tokenInvalid
           ? `sent ${sent} message(s), queued ${queued} (session timeout; will send after recover)`
           : `sent ${sent} message(s), queued ${queued} (WeChat rate limiting); the user can flush with /next` };
     }

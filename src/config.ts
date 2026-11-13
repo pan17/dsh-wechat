@@ -3,7 +3,7 @@
  */
 
 import path from "node:path";
-import os from "node:os";
+import sessionLog from "./dsh/session-log.cjs";
 
 export interface WeChatDSHConfig {
   /** WeChat iLink gateway base URL. */
@@ -288,8 +288,8 @@ export const LEGACY_SURFACE_PROMPTS: readonly string[] = [
   "你正在通过微信(WeChat)与用户聊天。回复会发送到微信，请使用适合微信阅读的格式（纯文本、适度使用 emoji、避免过长的表格）。",
 ];
 
-export function defaultStorageDir(): string {
-  return path.join(os.homedir(), ".dsh-wechat");
+export function defaultStorageDir(home?: string): string {
+  return path.join(sessionLog.resolveDshHome(home), "dsh-wechat");
 }
 
 export function defaultConfig(): WeChatDSHConfig {
