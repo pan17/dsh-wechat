@@ -109,6 +109,19 @@ window.__ModuleLoader__.load({
 .wx_select_option:hover,.wx_select_option:focus-visible{background:rgba(128,128,128,.12)}
 .wx_select_option:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#1976d2);outline-offset:-2px}
 .wx_select_option.selected{font-weight:600}
+.wx_account_fields .wx_setting_row{min-height:36px}
+.wx_account_fields .wx_select,.wx_alias_edit{width:min(100%,248px);min-width:0;box-sizing:border-box}
+.wx_account_fields .wx_select_btn{width:100%;min-height:34px;text-align:left}
+.wx_account_fields .wx_select_btn>span:first-child,.wx_account_fields .wx_select_option>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wx_account_fields .wx_select_menu{min-width:100%;box-sizing:border-box;max-height:220px;overflow:auto}
+.wx_alias_edit{display:flex;align-items:center;gap:6px}
+.wx_alias_edit input{flex:1;min-width:0;box-sizing:border-box;height:34px;padding:6px 10px;font:inherit;font-size:12px;color:inherit;border:1px solid rgba(128,128,128,.32);border-radius:8px;background:transparent}
+.wx_alias_edit input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#1976d2);outline-offset:1px}
+.wx_alias_edit button,.wx_account_fields .wx_select_chevron{flex-shrink:0}
+.wx_pending_login{flex-direction:row;align-items:center;gap:16px;flex-wrap:wrap}
+.wx_pending_login img{width:132px;height:132px;padding:6px;background:white;border-radius:8px}
+.wx_pending_body{display:flex;flex-direction:column;gap:10px}
+@media(max-width:560px){.wx_account_fields .wx_select,.wx_alias_edit{width:100%}}
 .wx_select_check{flex:0 0 auto;font-size:12px;color:var(--dsw-alias-label-secondary,#888)}
 .wx_sub{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:10px;background:rgba(128,128,128,.06);border:1px solid rgba(128,128,128,.16)}
 .wx_sub_off{font-size:12px;color:var(--dsw-alias-label-secondary,#888)}
@@ -220,6 +233,7 @@ window.__ModuleLoader__.load({
 		}
 		function placeHelpFloat(trigger, text) {
 			removeHelpFloat();
+			if (!text) return;
 			const float = document.createElement("div");
 			float.className = "wx_help_float";
 			float.setAttribute("role", "tooltip");
@@ -508,11 +522,11 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * The 「工作步骤展示」 dropdown. A native select cannot render the
+		 * Shared settings dropdown. A native select cannot render the
 		 * checkmark the DSH settings row uses, so this is a small listbox with
 		 * click-outside/Escape handling and the usual ARIA attributes.
 		 */
-		function WorkStepsSelect(props) {
+		function SettingsSelect(props) {
 			const [open, setOpen] = react.useState(false);
 			const rootRef = react.useRef(null);
 			const triggerRef = react.useRef(null);
@@ -555,20 +569,21 @@ window.__ModuleLoader__.load({
 					type: "button",
 					className: "wx_select_btn",
 					ref: triggerRef,
+					disabled: props.disabled,
 					onClick: () => {
 						removeHelpFloat();
 						setOpen((prev) => !prev);
 					},
 					"aria-haspopup": "listbox",
 					"aria-expanded": open,
-					"aria-label": "工作步骤展示",
+					"aria-label": props.label,
 				},
-					createElement("span", null, workStepsLabel(props.value)),
+					createElement("span", null, props.options.find(o => o.value === props.value)?.label ?? "请选择"),
 					createElement("span", { className: "wx_select_chevron" + (open ? " open" : ""), "aria-hidden": "true" }),
 				),
 				open
-					? createElement("div", { className: "wx_select_menu", role: "listbox", "aria-label": "工作步骤展示" },
-						WORK_STEPS_OPTIONS.map((option) => createElement("button", {
+					? createElement("div", { className: "wx_select_menu", role: "listbox", "aria-label": props.label },
+						props.options.map((option) => createElement("button", {
 							key: option.value,
 							type: "button",
 							role: "option",
@@ -695,6 +710,116 @@ window.__ModuleLoader__.load({
 		}
 
 		function WechatSection() {
+			const [accounts, setAccounts] = react.useState([]);
+			const [pending, setPending] = react.useState(null);
+			const [loaded, setLoaded] = react.useState(false);
+			const awaitingId = react.useRef(null);
+			const [selected, select] = react.useState("");
+			const [error, setError] = react.useState("");
+			const [busy, setBusy] = react.useState(false);
+			const seq = react.useRef(0);
+			const reload = react.useCallback(async () => {
+				const request = ++seq.current;
+				try {
+					const r = await api("/accounts");
+					if (!r.ok) throw new Error(r.body.message || "无法读取账号");
+					if (request !== seq.current) return;
+					const rows = r.body.accounts;
+					const added = rows.find(row => row.id === awaitingId.current);
+					awaitingId.current = r.body.pending?.id ?? null;
+					setAccounts(rows);
+					setPending(r.body.pending);
+					setLoaded(true);
+					select(old => added?.id ?? (rows.some(row => row.id === old) ? old : rows[0]?.id || ""));
+				} catch (e) { if (request === seq.current) setError(String(e)); }
+			}, []);
+			react.useEffect(() => {
+				reload();
+				const timer = setInterval(reload, 3000);
+				return () => { clearInterval(timer); seq.current++; };
+			}, [reload]);
+			const change = async (url, body) => {
+				setBusy(true);
+				setError("");
+				try {
+					const r = await api(url, { method: "POST", body: JSON.stringify(body) });
+					if (!r.ok) throw new Error(r.body.message || "保存失败");
+					if (r.body.id) awaitingId.current = r.body.id;
+					await reload();
+				} catch (e) { setError(String(e)); }
+				finally { setBusy(false); }
+			};
+			const account = accounts.find(row => row.id === selected);
+			const defaultId = accounts.find(row => row.default)?.id || "";
+			const choices = accounts.map(row => ({ value: row.id, label: row.name }));
+			return createElement("div", { className: "wx_section" },
+				createElement("div", { className: "wx_card" },
+					createElement("div", { className: "wx_row" },
+						createElement("span", { className: "wx_title" }, "微信账号"),
+						!pending && createElement("div", { className: "wx_actions" },
+							createElement("button", { className: "wx_btn", disabled: busy || !loaded, onClick: () => change("/add", {}) }, "＋ 添加账号")),
+					),
+					pending && createElement(PendingLogin, { pending, busy, change }),
+					!account && !pending && loaded && createElement("div", { className: "wx_meta" }, "还没有接入微信账号。"),
+					account && createElement("div", { className: "wx_account_fields" },
+						createElement("div", { className: "wx_setting_row" },
+							createElement("span", { className: "wx_setting_title" }, "当前账号"),
+							createElement(SettingsSelect, { label: "当前账号", value: selected, disabled: busy,
+								options: accounts.map(row => ({ value: row.id, label: row.name + " · " + row.connection })),
+								onChange: select,
+							})),
+						createElement(AccountName, { key: account.id + ":" + account.name, account, busy,
+							save: name => change("/rename?account=" + encodeURIComponent(account.id), { name }),
+						}),
+						createElement("div", { className: "wx_setting_row" },
+							createElement("span", { className: "wx_setting_title" }, "电脑端默认接收账号"),
+							createElement(SettingsSelect, { label: "电脑端默认接收账号", value: defaultId, disabled: busy,
+								options: [{ value: "", label: "发送前询问" }, ...choices],
+								onChange: id => change("/default", { id: id || null }),
+							})),
+					),
+					error && createElement("div", { className: "wx_err", role: "alert" }, error),
+				),
+				account && createElement(AccountPanel, { key: account.id, accountId: account.id }),
+			);
+		}
+
+		function PendingLogin({ pending, busy, change }) {
+			const { id, phase, qrUrl, error } = pending;
+			const query = "?account=" + encodeURIComponent(id);
+			const failed = phase === "failed";
+			return createElement("div", { className: "wx_sub wx_pending_login" },
+				qrUrl && !failed && createElement("img", {
+					src: "/wechat/api/qr-image" + query + "&v=" + encodeURIComponent(qrUrl), alt: "新账号登录二维码",
+				}),
+				createElement("div", { className: "wx_pending_body" },
+					createElement("div", { className: "wx_setting_title", role: "status" },
+						failed ? "扫码未完成" : phase === "scaned" ? "请在微信上确认登录" : qrUrl ? "用要添加的微信扫描二维码" : "正在获取二维码…"),
+					failed && error && createElement("div", { className: "wx_err" }, error),
+					createElement("div", { className: "wx_row" },
+						failed && createElement("button", { className: "wx_btn", disabled: busy, onClick: () => change("/retry-login" + query, {}) }, "重试"),
+						createElement("button", { className: "wx_btn", disabled: busy, onClick: () => change("/cancel-login" + query, {}) }, "取消添加")),
+				),
+			);
+		}
+
+		function AccountName({ account, busy, save }) {
+			const [name, setName] = react.useState(account.name);
+			const dirty = name.trim() !== account.name;
+			const valid = dirty && name.trim().length > 0 && !busy;
+			return createElement("form", { className: "wx_setting_row", onSubmit: e => { e.preventDefault(); if (valid) save(name.trim()); } },
+				createElement("label", { className: "wx_setting_title", htmlFor: "wx_alias_" + account.id }, "账号备注"),
+				createElement("div", { className: "wx_alias_edit" },
+					createElement("input", { id: "wx_alias_" + account.id, value: name, maxLength: 64,
+						placeholder: "例如：工作微信", onChange: e => setName(e.target.value),
+					}),
+					dirty && createElement("button", { className: "wx_btn primary", disabled: !valid, type: "submit" }, "保存"),
+				),
+			);
+		}
+
+		function AccountPanel({ accountId }) {
+			const accountApi = react.useCallback((path, options) => api(path + "?account=" + encodeURIComponent(accountId), options), [accountId]);
 			const [status, setStatus] = react.useState(null);
 			const [busy, setBusy] = react.useState("");
 			const [msg, setMsg] = react.useState({ kind: "", text: "" });
@@ -715,8 +840,8 @@ window.__ModuleLoader__.load({
 			const baselineRef = react.useRef(null);
 
 			const refresh = react.useCallback(() => {
-				api("/status").then((r) => {
-					if (!r.ok) return;
+				accountApi("/status").then((r) => {
+					if (!r.ok) throw new Error(r.body.message || "无法读取微信账号");
 					setStatus(r.body);
 					// Fill the form once — only when first entering the page.
 					// Polling below only ever calls setStatus; user edits stay
@@ -749,8 +874,8 @@ window.__ModuleLoader__.load({
 						allowedUsers: (r.body.config?.allowedUsers ?? []).join("\n"),
 						statusMode: r.body.config?.statusMode === "full" ? "full" : "brief",
 					});
-				}).catch(() => {});
-			}, []);
+				}).catch(e => setMsg({ kind: "err", text: String(e) }));
+			}, [accountApi]);
 			react.useEffect(() => {
 				refresh();
 			}, [refresh]);
@@ -779,10 +904,10 @@ window.__ModuleLoader__.load({
 			// retried relogin picks up the next phase change).
 			react.useEffect(() => {
 				const phase = status?.phase;
-				if (phase === "logged-in") return undefined;
+
 				const id = setInterval(() => {
 					refresh();
-				}, 2000);
+				}, phase === "logged-in" ? 5000 : 2000);
 				return () => clearInterval(id);
 			}, [status?.phase, refresh]);
 
@@ -790,7 +915,7 @@ window.__ModuleLoader__.load({
 				setBusy(action);
 				setMsg({ kind: "", text: "" });
 				try {
-					const r = await api(action, { method: "POST" });
+					const r = await accountApi(action, { method: "POST" });
 					setMsg(r.ok ? { kind: "ok", text: r.body.message || "完成" } : { kind: "err", text: r.body.message || `失败 (HTTP ${r.status})` });
 					if (r.ok) refresh();
 				} catch (e) {
@@ -804,7 +929,7 @@ window.__ModuleLoader__.load({
 				setBusy("config");
 				setMsg({ kind: "", text: "" });
 				try {
-					const r = await api("/config", {
+					const r = await accountApi("/config", {
 						method: "POST",
 						body: JSON.stringify(payloadOf(form)),
 					});
@@ -930,12 +1055,12 @@ window.__ModuleLoader__.load({
 				);
 			};
 
-			return createElement("div", { className: "wx_section" },
+			return createElement(react.Fragment, null,
 				createElement("div", { className: "wx_card" },
 					// ── Status block: login state, QR, session actions ──
 					createElement("div", { className: "wx_row" },
 						createElement("span", { className: "wx_title" }, "WeChat"),
-						createElement("span", { className: `wx_badge ${badgeClass}` }, PHASE_LABEL[phase] ?? phase),
+						createElement("span", { className: `wx_badge ${badgeClass}` }, status?.connection ?? PHASE_LABEL[phase] ?? phase),
 						status?.monitorRunning ? createElement("span", { className: "wx_meta" }, "监控运行中") : createElement("span", { className: "wx_meta" }, "监控未运行"),
 						createElement("div", { className: "wx_actions" },
 							createElement("button", {
@@ -952,19 +1077,20 @@ window.__ModuleLoader__.load({
 					),
 					helpOpen ? renderHelp() : null,
 					status?.botId ? createElement("div", { className: "wx_meta" }, `Bot: ${status.botId}`) : null,
+					status?.queued > 0 ? createElement("div", { className: "wx_meta" }, `待发消息: ${status.queued}`) : null,
 					status?.userCount ? createElement("div", { className: "wx_meta" }, `已绑定微信用户: ${status.userCount}`) : null,
 					status?.error ? createElement("div", { className: "wx_err" }, status.error) : null,
 					phase === "waiting-qr" || phase === "scaned"
 						? createElement("div", { className: "wx_qr" },
 							status?.qrUrl
-								? createElement("img", { src: "/wechat/api/qr-image?v=" + encodeURIComponent(status.qrUrl), alt: "扫码登录二维码" })
+								? createElement("img", { src: "/wechat/api/qr-image?account=" + encodeURIComponent(accountId) + "&v=" + encodeURIComponent(status.qrUrl), alt: "扫码登录二维码" })
 								: createElement("div", { className: "wx_meta" }, "正在获取二维码…"),
 							createElement("div", { className: "wx_meta" }, "用微信扫描二维码，确认后自动登录"),
 						)
 						: null,
 					createElement("div", { className: "wx_row" },
 						createElement("button", { className: "wx_btn", onClick: () => run("/relogin"), disabled: busy !== "" }, busy === "/relogin" ? "…" : "重新扫码"),
-						createElement("button", { className: "wx_btn danger", onClick: () => { if (confirm("确定退出微信登录？")) run("/logout"); }, disabled: busy !== "" }, busy === "/logout" ? "…" : "退出登录"),
+						createElement("button", { className: "wx_btn danger", onClick: () => { if (confirm("确定退出所选微信账号？该账号的待发消息将清空。")) run("/logout"); }, disabled: busy !== "" }, busy === "/logout" ? "…" : "退出登录"),
 						createElement("span", { className: "wx_meta" }, "新安装或者更新本插件后，建议重启DSH再使用"),
 					),
 
@@ -999,7 +1125,7 @@ window.__ModuleLoader__.load({
 								createElement("label", { className: "wide" },
 									createElement("span", { className: "wx_field_label" }, "入站白名单",
 										createElement("code", { className: "wx_key" }, "allowedUsers"),
-										createElement(HelpTip, { text: "只允许这些人用微信指挥你的 AI，一行一个微信号（用逗号分开也行）。留空 = 谁先给它发消息谁绑定。填了之后，名单外的人发什么都被忽略，也不回复。自己的微信号可以发 /status 看。" })),
+										createElement(HelpTip, { text: "只允许这些人用微信指挥你的 AI，一行一个微信号（用逗号分开也行）。留空 = 按扫码账号绑定。填了之后，名单外的人发什么都被忽略，也不回复。自己的微信号可以发 /status 看。" })),
 									createElement("textarea", { value: form.allowedUsers, onChange: set("allowedUsers"), placeholder: "（留空 = 不限制）" })),
 							),
 						),
@@ -1015,7 +1141,8 @@ window.__ModuleLoader__.load({
 								createElement("div", { className: "wx_setting_text" },
 									createElement("div", { className: "wx_setting_title" }, "工作步骤展示",
 										createElement(HelpTip, { text: "极简：整条任务停下后只发一条最终结论，中间过程不推送；简洁：每轮只发最后一段回复；标准：思考与工具调用合并为「执行过程」，正文独立发送。极简会等任务停手 45 秒后交付，最长 10 分钟一定发一次；等不及发 /flush 立即取回。权限卡、提问卡、报错在任何模式都会立刻推送。微信端也能用 /steps 极简|简洁|标准 切换，和这里同一个值。" }))),
-								createElement(WorkStepsSelect, {
+								createElement(SettingsSelect, {
+									label: "工作步骤展示", options: WORK_STEPS_OPTIONS,
 									value: form?.workSteps,
 									onChange: (value) => setForm({ ...form, workSteps: value }),
 								})),
@@ -1188,7 +1315,7 @@ window.__ModuleLoader__.load({
 					createElement("div", { className: "wx_row", style: { marginTop: "4px" } },
 						createElement("button", { className: "wx_btn primary", onClick: saveConfig, disabled: busy !== "" || !form }, busy === "config" ? "…" : "保存配置"),
 						dirty ? createElement("span", { className: "wx_dirty" }, "● 有未保存的修改") : null,
-						(status?.users && status.users.length === 0) ? createElement("span", { className: "wx_meta" }, "（暂无绑定用户也可保存，重新扫码后仍然生效）") : null,
+						(status?.users && status.users.length === 0) ? createElement("span", { className: "wx_meta" }, "（暂无绑定用户也可保存，扫码后仍然生效）") : null,
 					),
 				),
 

@@ -98,7 +98,7 @@ describe("send_wechat: bound session", () => {
     bridge.wireContextToken = "ctx-1";
 
     const result = await bridge.handleSendWeChat("wx-s1", { text: "hello" });
-    expect(result).toEqual({ ok: true, message: "sent 1 message(s)" });
+    expect(result).toEqual({ ok: true, sent: 1, queued: 0, message: "sent 1 message(s)" });
     expect(sendTextMessage).toHaveBeenCalledWith("u1", "hello", expect.objectContaining({ contextToken: "ctx-1" }));
     expect(sendMediaMessage).not.toHaveBeenCalled();
   });
@@ -143,7 +143,7 @@ describe("send_wechat: unbound session falls back to first known user", () => {
 
     // Calling from an entirely different (GUI) session — never bound.
     const result = await bridge.handleSendWeChat("gui-session-xyz", { text: "ping" });
-    expect(result).toEqual({ ok: true, message: "sent 1 message(s)" });
+    expect(result).toEqual({ ok: true, sent: 1, queued: 0, message: "sent 1 message(s)" });
     expect(sendTextMessage).toHaveBeenCalledWith("u1", "ping", expect.objectContaining({ contextToken: "ctx-1" }));
   });
 

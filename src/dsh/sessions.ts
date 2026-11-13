@@ -82,7 +82,7 @@ export function mintSessionId(): string {
 export class AgentStore {
   private readonly ensuring = new Map<string, Promise<EnsureAgentResult>>();
 
-  constructor(private readonly ctx: BridgeContext) {}
+  constructor(private readonly ctx: BridgeContext, private readonly claim?: (sessionId: string) => boolean) {}
 
   private agents(): AgentsService | undefined {
     return this.ctx.get<AgentsService>("agents");
@@ -124,6 +124,7 @@ export class AgentStore {
     let replacedSessionId: string | undefined;
 
     if (user.sessionId) {
+      if (this.claim && !this.claim(user.sessionId)) return { agent: undefined };
       const live = agents.get(user.sessionId);
       if (live) return { agent: live };
       try {
@@ -150,6 +151,7 @@ export class AgentStore {
       const rosterDefault = this.ctx.get<{ defaultId?: string }>("agentPresets")?.defaultId;
       const presetForSession = rosterDefault;
       const sessionId = mintSessionId();
+      if (this.claim && !this.claim(sessionId)) throw new Error("会话已归属其他账号");
       const handle = await agents.create({
         sessionId,
         meta: {

@@ -8,7 +8,7 @@
  * per-WeChat-user preference, so nothing about it belongs in this file.
  *
  * Mirrors the reference project's UserState (wechat-opencode) but keeps
- * ONLY what the DSH bridge needs. Persisted to `~/.dsh-wechat/state.json`
+ * ONLY what the DSH bridge needs. Persisted to the account directory’s `state.json`
  * so restarts restore the WeChat user → DSH session mapping.
  */
 
@@ -29,6 +29,8 @@ export interface UserState {
     * default; users without this flag follow the settings default.
     */
   cwdExplicit?: boolean;
+  /** Last iLink reply context for this peer and credential. */
+  contextToken?: string;
   /**
    * Legacy per-user silent mirror. Delivery reads `config.workSteps`; this
    * field only feeds the one-time migration from old `state.json` files and
