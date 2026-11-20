@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-11-20
+
 ### Fixed
 
 - **被 GUI 归档的会话不再吞掉微信消息（[#21](https://github.com/pan17/dsh-wechat/issues/21)）。** 归档只写 `workspaceRegistry.archivedSessionIds`，而 `AgentStore.ensure` 只看内存 Agent 与 resume 结果：内存里还活着的归档会话照常复用，重启后也能照常恢复。DSH 0.2.2 起宿主还多了 `ArchivedSessionGate`——这类会话每一轮都在 `step/start` 之前被判 `turn/end { reason: { kind: "blocked" } }`，消息被消费、零模型请求、零回复，用户只看到「对方正在输入」然后什么都没有。
