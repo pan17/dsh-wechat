@@ -26,6 +26,11 @@ concurrency:
 
 permissions:
   contents: write
+  # npm Trusted Publishing (OIDC). The publish job exchanges this token for a
+  # short-lived npm credential, so no long-lived npm token has to be stored as
+  # a repository secret. The npm side must be configured to trust THIS workflow
+  # file (release.yml) — see the `publish-npm` step below.
+  id-token: write
 
 jobs:
   # Build + test on the tagged commit, and refuse a tag that disagrees with
@@ -90,6 +95,25 @@ jobs:
   # on the Release while the code only waited on the CI gate, so a Release
   # that failed (missing CHANGELOG section, API hiccup) still let npm publish
   # and the two artefacts could drift apart. The comment is now the contract.
+  # Authentication is OIDC trusted publishing, not a stored token.
+  #
+  # History: this job used `NODE_AUTH_TOKEN: ${{ secrets.DSH_WECHAT }}` with a
+  # classic-style automation token. npm permanently revoked every classic token
+  # on 2025-12-09, and the next release failed with the misleading
+  # `E404 PUT https://registry.npmjs.org/dsh-wechat` (npm answers 404 — not
+  # 401/403 — when the publish is effectively anonymous). Trusted publishing
+  # has no token to rotate, expire, or leak: the runner presents a GitHub OIDC
+  # identity, npm verifies it against the trusted publisher configured for this
+  # package, and hands back a short-lived credential.
+  #
+  # The npm CLI does the exchange itself, so the only requirements here are:
+  #   - `id-token: write` (workflow-level `permissions` above);
+  #   - npm >= 11.5.1 on Node >= 22.14 (pinned below);
+  #   - a GitHub-hosted runner (ubuntu-latest);
+  #   - a trusted publisher on npmjs.com naming repo `pan17/dsh-wechat`,
+  #     workflow `release.yml`, with **`npm publish` allowed** — configs created
+  #     after 2026-09-03 default to `npm stage publish` only, and a config that
+  #     never completes a publish expires after 2 days.
   publish-npm:
     needs: release
     runs-on: ubuntu-latest
@@ -98,8 +122,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # npm's documented floor for OIDC is npm 11.5.1 + Node 22.14. Node 24
+          # bundles npm 11.x, and the explicit global install below covers a
+          # Node build that still ships an older npm (24.0.0 shipped 11.3.0).
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
+      - name: Ensure npm supports OIDC trusted publishing
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
       - uses: actions/cache@v4
         with:
           path: ~/.npm
@@ -110,6 +141,9 @@ jobs:
       # No separate `npm run build`: `prepublishOnly` already runs
       # `npm run build && npm test`, so building here duplicated it and
       # tested the pre-hook output rather than the shipped one.
+      #
+      # No NODE_AUTH_TOKEN: npm detects the OIDC environment and authenticates
+      # on its own. Provenance is generated automatically for a public repo, so
+      # `--provenance` is deliberately not passed (passing it explicitly
+      # disables npm's own public/private check).
       - run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.DSH_WECHAT }}

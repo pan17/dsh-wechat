@@ -150,8 +150,15 @@ git push origin main --tags
 
 > **`publish-npm` 等的是 `release`，不是 `verify`**。这是有意的：Release 创建失败（CHANGELOG 缺段落、API 抖动）时 npm 必须**不发**，否则两个产物会漂移。
 
-> **前置条件**：在仓库 Settings → Secrets and variables → Actions 中配置 `DSH_WECHAT` secret，值为 npm 的 Automation Token（`npm token create --type automation` 生成）。名字必须与 `release.yml` 里 `NODE_AUTH_TOKEN: ${{ secrets.DSH_WECHAT }}` 一致，否则发布这一步会认证失败。
-
+> **前置条件（npm 认证走 OIDC Trusted Publishing，不需要 secret）**：`publish-npm` 不读任何 token，而是用 GitHub Actions 的 OIDC 身份向 npm 换一个短时凭证。第一次配置：
+>
+> 1. npmjs.com → 包 `dsh-wechat` → **Settings → Trusted publishing** → Add trusted publisher → **GitHub Actions**；
+> 2. 填 **Organization or user** `pan17`、**Repository** `dsh-wechat`、**Workflow filename** `release.yml`（只写文件名、必须带 `.yml`）；
+> 3. **勾上 Allow `npm publish`**——2026-09-03 之后创建的配置默认只允许 `npm stage publish`，不勾这一项直接 `npm publish` 会被拒；
+> 4. 保存后 **2 天内**必须完成一次成功发布，否则配置作废（只能删掉重建）。
+>
+> 依赖门槛：npm ≥ 11.5.1、Node ≥ 22.14、GitHub 托管 runner，三者 workflow 里已钉住（Node 24 + 显式升级 npm）。`package.json` 的 `repository.url` 必须与 GitHub 仓库一致。首次发布成功后可以再收紧：包 Settings → Publishing access → **Require two-factor authentication and disallow tokens**，并删掉仓库里已失效的 `DSH_WECHAT` secret。
+>
 > **发布后核对**：npm 提示「Your package is being processed」后通常要等 1–3 分钟才可查。用 `npm view dsh-wechat version` 确认 `latest` 已指向新版本——`publish-npm` 显示成功只代表上传完成，registry 生效有延迟。
 
 ### 失败时怎么办
@@ -160,7 +167,8 @@ git push origin main --tags
 |---|---|---|
 | `verify` 红（测试或 tag/版本不一致） | 无 Release、无 npm 版本 | 修好、删 tag 重打（`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`，再 `git tag vX.Y.Z && git push origin vX.Y.Z`） |
 | `release` 红（CHANGELOG 缺该版本段落） | 无 npm 版本 | 补 CHANGELOG 后重打 tag |
-| `publish-npm` 红 | Release 已存在、npm 没有 | `gh run rerun <run-id>` 重跑即可，**不需要**重打 tag |
+| `publish-npm` 红（`E404 ... PUT https://registry.npmjs.org/dsh-wechat`） | Release 已存在、npm 没有 | 404 是「没认证上」，不是「包不存在」：token 已失效（npm 在 2025-12-09 永久吊销了全部 classic token），或 trusted publisher 没配对。按上面的 OIDC 前置条件配好后 `gh run rerun <run-id> --failed` |
+| `publish-npm` 红（其它原因） | Release 已存在、npm 没有 | `gh run rerun <run-id> --failed` 重跑即可，**不需要**重打 tag |
 
 > 重打 tag 的前提是 npm 上**还没有**这个版本，先 `npm view dsh-wechat@X.Y.Z version` 确认 404。
 
