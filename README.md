@@ -31,7 +31,7 @@ dsh plugin --profile desktop list --depth 0    # 查看已装版本
 | `/help <命令>` | 该命令的全部例子，如 `/help s`、`/help merge` |
 | `/status` | 工作区、会话、模型、权限、各开关状态；末尾会话级状态默认只显示模式和后台任务（`/status full` 看全部） |
 | `/workspace`（`/ws`） | `list` / `status` / `switch <编号\|路径>` / `add <路径>` |
-| `/session`（`/s`） | `list [current]` / `switch [current]` / `pin` / `unpin` / `new` / `status` |
+| `/session`（`/s`） | `list [current]` / `switch [current]` / `pin` / `unpin` / `new`（也可直接发 `/new`） / `status` |
 | `/fork` | `list [all\|数量]` 看每轮提问与最终回复，`show <编号>` 看全文，`switch <编号>` 从那轮分叉新会话 |
 | `/preset`（`/p`） | `list` / `switch <名称\|编号>` 切当前会话（第一条消息前）/ `default [名称\|编号]` 改新会话默认 / `status` |
 | `/model` | `list` / `switch <提供商/模型>` / `status` |

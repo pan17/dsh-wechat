@@ -49,7 +49,7 @@
 
 - **设置页「指令帮助」** —— 经 `/wechat/api/help` 的 `catalog` 字段送到浏览器，渲染成 6 个分组、23 条命令、每条命令的**全部**示例（行尾 `?` 悬浮出前 2 条，展开看全部，示例可点击复制）；
 - **微信 `/help`** —— 由 `bridge/slash.ts` 渲染，两级：
-  - `/help` → **一览**（54 行 / 1899 字）：代码块里每条命令一行 `/命令 (简写)  说明`，多子命令的命令下一行列出全部子命令（`/s list`、`/s list current`、`/s switch`…，有简写的一律用简写；`list current` / `switch current` 是独立形式，必须单独列出）；
+  - `/help` → **一览**（54 行 / 1905 字）：代码块里每条命令一行 `/命令 (简写)  说明`，多子命令的命令下一行列出全部子命令（`/s list`、`/s list current`、`/s switch`…，有简写的一律用简写；`list current` / `switch current` 是独立形式，必须单独列出）；
   - `/help <命令名或简写>` → **该条的例子块**：`# /命令 — 说明` + `也可以写成：…` + 代码块里每条示例一行 `示例  说明`。`/help s` 与 `/help session` 输出完全相同。
 
 **一套措辞，简单但不口语**：`summary` / `note` 是两端共用的唯一文案，所以它们必须同时满足两种场景——面板里要好懂，微信等宽表格里不能是絮絮叨叨的散文。写作要求：说清「做什么」，不写语气词与比喻（写「立即发送暂存的结论」，不写「别憋了，现在就把暂存的结论发给我」），`summary` ≤ 40 字、`note` ≤ 30 字。历史上这两端曾各用一套字段（面板白话 + 微信 `terse`），后来合并——维护两份同义文案只会漂移。
@@ -168,7 +168,7 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 |---|---|
 | `/status` | 工作区、会话、Agent、待处理(当前)/待处理(跨会话)、当前会话 Preset、模型、上下文、权限、新会话默认 Preset、工作步骤、繁忙投递、跨会话决策推送、跨会话任务完成提醒；末尾「会话级状态」按 `statusMode`（默认 `brief`）显示——`brief` 只出 `[模式]`（plan / goal / subagent / todos）与 `[后台任务]`，`full` 另加 `[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类），DSH 加新 plugin 自动出现。`[后台任务]` 读宿主 `ctx.jobs`（`job_list` 那套），**只统计当前绑定会话名下的后台任务**（`list(sessionId)` 的 owner fence + `owner === sessionId` 二次过滤，别的会话与无主任务都不算），输出总数与运行中明细（`running`/`stopping` 都算运行中，最多列 5 条，其余合成「另有 N 个运行中」）；**一个任务都没有时整段不出现**（不留 `共 0 个` 占位），有任务但都不在跑时只出一行 `⚪ 共 N 个`；服务缺失、未绑定会话或读取抛错时同样整段省略，`/status` 永不因此失败。`/status brief\|full` 切换并持久化到 `config.json` |
 | `/workspace (ws)` | `list` 默认显示 20 个、按添加顺序（新加的排最前），`all` 或显式数量看更多；显示各工作区会话数，不含已归档；switch/add 回复会写明恢复的会话名字和完整 id，跳过已归档，并附一行 `• 预设: … · 模型: … · 思考等级: …`（见 `/session` 的说明）；该目录无可见会话时提示发送消息将创建（没有会话可描述，该行省略） |
-| `/session (s)` | `list` 默认最近 20 个，`all` 或显式数量看更多，标记当前，不显示 GUI 已归档会话；**置顶会话排在列表最前并标 `📌`**，`pin`/`unpin` 省略编号时作用于当前会话，带编号时按 `/s list` 的行号解析；`list current` 只看当前工作目录——cwd 按宿主 `fs.promises.realpath` 规则归一（尾斜杠/`..`/大小写差异都能匹配），推荐用 `switch current <编号>` 按同一列表切换；紧接着直接 `switch <编号>` 也会复用最近一次列表编号；普通无列表上下文时 `switch <编号>` 对应全量列表；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建。**`switch` / `new` 的回复固定多一行 `• 预设: X · 模型: provider/model · 思考等级: Y`**：切换/新建改变的正是这三项，直接答在回复里，省掉再发 `/status`（或 `/preset status` + `/model status` + `/reasoning status`）。预设取该会话的 live 值（与 `/status`「当前会话 Preset」同源，`agent-preset/selected` 事件优先），无记录时回落部署默认（新建会话必然落到这里）；模型走 `/status` 同一条优先级链（本会话 override > `modelSelection` projection > 最近请求记录 > Agent 创建参数 > 部署默认）；思考等级取该模型适配器自己的名称（`high` 显示为 `/reasoning list` 里的中文名），未设置时写「默认」而不是留空。三段各自独立降级——预设名缺失、宿主没有 `llm` 服务、等级名查不到，都不会让整行消失或让回复失败 |
+| `/session (s)` | `list` 默认最近 20 个，`all` 或显式数量看更多，标记当前，不显示 GUI 已归档会话；**置顶会话排在列表最前并标 `📌`**，`pin`/`unpin` 省略编号时作用于当前会话，带编号时按 `/s list` 的行号解析；`list current` 只看当前工作目录——cwd 按宿主 `fs.promises.realpath` 规则归一（尾斜杠/`..`/大小写差异都能匹配），推荐用 `switch current <编号>` 按同一列表切换；紧接着直接 `switch <编号>` 也会复用最近一次列表编号；普通无列表上下文时 `switch <编号>` 对应全量列表；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建（**裸 `/new` 就是 `new`**，`/new xxx` 只回用法不转发）；绑定会话已归档时 `new` 不复用也不 resume，直接换新（见下方「归档与坏绑定」）。**`switch` / `new` 的回复固定多一行 `• 预设: X · 模型: provider/model · 思考等级: Y`**：切换/新建改变的正是这三项，直接答在回复里，省掉再发 `/status`（或 `/preset status` + `/model status` + `/reasoning status`）。预设取该会话的 live 值（与 `/status`「当前会话 Preset」同源，`agent-preset/selected` 事件优先），无记录时回落部署默认（新建会话必然落到这里）；模型走 `/status` 同一条优先级链（本会话 override > `modelSelection` projection > 最近请求记录 > Agent 创建参数 > 部署默认）；思考等级取该模型适配器自己的名称（`high` 显示为 `/reasoning list` 里的中文名），未设置时写「默认」而不是留空。三段各自独立降级——预设名缺失、宿主没有 `llm` 服务、等级名查不到，都不会让整行消失或让回复失败 |
 | `/fork` | 见下方「`/fork` 按轮次分叉」 |
 | `/preset (p)` | `switch <名称\|编号>` 切**当前会话**（走宿主 `agentPresets.select`，会话第一条消息前才允许，已开始的会话明确拒绝并提示 `/s new`）；`default [名称\|编号]` 改**新会话默认**（写 DSH 设置、与 GUI 同步，裸形式只读）；`status` 分两行报「新会话默认」与「当前会话」 |
 | `/model` | 切换立即作用于当前会话 + 设为默认；与 GUI 模型选择器同源，走宿主 `sessionController.selectModel`，GUI 里也会立刻显示新模型；当前推理等级若新模型支持则一并保留，否则清空 |
@@ -187,6 +187,15 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 | `/stop` | 中断当前任务 |
 | `/next` | 继续发送因微信限制被缓存的消息 |
 | `/rq` | 关闭当前会话的待处理卡（提问+权限）；其它会话用 `P1=/rq` |
+
+### 归档与坏绑定（issue #21）
+
+归档只写 `workspaceRegistry.archivedSessionIds`，`agents.get()` 与 `agents.resume()` 都看不见它，所以绑定会话被 GUI 归档后，旧代码照样把消息投进那个会话；DSH 0.2.2 起宿主还有 `ArchivedSessionGate`，每一轮在 `step/start` 之前就以 `turn/end { reason: { kind: "blocked" } }` 结束——消息被消费、零模型请求、零回复。现在这四条路径都不再静默：
+
+- `AgentStore.ensure` 在复用/恢复之前先查归档集合：命中就清空绑定、新建会话，并回「原会话 X 已在 GUI 归档；已新建会话 Y」。`EnsureAgentResult.replacedReason` 区分 `archived` / `cwd-mismatch` / `unreadable`，三种原因三句话（对归档会话说「已损坏」是不诚实的）。
+- `/s new` 的「已在空白会话」分支先查归档：归档 + 从没用过（blank）的会话以前会原地返回「已在空白会话」，等于把用户永久留在每轮都被 blocked 的会话上。
+- `attachToWorkspace` 把宿主的 `cwd resolves to …` 拒绝升级为「会话不可用」（清空绑定、新建会话）——实测这种矛盾绑定下宿主拒绝 attach，agent loop 随后不消费 inbox；其它 attach 失败仍然只意味着「未分组」，不动绑定。
+- `turn/end` 的 `reason.kind === "blocked"` 有专门分支：回一条明确提示（归档时说明「发 `/s new` 或直接发消息会自动新建，也可去 GUI 取消归档」），并记一条 warn 与 `turn-blocked` 审计。
 
 ### `/fork` 按轮次分叉
 

@@ -541,6 +541,22 @@ export class DshOps {
   }
 
   /**
+   * Whether the GUI archive set hides this one session.
+   *
+   * The same set {@link listSessions} filters on, exposed as one predicate for
+   * callers that hold a single binding (`/s new`'s "already blank" branch, the
+   * blocked-turn notice).
+   */
+  isSessionArchived(sessionId: string): boolean {
+    if (!sessionId) return false;
+    try {
+      return this.archivedSessionIds().includes(sessionId);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Sessions pinned on every grouping surface (dsh-workspace pin set), in the
    * host's own order — most recently pinned first. Empty when the registry is
    * absent or the host version predates the pin feature.

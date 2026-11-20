@@ -370,6 +370,10 @@ const COMMAND_SYNONYMS: Readonly<Record<string, string>> = {
   notice: "notify",
   wxprompt: "surface",
   "reject-question": "rq",
+  // `/new` is a SUBCOMMAND shorthand, not a synonym of `/session`: the parser
+  // accepts the bare name, and this entry is what makes `/new anything` answer
+  // with the session usage instead of forwarding a stray line to the agent.
+  new: "session",
 };
 
 /**
@@ -885,6 +889,10 @@ export function parseWorkspaceCommand(text: string): WorkspaceCommand | null {
  *   list [current] [all|<数量>] | switch [current] <n> | new | status
  *   | pin [编号] | unpin [编号]
  *
+ * `/new` is accepted as a bare shorthand for `new` (see the body): it is the
+ * name users type when they want a fresh conversation, so it must never be
+ * forwarded to the agent as prose.
+ *
  * `switch current <n>` selects the same current-working-directory scope as
  * `list current`; the explicit scope keeps the command deterministic instead
  * of relying on a hidden "last list" state. The window tokens may appear on
@@ -896,6 +904,12 @@ export function parseWorkspaceCommand(text: string): WorkspaceCommand | null {
  */
 export function parseSessionCommand(text: string): SessionCommand | null {
   const trimmed = text.trim();
+  // `/new` is the one shorthand that does not carry its parent's name: it is
+  // the sentence a stuck user reaches for ("新建会话"), and until now it was
+  // answered as an UNKNOWN command and forwarded into the very session they
+  // were trying to leave. Matched exactly — `/news` / `/newx` are not commands,
+  // and `/new anything` stays a usage error rather than a silent new session.
+  if (trimmed === "/new") return { kind: "new" };
   const m = trimmed.match(/^\/(?:session|s)(?:\s+(list|switch|new|status|pin|unpin)(?:\s+(.*))?)?$/);
   if (!m) return null;
   // Bare `/s` reports status, like every other management command.
@@ -1660,6 +1674,11 @@ export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "ws",
   "session",
   "s",
+  // `/new` = `/s new`. Listed here so `tryNativeCommand` never resumes the
+  // bound session (or runs a host command of the same name) before the local
+  // handler gets to mint a fresh one — the whole point of the alias is rescuing
+  // a broken or archived binding.
+  "new",
   "preset",
   "p",
   "agent",

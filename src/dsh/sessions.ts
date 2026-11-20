@@ -38,16 +38,42 @@ export interface BridgeContext {
   on(event: string, listener: (...args: unknown[]) => unknown): () => void;
 }
 
+/**
+ * Why a bound session was retired in favor of a fresh one.
+ *
+ * - `archived` — the session is in the GUI archive set. The host hides it from
+ *   every list and (0.2.2+) its `ArchivedSessionGate` rejects the step before
+ *   any model request, so the turn dies as `blocked` with no reply.
+ * - `cwd-mismatch` — the session's recorded cwd is not inside the workspace
+ *   the binding points at. The host refuses to attach it, and the resumed
+ *   agent then never consumes the inbox: every message disappears silently.
+ * - `unreadable` — resume itself failed (corrupt / missing / invalid log).
+ */
+export type SessionReplaceReason = "archived" | "cwd-mismatch" | "unreadable";
+
 /** Result of {@link AgentStore.ensure}. */
 export interface EnsureAgentResult {
   readonly agent: Agent | undefined;
   /**
-   * Previous bound session id that failed to resume, when a replacement
+   * Previous bound session id that could not be used, when a replacement
    * session was minted (`replaceOnResumeFailure: true`). Absent when the
    * bound session loaded, or when replacement was not requested.
    */
   readonly replacedSessionId?: string;
+  /** Why {@link replacedSessionId} was retired; set only alongside it. */
+  readonly replacedReason?: SessionReplaceReason;
 }
+
+/**
+ * Host wording for "this session's recorded cwd is not inside the workspace
+ * you asked for" (`cannot attach session …: its cwd resolves to …`).
+ *
+ * Matched by message rather than by error class: the bridge has no runtime
+ * `@deepseek-ai/*` import, and the class is host-internal. Only the cwd clause
+ * is treated as fatal — a registry that merely failed to create a workspace
+ * must not cost the user their binding.
+ */
+const WORKSPACE_CWD_MISMATCH = /cwd resolves to/i;
 
 /** Options for {@link AgentStore.ensure}. */
 export interface EnsureAgentOptions {
@@ -122,22 +148,55 @@ export class AgentStore {
     if (!agents) return { agent: undefined };
 
     let replacedSessionId: string | undefined;
+    let replacedReason: SessionReplaceReason | undefined;
+
+    // The GUI archive set is invisible to `agents.get()` / `agents.resume()`:
+    // an archived session whose agent is still in memory is reused as if
+    // nothing happened, and after a restart it resumes just as happily. The
+    // user, though, has told DSH "this conversation is over" — and on 0.2.2+
+    // every turn of it is ended as `blocked` before the first step. Retire the
+    // binding instead of feeding a session nothing will ever answer from.
+    if (user.sessionId && this.sessionArchived(user.sessionId)) {
+      if (!options?.replaceOnResumeFailure) return { agent: undefined };
+      console.error(`[dsh-wechat] bound session ${user.sessionId} is archived; minting a replacement`);
+      replacedSessionId = user.sessionId;
+      replacedReason = "archived";
+      user.sessionId = "";
+    }
 
     if (user.sessionId) {
       const live = agents.get(user.sessionId);
       if (live) return { agent: live };
+      let handle: AgentHandle | undefined;
       try {
-        const handle = await agents.resume({
+        handle = await agents.resume({
           resumeSessionId: user.sessionId,
           setup: agentSetup,
         });
-        await this.attachToWorkspace(user.cwd, user.sessionId);
-        return { agent: handle.agent };
       } catch (err) {
         console.error(`[dsh-wechat] resume session ${user.sessionId} failed: ${String(err)}`);
         if (!options?.replaceOnResumeFailure) return { agent: undefined };
         replacedSessionId = user.sessionId;
+        replacedReason = "unreadable";
         user.sessionId = "";
+      }
+      if (handle) {
+        const attachError = await this.attachToWorkspace(user.cwd, user.sessionId);
+        if (attachError && WORKSPACE_CWD_MISMATCH.test(attachError) && options?.replaceOnResumeFailure) {
+          // The binding and the session disagree about where this conversation
+          // lives (`/workspace switch` before this check existed, or a session
+          // moved in the GUI). The host refused the attach; measured behavior
+          // on 0.2.1 was an agent loop that never consumed the inbox — a
+          // silent black hole. Treat it exactly like an unreadable log.
+          console.error(
+            `[dsh-wechat] bound session ${user.sessionId} does not belong to ${user.cwd}: ${attachError}`,
+          );
+          replacedSessionId = user.sessionId;
+          replacedReason = "cwd-mismatch";
+          user.sessionId = "";
+        } else {
+          return { agent: handle.agent };
+        }
       }
     }
 
@@ -161,10 +220,29 @@ export class AgentStore {
       // Persist the binding so a later restart resumes this session.
       user.sessionId = sessionId;
       await this.attachToWorkspace(user.cwd, sessionId);
-      return { agent: handle.agent, replacedSessionId };
+      return { agent: handle.agent, replacedSessionId, replacedReason };
     } catch (err) {
       console.error(`[dsh-wechat] create session failed: ${String(err)}`);
-      return { agent: undefined, replacedSessionId };
+      return { agent: undefined, replacedSessionId, replacedReason };
+    }
+  }
+
+  /**
+   * Whether the GUI archive set hides this session.
+   *
+   * Read straight from dsh-workspace's registry (the same set the sidebar and
+   * `/s list` filter on). A host without the registry, or without the field,
+   * archives nothing — which is the truthful reading, not an error.
+   */
+  private sessionArchived(sessionId: string): boolean {
+    try {
+      const archived = this.ctx.get<{ archivedSessionIds?: readonly string[] }>("workspaceRegistry")
+        ?.archivedSessionIds;
+      return Array.isArray(archived) && archived.includes(sessionId);
+    } catch {
+      // A failing registry must not take every message down with it: "cannot
+      // prove it is archived" degrades to the pre-existing reuse behavior.
+      return false;
     }
   }
 
@@ -175,20 +253,27 @@ export class AgentStore {
    * into the sidebar's "ungrouped" bucket: the workspace registry derives
    * membership from its durable `sessionIds` records, which only
    * `attachSession` (or the startup bootstrap) populates.
+   *
+   * Returns the host's error message when the attach was refused (the caller
+   * decides whether that is fatal — only a cwd mismatch is), or `undefined`
+   * on success and on non-attach faults.
    */
-  private async attachToWorkspace(cwd: string, sessionId: string): Promise<void> {
+  private async attachToWorkspace(cwd: string, sessionId: string): Promise<string | undefined> {
     const registry = this.ctx.get<{
       create(path: string, title?: string): Promise<WorkspaceEntity>;
       resolveByPath(path: string): Promise<WorkspaceEntity | undefined>;
     }>("workspaceRegistry");
-    if (!registry) return;
+    if (!registry) return undefined;
     try {
       let workspace = await registry.resolveByPath(cwd);
       if (!workspace) workspace = await registry.create(cwd);
       await workspace.attachSession(sessionId);
+      return undefined;
     } catch (err) {
-      // Non-fatal: the session still works, it just shows ungrouped.
-      console.error(`[dsh-wechat] attach session ${sessionId} to workspace failed: ${String(err)}`);
+      // Non-fatal by default: the session still works, it just shows ungrouped.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[dsh-wechat] attach session ${sessionId} to workspace failed: ${message}`);
+      return message;
     }
   }
 

@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **被 GUI 归档的会话不再吞掉微信消息（[#21](https://github.com/pan17/dsh-wechat/issues/21)）。** 归档只写 `workspaceRegistry.archivedSessionIds`，而 `AgentStore.ensure` 只看内存 Agent 与 resume 结果：内存里还活着的归档会话照常复用，重启后也能照常恢复。DSH 0.2.2 起宿主还多了 `ArchivedSessionGate`——这类会话每一轮都在 `step/start` 之前被判 `turn/end { reason: { kind: "blocked" } }`，消息被消费、零模型请求、零回复，用户只看到「对方正在输入」然后什么都没有。
+  - `ensure` 现在在复用/恢复之前先查归档集合：命中就清空绑定、新建会话，并回一条「原会话 X 已在 GUI 归档；已新建会话 Y」。结果里新增 `replacedReason`（`archived` / `cwd-mismatch` / `unreadable`），三种原因回三句不同的话——对归档会话说「已损坏」是不诚实的。
+  - `/s new` 的「已在空白会话」分支同样先查归档：归档 + 从没用过（blank）的会话以前会原地返回「已在空白会话」，把用户永久留在一个每轮都被 blocked 的会话上，微信侧再无出口。
+  - `turn/end` 的 `reason.kind === "blocked"` 现在有处理分支：回一条明确提示（归档时说明「发 /s new 或直接发消息会自动新建，也可去 GUI 取消归档」），并记一条 warn 与 `turn-blocked` 审计。此前这一轮的三个可观测面（微信、`audit.jsonl`、journal）全是静默。
+
+- **绑定工作区与会话真实 cwd 矛盾时换新会话，不再静默吞消息（同上 #21）。** `attachToWorkspace` 以前把 `attachSession` 的所有失败当非致命吞掉；实测这种矛盾绑定下宿主拒绝 attach，agent loop 随后不消费 inbox。现在 resume 分支识别宿主的 `cwd resolves to …` 拒绝，视同「会话不可用」：清空绑定、新建会话并告知用户；其它 attach 失败仍然只意味着「未分组」，不动绑定。
+
+- **`/new` 现在是 `/s new`（[#23](https://github.com/pan17/dsh-wechat/issues/23)）。** 以前 `/new` 被判「未知命令」后还被当作普通文本转发进当前会话——用户最自然的自救动作反而给那个正想离开的会话添了一轮噪音（会话已归档时再吃一次 blocked）。现在 `/new` 精确解析为新建会话（`/new x`、`/news` 不变：前者回用法、后者仍当文本），`/help` 的 `/session` 行与 `/help s` 都提到了这个写法，`LOCAL_COMMAND_NAMES` 也加了 `new`，避免被同名原生命令抢走。
+
 ## [0.16.2] - 2026-11-09
 
 ### Fixed

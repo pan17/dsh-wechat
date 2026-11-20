@@ -35,7 +35,7 @@ import { ExecutionProcess } from "../adapter/process-format.js";
 import type { AssistantStreamFrame, OutputContentBlock, ToolCallData, ToolResultData } from "../dsh/types.js";
 import { formatQuestionForWeChat, parseQuestionReply, buildAnswer } from "../adapter/question-format.js";
 import { formatApprovalCard, parseApprovalReply } from "../adapter/approval-format.js";
-import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
+import { AgentStore, type BridgeContext, type SessionReplaceReason } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
 import type {
   ForkOutcome,
@@ -2375,9 +2375,34 @@ export class WeChatDSHBridge {
     this.trackWatchedSession(user.userId, user.sessionId);
   }
 
+  /**
+   * One-line notice for the session that was retired in favor of a fresh one.
+   *
+   * The three causes need three different sentences: "已损坏" is a lie for a
+   * session the user deliberately archived, and the archived wording is the
+   * only place the WeChat side explains why the GUI no longer shows the old
+   * conversation at all.
+   */
+  private sessionReplacedText(
+    replacedSessionId: string,
+    reason: SessionReplaceReason | undefined,
+    newSessionId: string,
+  ): string {
+    switch (reason) {
+      case "archived":
+        return `⚠️ 原会话 ${replacedSessionId} 已在 GUI 归档（不再接收消息）；已新建会话 ${newSessionId}。`;
+      case "cwd-mismatch":
+        return `⚠️ 原会话 ${replacedSessionId} 的工作目录与当前绑定不一致，DSH 拒绝接管；已新建会话 ${newSessionId}。`;
+      default:
+        return `⚠️ 原会话 ${replacedSessionId} 已损坏，无法恢复；已新建会话 ${newSessionId}。`;
+    }
+  }
+
   private async forwardToAgent(user: UserState, msg: WeixinMessage): Promise<void> {
     const previousSessionId = user.sessionId;
-    const { agent, replacedSessionId } = await this.agents.ensure(user, { replaceOnResumeFailure: true });
+    const { agent, replacedSessionId, replacedReason } = await this.agents.ensure(user, {
+      replaceOnResumeFailure: true,
+    });
     if (this.interactionStopped) return;
     this.persistSessionBinding(user);
     if (!agent) {
@@ -2390,7 +2415,7 @@ export class WeChatDSHBridge {
     if (replacedSessionId) {
       await this.sendReply(
         user.userId,
-        `⚠️ 原会话 ${replacedSessionId} 已损坏，无法恢复；已新建会话 ${user.sessionId}。`,
+        this.sessionReplacedText(replacedSessionId, replacedReason, user.sessionId),
       );
     }
 
@@ -2432,10 +2457,12 @@ export class WeChatDSHBridge {
     const previousSessionId = user.sessionId;
     let agent = ensured;
     let replacedSessionId: string | undefined;
+    let replacedReason: SessionReplaceReason | undefined;
     if (!agent) {
       const result = await this.agents.ensure(user, { replaceOnResumeFailure: true });
       agent = result.agent;
       replacedSessionId = result.replacedSessionId;
+      replacedReason = result.replacedReason;
       if (this.interactionStopped) return;
       this.persistSessionBinding(user);
       if (!agent) {
@@ -2448,7 +2475,7 @@ export class WeChatDSHBridge {
       if (replacedSessionId) {
         await this.sendReply(
           user.userId,
-          `⚠️ 原会话 ${replacedSessionId} 已损坏，无法恢复；已新建会话 ${user.sessionId}。`,
+          this.sessionReplacedText(replacedSessionId, replacedReason, user.sessionId),
         );
       }
     }
@@ -3145,6 +3172,14 @@ export class WeChatDSHBridge {
         break;
       }
       case "turn/end": {
+        // A blocked turn is the one outcome DSH reports with NO output at all:
+        // the host rejected the step before any model request (0.2.2's
+        // ArchivedSessionGate does exactly that for a session archived in the
+        // GUI). Every other failure reaches the user through `agent/error` or
+        // an assistant message; this one used to be pure silence — typing
+        // stopped and nothing else ever arrived.
+        const blockedReason = (event.data as { reason?: { kind?: string } } | undefined)?.reason;
+        if (blockedReason?.kind === "blocked") void this.reportBlockedTurn(user, sessionId);
         this.flushProcess(sessionId, user.userId);
         const buffer = this.conciseBuffers.get(sessionId);
         if (this.isMinimal()) {
@@ -3173,6 +3208,39 @@ export class WeChatDSHBridge {
         this.clearCrossSessionTurnNotified(user.userId, sessionId);
         break;
       }
+    }
+  }
+
+  /**
+   * Tell the user why a turn produced nothing at all.
+   *
+   * `turn/end { reason: { kind: "blocked" } }` lands milliseconds after
+   * `turn/start` with no `step/start` and no `request/header`: the message was
+   * consumed from the inbox, no model call was made, and the transcript grew a
+   * closed turn with no reply. DSH only blocks this way when a host gate
+   * refuses the step — today the archived-session gate — so the sentence names
+   * the way out instead of leaving the user with "消息石沉大海".
+   */
+  private async reportBlockedTurn(user: UserState, sessionId: string): Promise<void> {
+    const archived = this.ops.isSessionArchived(sessionId);
+    console.warn(
+      `[dsh-wechat] turn blocked by host: ${sessionId}${archived ? " (archived session)" : ""}`,
+    );
+    this.audit.record({
+      event: "turn-blocked",
+      user: maskUserId(user.userId),
+      session: sessionId,
+      ...(archived ? { archived: true } : {}),
+    });
+    const body = archived
+      ? `⚠️ 会话 ${sessionId.slice(0, 12)} 已在 GUI 归档，这一轮被 DSH 拒绝，没有产生回复。\n`
+        + "发 /s new 新建会话（直接发消息也会自动新建），或在 GUI 取消归档后继续。"
+      : "⚠️ 这一轮被 DSH 拦下了（turn/end blocked），没有产生回复。\n"
+        + "发 /s new 新建会话试试，或查看 DSH 日志。";
+    try {
+      await this.sendReply(user.userId, body);
+    } catch (err) {
+      this.log(`blocked-turn notice failed for ${user.userId}: ${String(err)}`);
     }
   }
 
@@ -5241,6 +5309,17 @@ export class WeChatDSHBridge {
         // NOT blank — staying on it would lock the user out of every later
         // message (resume fails, binding never changes).
         if (user.sessionId) {
+          // Archived first, before the blank test. An archived session can be
+          // BOTH archived and blank (the GUI hides sessions that never ran a
+          // turn), and "已在空白会话" would then park the user on the one
+          // session every later turn is blocked on — no way out from WeChat.
+          if (this.ops.isSessionArchived(user.sessionId)) {
+            const archivedId = user.sessionId;
+            await this.createFreshSession(user, userId, {
+              success: `⚠️ 原会话 ${archivedId} 已在 GUI 归档；已新建会话`,
+            });
+            return;
+          }
           const current = await this.ops.inspectSessionActivity(user.sessionId, user.cwd);
           if (current.ok && current.lastUserMessageTime === undefined) {
             const agent = this.agents.get(user);
