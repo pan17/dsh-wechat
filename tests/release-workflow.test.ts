@@ -113,9 +113,28 @@ describe("release workflow: npm and the GitHub Release cannot drift", () => {
     expect(releaseJobs.release).toMatch(/needs:\s*verify\b/);
   });
 
-  it("publishes with the documented secret", () => {
-    expect(releaseJobs["publish-npm"]).toContain("NODE_AUTH_TOKEN: ${{ secrets.DSH_WECHAT }}");
-    expect(publishDoc).toContain("DSH_WECHAT");
+  it("publishes with OIDC, not a stored token", () => {
+    // History: this used to assert `NODE_AUTH_TOKEN: ${{ secrets.DSH_WECHAT }}`.
+    // npm permanently revoked every classic token on 2025-12-09, and the v0.16.3
+    // release died on the misleading `E404 PUT .../dsh-wechat` — npm answers
+    // 404, not 401/403, when a publish is effectively anonymous. Trusted
+    // publishing hands the job a short-lived credential instead, so the guard
+    // now has to pin the absence of a token AND the pieces OIDC needs.
+    const publish = code(releaseJobs["publish-npm"]!);
+    expect(publish).not.toContain("NODE_AUTH_TOKEN");
+    expect(publish).not.toContain("secrets.");
+    // The OIDC identity is only minted when the workflow asks for it.
+    expect(release).toMatch(/id-token:\s*write/);
+    // npm's documented floors: npm 11.5.1 on Node 22.14. Node 24 alone is not
+    // enough (24.0.0 shipped npm 11.3.0), hence the explicit upgrade.
+    expect(publish).toMatch(/node-version:\s*24/);
+    expect(publish).toContain("npm install -g npm@^11.5.1");
+    // The npm-side configuration lives on npmjs.com; PUBLISH.md is the only
+    // place a maintainer can learn the three fields and the 2-day window.
+    expect(publishDoc).toContain("Trusted publishing");
+    expect(publishDoc).toContain("Allow `npm publish`");
+    expect(publishDoc).toContain("Workflow filename");
+    expect(publishDoc).toContain("2 天内");
   });
 
   it("serialises releases and never cancels one midway", () => {
