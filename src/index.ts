@@ -29,7 +29,6 @@ export interface PluginConfig {
   storageDir?: string;
   cwd?: string;
   textChunkLimit?: number;
-  cardTimeoutMs?: number;
   /** @deprecated Folded into `workSteps`; kept for composition-config migration. */
   silent?: boolean;
   /** @deprecated Folded into `workSteps`; kept for composition-config migration. */

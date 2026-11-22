@@ -29,7 +29,7 @@
 
   | 分组 | 包含 |
   |---|---|
-  | 连接与默认行为 | `cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers` |
+  | 连接与默认行为 | `cwd` / `sendWechatRateLimitPerMinute` / `allowedUsers` |
   | 消息推送 | `工作步骤展示`（极简 / 简洁 / 标准）/ `跨会话决策推送` / `跨会话任务完成提醒` + `完整显示任务完成回复`（完成提醒关闭时置灰）/ `状态详细程度` |
   | 打字合并 | `打字合并` 总开关 + `mergeSilenceMs` / `mergeMaxMsgs` / `mergeForcedReleaseMs` / `合并后缀 .. 与 !!`（总开关关闭时参数置灰，但值仍随保存提交，不会丢配置） |
   | 图片与文件 | `图片/文件与文字合并发送` 总开关 + `mediaHoldMs`（等待上限，总开关关闭时置灰）+ `以 @引用 方式交给 AI`（独立开关，一直可点，因为交付措辞对所有附件生效） |
@@ -95,7 +95,6 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 | `storageDir` | `~/.dsh-wechat` | token/sync-buf/会话映射/临时文件 |
 | `cwd` | `process.cwd()` | 新会话工作目录 |
 | `textChunkLimit` | `4000` | 微信单条消息长度上限 |
-| `cardTimeoutMs` | `1800000` | 提问/权限卡软超时（30 分钟） |
 | `crossSessionNotify` | `false` | 跨会话决策推送总闸（任意会话的权限/提问卡整卡推送，微信直接回复） |
 | `notifyTaskEvents` | `false` | 跨会话任务完成/报错提醒（独立于决策推送，默认关） |
 | `notifyTaskFullReply` | `false` | 跨会话**完成提醒**里的内容量：`false`（默认）= 该会话这一轮回答的最后 80 字摘要（`> ` 引用块，尾部截断加 `…`）；`true` = 整段回答全文，不再截断也不再逐行引用（出站 markdown 过滤会把行首 `>` 当标记吃掉）。**只决定展示多少，不决定发不发**——`notifyTaskEvents` 关闭时本键不产生任何提醒。全文走 `maskCredentials`（只掩 API key / JWT / `Bearer ***` 这类确定凭证），因为 `maskSecrets` 的通用 hex/base64 规则会把回答里的每个 commit SHA 都换成 `***`；摘要仍走 `maskSecrets`。设置页「完整显示任务完成回复」同款；`/status` 在提醒开启时多一行 `• 完成提醒内容: 全文｜摘要`，`/notify status` 也会显示 |
@@ -329,7 +328,7 @@ DSH 桌面端把「插件 dispose 完成」当成优雅退出的唯一信号：�
 - 打字合并的缓冲区**不因 slash 命令而提前释放**：`/status`、`/next` 等命令照常立即执行，缓冲的文本仍由静默窗口 / 条数上限 / 强制放行三者之一释放（因此不会丢，只是可能晚几秒）。插件 dispose 会先把缓冲区投递再注销交互；登出 / 重新扫码 / 换绑则**丢弃**（身份变了，别人说的话不该发给下一个绑定者）。
 - `/at` 是**暂存式**：命令本身不改写当前消息，引用落在**下一条**投递给 agent 的消息上（打字合并开启时落在合并后的那一批），投递成功即清空；agent 创建/恢复失败时**不清空**，重发正文即可。暂存只在内存里（不写 `state.json`）：插件重启后失效——一条引用是「这一次」的意图，重启后大概率已不是同一件事，复活它只会把无关上下文塞进新的一轮。`/at` 命令本身不冲刷打字合并缓冲区（与 `/status` 等一致）。会话引用依赖宿主挂载 `dsh-session-reference`，未挂载时明确拒绝（否则 mention 会被当成普通文本转发，模型只看到一个 base64 串）；文件引用只是 `@路径` 文本，不需要任何服务即可生效，**不受工作区限制**：`@文件` 是交给模型的指针，不是 bridge 自己去读内容，宿主 `FILE_REFERENCE_PROMPT` 明确写了「绝对路径指代宿主机上的文件或目录」，能不能打开由 agent 自己的沙箱策略决定——这与 `send_wechat`（bridge 亲自读字节发出去）是两条不同的边界。路径两端的不可见格式字符（从资源管理器/浏览器复制路径常带 U+202A 等）会自动剥掉，中文输入法打出的弯引号 `“…”` 也接受。⚠️ 会话引用在**发送时**由宿主读取：若被引用的会话在这 10 分钟内被删除，宿主会以 `SESSION_REFERENCE_READ_FAILED` 终止该轮——这是宿主语义，微信端只能在 `/at` 阶段挡住「引用自己 / 超过 3 个 / 服务缺失」这三类可预见的失败。
 - `~/.dsh-wechat` 与其下文件（`auth/token.json`、`state.json`、`config.json`、`sync-buf.json`、`audit.jsonl`）以 `0700` / `0600` 创建。⚠️ **Windows 上 Node 忽略 mode 参数**（`chmod` 只能切只读位），实际保护来自 `%USERPROFILE%` 继承的 ACL（仅本人、`SYSTEM`、`Administrators` 可读）——这是依赖继承 ACL，不是本插件自己设的权限。审计文件按 1 MiB 轮转为 `audit.jsonl.1`（只保留一份历史），轮转会记一行日志。
-- 审批/提问卡挂在 Host 的 `approval/request` 与 `user-questions/request` waterfall 上，与 GUI 竞速；无微信 peer 时立即 `next()`，软超时只撤微信卡、不替用户决策。微信先答时会 abort 传给 GUI 的 `request.signal`（不碰 turn 的 `exec.signal`），Web composer 卡随 Gateway `cancel` 帧收起。DSH 重启后未决卡片随 turn 消失（上游已知限制）。
+- 审批/提问卡挂在 Host 的 `approval/request` 与 `user-questions/request` waterfall 上，与 GUI 竞速；无微信 peer 时立即 `next()`。**卡片没有超时**：与 GUI 卡片一致，它只在某一端结算（微信回复、GUI 点击、`/rp`、`/rq`）或该轮被中止时收起，不会被定时器悄悄撤回。微信先答时会 abort 传给 GUI 的 `request.signal`（不碰 turn 的 `exec.signal`），Web composer 卡随 Gateway `cancel` 帧收起。DSH 重启后未决卡片随 turn 消失（上游已知限制）。
 - 微信回答卡片后的回执**每条占一次微信发送额度**（10 条/窗口）。一次 `P1=1 P2=2` 会发 2 条回执；额度用尽时回执与其他出站消息一样进入 `/next` FIFO 缓存，不会被丢弃。`P{n}` 是整批处理开始时快照的编号（卡片在结算时即被摘除，现算取不到编号、回执会退化成不带编号的文案）。跨会话卡的 `❗来自其他会话` 只是正文提示标记，不影响编号或回复语法。
 - `send_wechat` 工具对所有 agent 可见；任何会话的 agent 都能调用——绑定会话发送到绑定用户，未绑定会话回退到首个已知微信用户（单用户部署默认行为）。单用户模式下，工具推送与 assistant 回复共享唯一一份微信 10 条/窗口限流预算：超限或发送失败自动进入 `/next` FIFO 缓存队列。计数和队列持久化到 `state.json`，普通 DSH 更新或重启后继续沿用；下一条微信入站会重置窗口并自动补发。微信真实限流响应（HTTP 200 + `ret: -2` / `prepare failed`）也会被识别并缓存，不再误判成功。
 - **出站语音（`voice_item` / `type=3`）在 iLink bot 通道不可渲染**：`sendMediaMessage` 的 VOICE 分支能上传成功、服务端返回 `ret: 0`、审计也记成 `sent`，但微信客户端把整条消息丢弃——没有气泡、没有占位、也没有红色感叹号。issue #17 用 8 组 `voice_item` 字段组合（含把微信自己发出的语音字节原样回发、`message_type: USER`）逐一验证过，结论是 bot 消息在客户端侧没有 type=3 的渲染器，语音在这条通道上是**入站专用**（入站语音转文字）。所以 `mediaTypeForFile()` 只映射图片与视频，**不要**把 `.silk` 或音频扩展名加进 VOICE 分支：那不会报错，只会静默丢消息；要发音频就走 `FILE`，mp3 在微信里点开能正常播放。

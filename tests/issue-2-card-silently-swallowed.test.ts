@@ -302,18 +302,17 @@ describe("issue #2 — approval card silently swallowed when bridge token is inv
     }
   });
 
-  it("REPRO: card sits pending forever; nothing in the bridge ever auto-delivers it once token recovers", async () => {
+  it("REPRO: card sits pending without an answer; nothing in the bridge ever auto-delivers it once token recovers", async () => {
     // Simulate the full hang scenario from the issue: bridge has no
     // token, card arrives, then a token shows up. Without manual
     // intervention (session switch, GUI approval), the card is never
-    // re-sent to WeChat — the `pendingApprovals` entry is just abandoned
-    // until its 30-minute timeout fires, at which point the timeout
-    // notification is ALSO dropped (token is still null) and the card
-    // is silently removed without the user ever knowing.
+    // re-sent to WeChat — the `pendingApprovals` entry is just abandoned.
+    // There is no card timeout any more (GUI parity), so it is never
+    // silently dropped behind the user's back either.
     const bridge = makeBridge(null);
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
-      pendingApprovals: Map<string, Array<{ rpcId: string; timer: NodeJS.Timeout }>>;
+      pendingApprovals: Map<string, Array<{ rpcId: string }>>;
     };
 
     anyBridge.handleMuxFrame(approvalFrame("rpc-hang", "a-hang", "pwsh"));
@@ -325,8 +324,8 @@ describe("issue #2 — approval card silently swallowed when bridge token is inv
     expect(sendTextMessage).not.toHaveBeenCalled();
 
     // Card is still pending (no GUI intervention has happened in this
-    // test scenario — exactly the failure mode). The 30-minute timer
-    // will eventually fire and drop the card silently.
+    // test scenario — exactly the failure mode): it keeps waiting for an
+    // answer instead of expiring.
     expect(anyBridge.pendingApprovals.get("u1")?.length).toBe(1);
   });
 });

@@ -25,7 +25,6 @@ export type EditableConfig = Pick<
   | "botType"
   | "cwd"
   | "textChunkLimit"
-  | "cardTimeoutMs"
   | "crossSessionNotify"
   | "notifyTaskEvents"
   | "notifyTaskFullReply"
@@ -56,7 +55,6 @@ export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "botType",
   "cwd",
   "textChunkLimit",
-  "cardTimeoutMs",
   "crossSessionNotify",
   "notifyTaskEvents",
   "notifyTaskFullReply",

@@ -608,7 +608,6 @@ window.__ModuleLoader__.load({
 		function payloadOf(form) {
 			return {
 				cwd: form.cwd.trim(),
-				cardTimeoutMs: Number(form.cardTimeoutMs) || undefined,
 				crossSessionNotify: !!form.crossSessionNotify,
 				notifyTaskEvents: !!form.notifyTaskEvents,
 				notifyTaskFullReply: !!form.notifyTaskFullReply,
@@ -727,7 +726,6 @@ window.__ModuleLoader__.load({
 					// client always reads the single new key.
 					setForm((prev) => prev ?? {
 						cwd: r.body.config?.cwd ?? "",
-						cardTimeoutMs: String(r.body.config?.cardTimeoutMs ?? ""),
 						crossSessionNotify: !!r.body.config?.crossSessionNotify,
 						notifyTaskEvents: !!r.body.config?.notifyTaskEvents,
 						notifyTaskFullReply: !!r.body.config?.notifyTaskFullReply,
@@ -893,7 +891,7 @@ window.__ModuleLoader__.load({
 					: `合并 关 · 附件各自一轮 · ${form.mediaAtRefEnabled ? "@引用" : "路径"}`)
 				: "";
 			const connectionSummary = form
-				? `${form.cwd || "未设置目录"} · 卡片 ${minutes(form.cardTimeoutMs)} · 限流 ${form.sendWechatRateLimitPerMinute || "不限"}/分 · ${allowlistSummary(form.allowedUsers)}`
+				? `${form.cwd || "未设置目录"} · 限流 ${form.sendWechatRateLimitPerMinute || "不限"}/分 · ${allowlistSummary(form.allowedUsers)}`
 				: "";
 			const promptSummary = form
 				? (form.surfacePromptEnabled ? `已开启 · ${form.surfacePrompt.trim().length} 字` : "已关闭 · 不注入")
@@ -976,7 +974,7 @@ window.__ModuleLoader__.load({
 							id: "connection",
 							title: "连接与默认行为",
 							summary: connectionSummary,
-							desc: "这里决定：新会话在哪个文件夹干活、等你点确认的卡片放多久、它主动给你发消息一天能发多少条，以及谁能用微信指挥它。",
+							desc: "这里决定：新会话在哪个文件夹干活、它主动给你发消息一天能发多少条，以及谁能用微信指挥它。",
 							open: isOpen("connection"),
 							onToggle: toggleGroup,
 						},
@@ -986,11 +984,6 @@ window.__ModuleLoader__.load({
 										createElement("code", { className: "wx_key" }, "cwd"),
 										createElement(HelpTip, { text: "微信里新开的会话，默认在哪个文件夹干活。已经用 /workspace 或 /session switch 切过项目的不受影响，仍用你切的。" })),
 									createElement("input", { value: form.cwd, onChange: set("cwd"), placeholder: "F:\\work" })),
-								createElement("label", null,
-									createElement("span", { className: "wx_field_label" }, "卡片超时",
-										createElement("code", { className: "wx_key" }, "cardTimeoutMs"),
-										createElement(HelpTip, { text: "等你点确认的卡片最多等多久，单位毫秒。默认 1800000 = 30 分钟；超时还没回复，这张卡会自动撤回。改成 1800000 就是一小时。" })),
-									createElement("input", { value: form.cardTimeoutMs, onChange: set("cardTimeoutMs"), placeholder: "1800000", inputMode: "numeric" })),
 								createElement("label", null,
 									createElement("span", { className: "wx_field_label" }, "推送限流",
 										createElement("code", { className: "wx_key" }, "sendWechatRateLimitPerMinute"),

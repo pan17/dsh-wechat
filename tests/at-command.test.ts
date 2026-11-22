@@ -994,13 +994,11 @@ describe("/at management", () => {
     const inbound = asInbound(bridge);
     const anyBridge = bridge as unknown as {
       state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
-      pendingApprovals: Map<string, Array<{ rpcId: string; sessionId: string; timer: NodeJS.Timeout }>>;
+      pendingApprovals: Map<string, Array<{ rpcId: string; sessionId: string }>>;
     };
     anyBridge.state.ensureUser("u1", "C:\\work");
     anyBridge.state.update("u1", { sessionId: "session-current" });
-    anyBridge.pendingApprovals.set("u1", [
-      { rpcId: "rpc-1", sessionId: "session-current", timer: setTimeout(() => {}, 60_000) },
-    ]);
+    anyBridge.pendingApprovals.set("u1", [{ rpcId: "rpc-1", sessionId: "session-current" }]);
 
     await inbound.handleMessage(text("/s list"));
     await inbound.handleMessage(text("/at s 2"));

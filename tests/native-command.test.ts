@@ -299,14 +299,12 @@ describe("Native command dispatch via ctx.commands", () => {
 
     // Seed a pending approval card for the current session.
     const anyBridge = bridge as unknown as {
-      pendingApprovals: Map<string, Array<{ rpcId: string; sessionId: string; timer: NodeJS.Timeout }>>;
+      pendingApprovals: Map<string, Array<{ rpcId: string; sessionId: string }>>;
       state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
     };
     anyBridge.state.ensureUser("u1", "C:\\work");
     anyBridge.state.update("u1", { sessionId: "wx-s1" });
-    anyBridge.pendingApprovals.set("u1", [
-      { rpcId: "rpc-1", sessionId: "wx-s1", timer: setTimeout(() => {}, 60_000) },
-    ]);
+    anyBridge.pendingApprovals.set("u1", [{ rpcId: "rpc-1", sessionId: "wx-s1" }]);
 
     await (bridge as unknown as { handleMessage: (m: unknown) => Promise<void> }).handleMessage(
       wechatTextMessage("/plan off"),

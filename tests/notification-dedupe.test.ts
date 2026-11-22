@@ -5,7 +5,7 @@
  *     on) and its rpcId is recorded in `pushedCardRpcIds`.
  *   - A card created while the gate is off stays silent and unpushed; a
  *     later switch-in flush shows only those unseen cards and records them.
- *   - When the card leaves the pending table (resolve / timeout / /rp / /rq),
+ *   - When the card leaves the pending table (resolve / /rp / /rq),
  *     the pushed marker clears so the next card for that rpcId can push again.
  *   - /history re-sends every still-answerable card (all sessions when the
  *     gate is on; current session only when it is off).
@@ -185,14 +185,15 @@ describe("pushed-card dedupe: question cards", () => {
     expect(cardMessages()).toHaveLength(0);
   });
 
-  it("timeout removes the card and clears the marker; the next batch pushes again", async () => {
+  it("a waiting card is never withdrawn by a timer: it stays until someone settles it", async () => {
+    // GUI parity: like the composer card, a pushed card waits for an answer
+    // indefinitely. There is no card timeout any more, so nothing may remove
+    // it (or clear its pushed marker) behind the user's back.
     const bridge = makeBridge();
-    const cfg = (bridge as unknown as { config: { cardTimeoutMs: number } }).config;
-    cfg.cardTimeoutMs = 30;
-
     const anyBridge = bridge as unknown as {
       handleMuxFrame(f: unknown): void;
       pushedCardRpcIds: Map<string, Set<string>>;
+      pendingQuestions: Map<string, unknown[]>;
     };
     anyBridge.handleMuxFrame(questionFrame("q-1", "B"));
     await flushPushes();
@@ -200,13 +201,15 @@ describe("pushed-card dedupe: question cards", () => {
     expect(anyBridge.pushedCardRpcIds.get("u1")?.has("q-1")).toBe(true);
 
     await new Promise((r) => setTimeout(r, 80));
-    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("q-1")).toBe(false);
-    expect((bridge as unknown as { pendingQuestions: Map<string, unknown[]> }).pendingQuestions.get("u1")?.length ?? 0).toBe(0);
-
-    sendTextMessage.mockClear();
-    anyBridge.handleMuxFrame(questionFrame("q-2", "B"));
-    await flushPushes();
+    expect(anyBridge.pendingQuestions.get("u1")).toHaveLength(1);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("q-1")).toBe(true);
+    // No "card withdrawn" notice, and no duplicate push.
     expect(cardMessages()).toHaveLength(1);
+
+    // Only a real settle leaves the table, and that clears the marker.
+    anyBridge.handleMuxFrame(questionResolvedFrame("q-1", "B"));
+    expect(anyBridge.pendingQuestions.get("u1") ?? []).toHaveLength(0);
+    expect(anyBridge.pushedCardRpcIds.get("u1")?.has("q-1")).toBe(false);
   });
 });
 

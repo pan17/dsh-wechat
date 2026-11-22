@@ -18,8 +18,6 @@ export interface WeChatDSHConfig {
   cwd: string;
   /** WeChat single-message length limit (chars). */
   textChunkLimit: number;
-  /** Soft timeout for question/permission cards (ms). */
-  cardTimeoutMs: number;
   /** Cross-session decision push (full permission/question cards of non-current sessions). Default off. */
   crossSessionNotify: boolean;
   /**
@@ -300,7 +298,6 @@ export function defaultConfig(): WeChatDSHConfig {
     storageDir: defaultStorageDir(),
     cwd: process.cwd(),
     textChunkLimit: 4000,
-    cardTimeoutMs: 30 * 60_000,
     crossSessionNotify: false,
     notifyTaskEvents: false,
     // The notice stays a one-glance card by default; the full answer is opt-in

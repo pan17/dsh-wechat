@@ -317,6 +317,9 @@ export interface QuestionRequestLike {
 /**
  * One pending question card mirrored from a `user-questions/request`.
  * WeChat answers settle `settleWechat`; GUI answers arrive via `next()`.
+ *
+ * No timeout: like the GUI card, it stays answerable until one side settles
+ * it or the turn itself is aborted.
  */
 interface PendingQuestion {
   rpcId: string;
@@ -324,7 +327,6 @@ interface PendingQuestion {
   userId: string;
   items: AskUserQuestionItem[];
   askedAt: number;
-  timer: NodeJS.Timeout;
   settled: boolean;
   settleWechat: ((answer: AskUserQuestionAnswer) => void) | null;
   cancelWechat: ((reason: unknown) => void) | null;
@@ -404,7 +406,8 @@ type MergeEntry =
 /**
  * One pending approval card mirrored from an `approval/request`.
  * Identical information and choices to the GUI card; whoever answers
- * first (GUI click or WeChat reply) wins.
+ * first (GUI click or WeChat reply) wins. Like the GUI card it never
+ * expires on its own — it leaves only when settled or aborted.
  */
 interface PendingApproval {
   rpcId: string;
@@ -414,7 +417,6 @@ interface PendingApproval {
   toolName: string;
   reason?: string;
   askedAt: number;
-  timer: NodeJS.Timeout;
   settled: boolean;
   settleWechat: ((outcome: "allowed-once" | "rejected") => void) | null;
 }
@@ -3607,8 +3609,9 @@ export class WeChatDSHBridge {
   /**
    * Host `approval/request` waterfall answerer. Races the GUI (`next()`)
    * against a WeChat reply so whoever answers first wins. No WeChat peer
-   * → immediately `next()`. Soft timeout withdraws the WeChat waiter
-   * without deciding, leaving the GUI card live.
+   * → immediately `next()`. The pushed card never expires by itself, so it
+   * mirrors the GUI card: it is withdrawn only when one side settles or the
+   * turn aborts.
    */
   async answerApprovalRequest(
     req: ApprovalRequestLike,
@@ -3643,14 +3646,6 @@ export class WeChatDSHBridge {
       askedAt: Date.now(),
       settled: false,
       settleWechat,
-      timer: setTimeout(() => {
-        if (card.settled) return;
-        this.removeApprovalCard(userId, rpcId);
-        void this.sendReply(
-          userId,
-          `⏰ 权限卡超时未回复（${toolName}），已移除；可在 DSH 界面继续处理。`,
-        ).catch(() => {});
-      }, this.config.cardTimeoutMs),
     };
     const list = this.pendingApprovals.get(userId) ?? [];
     list.push(card);
@@ -3690,8 +3685,8 @@ export class WeChatDSHBridge {
 
   /**
    * Host `user-questions/request` waterfall answerer. Same race as
-   * approvals: WeChat vs GUI, first settle wins. Soft timeout withdraws
-   * the WeChat waiter without answering.
+   * approvals: WeChat vs GUI, first settle wins. The card never expires by
+   * itself — as in the GUI it waits until answered, closed, or aborted.
    */
   async answerQuestionRequest(
     req: QuestionRequestLike,
@@ -3725,11 +3720,6 @@ export class WeChatDSHBridge {
       settled: false,
       settleWechat,
       cancelWechat,
-      timer: setTimeout(() => {
-        if (card.settled) return;
-        this.removeQuestionCard(userId, rpcId);
-        void this.sendReply(userId, "⏰ 提问卡超时未回复，已移除；可在 DSH 界面继续回答。").catch(() => {});
-      }, this.config.cardTimeoutMs),
     };
     const list = this.pendingQuestions.get(userId) ?? [];
     list.push(card);
@@ -3804,13 +3794,6 @@ export class WeChatDSHBridge {
           askedAt: Date.now(),
           settled: false,
           settleWechat: null,
-          timer: setTimeout(() => {
-            this.removeApprovalCard(userId, frame.rpcId);
-            void this.sendReply(
-              userId,
-              `⏰ 权限卡超时未回复（${toolName}），已移除；可在 DSH 界面继续处理。`,
-            ).catch(() => {});
-          }, this.config.cardTimeoutMs),
         };
         const list = this.pendingApprovals.get(userId) ?? [];
         list.push(card);
@@ -3854,10 +3837,6 @@ export class WeChatDSHBridge {
           settled: false,
           settleWechat: null,
           cancelWechat: null,
-          timer: setTimeout(() => {
-            this.removeQuestionCard(userId, frame.rpcId);
-            void this.sendReply(userId, "⏰ 提问卡超时未回复，已移除；可在 DSH 界面继续回答。").catch(() => {});
-          }, this.config.cardTimeoutMs),
         };
         const list = this.pendingQuestions.get(userId) ?? [];
         list.push(card);
@@ -4396,7 +4375,6 @@ export class WeChatDSHBridge {
     if (!list) return;
     const entry = list.find((c) => c.rpcId === rpcId);
     if (!entry) return;
-    clearTimeout(entry.timer);
     this.unmarkCardPushed(userId, rpcId);
     const next = list.filter((c) => c.rpcId !== rpcId);
     if (next.length > 0) this.pendingApprovals.set(userId, next);
@@ -4588,7 +4566,6 @@ export class WeChatDSHBridge {
     if (!list) return;
     const entry = list.find((c) => c.rpcId === rpcId);
     if (!entry) return;
-    clearTimeout(entry.timer);
     this.unmarkCardPushed(userId, rpcId);
     const next = list.filter((c) => c.rpcId !== rpcId);
     if (next.length > 0) this.pendingQuestions.set(userId, next);

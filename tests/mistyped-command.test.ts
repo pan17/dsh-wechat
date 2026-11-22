@@ -361,24 +361,18 @@ describe("a mistyped command is answered, never forwarded", () => {
     const mock = makeMockAgent("wx-s1");
     const bridge = makeBridge(mock);
     const pending = bridge as unknown as {
-      pendingApprovals: Map<string, Array<{ rpcId: string; sessionId: string; timer: NodeJS.Timeout }>>;
+      pendingApprovals: Map<string, Array<{ rpcId: string; sessionId: string }>>;
       state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
     };
     pending.state.ensureUser("u1", "C:\\work");
     pending.state.update("u1", { sessionId: "wx-s1" });
-    pending.pendingApprovals.set("u1", [
-      { rpcId: "rpc-1", sessionId: "wx-s1", timer: setTimeout(() => {}, 30_000) },
-    ]);
-    try {
-      await send(bridge, "/s lsit");
-      const reply = lastReply();
-      expect(reply).toContain("用法");
-      expect(reply).not.toContain("权限卡");
-      // The card is untouched: no decision was applied to it.
-      expect(pending.pendingApprovals.get("u1") ?? []).toHaveLength(1);
-      expect(mock.received).toHaveLength(0);
-    } finally {
-      for (const card of pending.pendingApprovals.get("u1") ?? []) clearTimeout(card.timer);
-    }
+    pending.pendingApprovals.set("u1", [{ rpcId: "rpc-1", sessionId: "wx-s1" }]);
+    await send(bridge, "/s lsit");
+    const reply = lastReply();
+    expect(reply).toContain("用法");
+    expect(reply).not.toContain("权限卡");
+    // The card is untouched: no decision was applied to it.
+    expect(pending.pendingApprovals.get("u1") ?? []).toHaveLength(1);
+    expect(mock.received).toHaveLength(0);
   });
 });

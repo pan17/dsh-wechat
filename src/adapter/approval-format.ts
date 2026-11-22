@@ -64,7 +64,7 @@ export function formatApprovalCard(entry: PendingApprovalCard, index?: number, t
     lines.push("回复：1 或 2；关闭：/rq");
   }
   lines.push("");
-  lines.push("（30 分钟未回复自动移除此卡；可在 DSH 界面继续处理）");
+  lines.push("（与 DSH 界面同款卡片，不会自动过期；任一端处理即可）");
 
   let card = lines.join("\n");
   if (card.length > MAX_CARD_LEN) {

@@ -216,25 +216,19 @@ describe("强制透传: /raw on stops every interception", () => {
     const mock = makeMockAgent("wx-s1");
     const bridge = makeBridge(mock);
     const inner = bridge as unknown as {
-      pendingApprovals: Map<string, Array<{ rpcId: string; sessionId: string; timer: NodeJS.Timeout }>>;
+      pendingApprovals: Map<string, Array<{ rpcId: string; sessionId: string }>>;
       state: { ensureUser(u: string, c: string): unknown; update(u: string, p: unknown): void };
     };
     inner.state.ensureUser("u1", "C:\\work");
     inner.state.update("u1", { sessionId: "wx-s1" });
-    inner.pendingApprovals.set("u1", [
-      { rpcId: "rpc-1", sessionId: "wx-s1", timer: setTimeout(() => {}, 30_000) },
-    ]);
-    try {
-      await send(bridge, "/raw on");
-      vi.clearAllMocks();
-      await send(bridge, "/status");
+    inner.pendingApprovals.set("u1", [{ rpcId: "rpc-1", sessionId: "wx-s1" }]);
+    await send(bridge, "/raw on");
+    vi.clearAllMocks();
+    await send(bridge, "/status");
 
-      // Forwarded, NOT treated as a card answer.
-      expect(mock.received).toHaveLength(1);
-      expect(inner.pendingApprovals.get("u1") ?? []).toHaveLength(1);
-    } finally {
-      for (const card of inner.pendingApprovals.get("u1") ?? []) clearTimeout(card.timer);
-    }
+    // Forwarded, NOT treated as a card answer.
+    expect(mock.received).toHaveLength(1);
+    expect(inner.pendingApprovals.get("u1") ?? []).toHaveLength(1);
   });
 });
 
