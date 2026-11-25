@@ -606,9 +606,18 @@ const QR_PAGE = `<!DOCTYPE html>
   <p style="color:#999;font-size:.8rem">用微信扫描二维码，确认登录后本页自动刷新。二维码 5 分钟有效，过期自动刷新。</p>
 </div>
 <script>
+  // This page is served at <mount>/wechat/qr, so its OWN address carries the
+  // mount prefix — a NAS app gateway (飞牛) mounts the whole app under e.g.
+  // /app/Harness/dsh, and a root-absolute /wechat/... would escape it.
+  var API_BASE = (function () {
+    var path = location.pathname;
+    while (path.length > 1 && path.charAt(path.length - 1) === '/') path = path.slice(0, -1);
+    var suffix = '/wechat/qr';
+    return path.slice(-suffix.length) === suffix ? path.slice(0, path.length - suffix.length) : '';
+  })();
   async function poll() {
     try {
-      const res = await fetch('/wechat/status');
+      const res = await fetch(API_BASE + '/wechat/status');
       const data = await res.json();
       const state = document.getElementById('state');
       const qr = document.getElementById('qr');
@@ -631,7 +640,7 @@ const QR_PAGE = `<!DOCTYPE html>
         state.textContent = data.qrUrl ? '请用微信扫描下方二维码' : '正在获取二维码…';
       }
       if (data.qrUrl) {
-        qr.src = '/wechat/api/qr-image?v=' + encodeURIComponent(data.qrUrl);
+        qr.src = API_BASE + '/wechat/api/qr-image?v=' + encodeURIComponent(data.qrUrl);
         qr.style.display = 'block';
       }
     } catch (e) {

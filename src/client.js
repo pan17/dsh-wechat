@@ -14,6 +14,29 @@
  * page shows six one-line summaries instead of fifteen controls at once.
  * Collapse state is per-browser (localStorage), never persisted host-side.
  */
+
+/**
+ * This bundle's own URL, captured at the only moment it is readable.
+ *
+ * The host's client-modules loader appends `<script src=…>` to <head> and
+ * removes the element in its `load` handler (dsh-client-modules
+ * `defaultLoadBundle`), which fires AFTER execution — and our factory runs
+ * later still, on the first `require`. So `document.currentScript` is valid
+ * exactly here, at the top level of the file.
+ *
+ * It matters because a NAS app gateway (飞牛 serves an app under
+ * `…/app/Harness/dsh/`) delivers this script through a path prefix, while a
+ * root-absolute `/wechat/api/…` escapes that prefix. This string is the prefix
+ * source for every request the panel makes; see the `api-base` region below.
+ */
+var __dshWechatBundleSrc = (function () {
+	try {
+		return (typeof document !== "undefined" && document.currentScript && document.currentScript.src) || "";
+	} catch (e) {
+		return "";
+	}
+})();
+
 window.__ModuleLoader__.load({
 	id: "dsh-wechat",
 	factory: (require) => {
@@ -53,6 +76,7 @@ window.__ModuleLoader__.load({
 .wx_form{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .wx_form label{display:flex;flex-direction:column;gap:4px;font-size:12px}
 .wx_form input,.wx_form textarea{font:inherit;font-size:13px;padding:6px 8px;border-radius:8px;border:1px solid rgba(128,128,128,.4);background:transparent;color:inherit;width:100%;box-sizing:border-box}
+.wx_base_input{font:inherit;font-size:13px;padding:6px 8px;border-radius:8px;border:1px solid rgba(128,128,128,.4);background:transparent;color:inherit;width:100%;box-sizing:border-box}
 .wx_form input:disabled,.wx_form textarea:disabled{opacity:.55}
 .wx_form textarea{min-height:88px;resize:vertical;line-height:1.45}
 .wx_form .wide{grid-column:1 / -1}
@@ -186,6 +210,100 @@ window.__ModuleLoader__.load({
 				// Private mode / quota: the control still works, it just does not
 				// remember across reloads.
 			}
+		}
+
+		/** localStorage key holding the manual mount-prefix override. */
+		const API_BASE_KEY = "dsh-wechat/api-base";
+
+		// #region api-base — pure mount-prefix math.
+		//
+		// Deliberately free of DOM and storage: tests/subpath-deploy.test.ts
+		// slices this region out and evaluates it on its own. A prefix wrong by
+		// one segment fails exactly like a host that is not running — every
+		// request 404s and the panel renders empty — so it is worth testing
+		// without a browser.
+
+		/**
+		 * Normalize an operator-entered mount prefix to `/a/b`, or "" for the
+		 * origin root. Accepts what people actually paste: a full URL
+		 * (`https://nas.example.com/app/Harness/dsh/`), a bare path, a path
+		 * without its leading slash, any number of trailing slashes.
+		 */
+		function normalizeApiBase(raw) {
+			let text = String(raw == null ? "" : raw).trim();
+			if (text === "") return "";
+			if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(text)) {
+				try {
+					text = new URL(text).pathname;
+				} catch (e) {
+					return "";
+				}
+			}
+			text = text.split("?")[0].split("#")[0];
+			text = text.replace(/\/{2,}/g, "/");
+			if (text.charAt(0) !== "/") text = "/" + text;
+			text = text.replace(/\/+$/, "");
+			return text === "" || text === "/" ? "" : text;
+		}
+
+		/**
+		 * The mount prefix a bundle URL is served under: everything before
+		 * `/plugins/`. Both loader URL shapes carry it — the one-resource
+		 * `/plugins/dsh-wechat/client.js?rev=…` and the batch
+		 * `/plugins/??a/client.js&b/client.js&rev=…`.
+		 */
+		function apiBaseFromBundleUrl(url) {
+			const text = String(url == null ? "" : url);
+			if (text === "") return "";
+			let pathname;
+			try {
+				pathname = new URL(text, "http://localhost/").pathname;
+			} catch (e) {
+				pathname = text.split("?")[0].split("#")[0];
+			}
+			const at = pathname.lastIndexOf("/plugins/");
+			if (at < 0) return "";
+			return normalizeApiBase(pathname.slice(0, at));
+		}
+
+		/**
+		 * Decide the prefix once. An explicit manual value wins — it is the only
+		 * thing that can rescue a deployment whose bundle URL is unreadable (a
+		 * gateway that rewrites the script URL to somewhere else) — otherwise
+		 * the bundle URL decides, otherwise the origin root.
+		 */
+		function pickApiBase(stored, bundleUrl) {
+			const manual = normalizeApiBase(stored);
+			if (manual !== "") return { base: manual, source: "manual" };
+			const detected = apiBaseFromBundleUrl(bundleUrl);
+			if (detected !== "") return { base: detected, source: "auto" };
+			return { base: "", source: "root" };
+		}
+		// #endregion
+
+		/**
+		 * Where this panel's own HTTP API lives.
+		 *
+		 * Resolved once per page load, then rewritten IN PLACE by the 接口前缀
+		 * control; `api()` reads it per call, so a change lands on the next
+		 * request without reloading the GUI.
+		 *
+		 * Kept in localStorage rather than `config.json` on purpose: it describes
+		 * how THIS browser reached the host, and it has to be readable before the
+		 * first request — reading it from the host would need a working prefix
+		 * already, i.e. exactly what a broken deployment does not have.
+		 */
+		const storedApiBase = readStore(API_BASE_KEY);
+		let apiBaseState = pickApiBase(typeof storedApiBase === "string" ? storedApiBase : "", __dshWechatBundleSrc);
+
+		/** Path form of a plugin endpoint: `<prefix>/wechat/api/status`. */
+		function apiUrl(path) {
+			return apiBaseState.base + "/wechat/api" + path;
+		}
+
+		/** A plugin asset on the same prefix (the QR image is served by us). */
+		function assetUrl(path) {
+			return apiBaseState.base + path;
 		}
 
 		/** Expanded group ids, read once per mount. */
@@ -590,8 +708,14 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/**
+		 * One request to this plugin's own API, resolved through the mount
+		 * prefix (see the `api-base` region): a root-absolute URL works only
+		 * while the app owns the origin root, which is exactly the assumption
+		 * 飞牛 and other NAS gateways break.
+		 */
 		function api(path, options) {
-			return fetch("/wechat/api" + path, {
+			return fetch(apiUrl(path), {
 				headers: { "Content-Type": "application/json" },
 				...options,
 			}).then(async (resp) => ({ ok: resp.ok, status: resp.status, body: await resp.json().catch(() => ({})) }));
@@ -699,6 +823,13 @@ window.__ModuleLoader__.load({
 			const [msg, setMsg] = react.useState({ kind: "", text: "" });
 			// Editable form state (initialized from status.config).
 			const [form, setForm] = react.useState(null);
+			// Why `/wechat/api/status` produced nothing usable, if it did. Kept
+			// apart from `status.error` (a WeChat-side failure) because this one
+			// means the panel never reached the host at all.
+			const [linkError, setLinkError] = react.useState("");
+			/** The 接口前缀 editor: closed by default, opened by a broken link. */
+			const [baseOpen, setBaseOpen] = react.useState(false);
+			const [baseDraft, setBaseDraft] = react.useState(apiBaseState.base);
 			const [openGroups, setOpenGroups] = react.useState(loadOpenGroups);
 			const [helpOpen, setHelpOpen] = react.useState(loadHelpOpen);
 			// `helpText` is the verbatim `/help` reply (the fallback panel);
@@ -715,8 +846,22 @@ window.__ModuleLoader__.load({
 
 			const refresh = react.useCallback(() => {
 				api("/status").then((r) => {
-					if (!r.ok) return;
-					setStatus(r.body);
+					const body = r.body || {};
+					// A deployment addressed with the wrong prefix is answered by
+					// the GUI shell or the gateway's error page: HTTP 200 + HTML,
+					// so `json()` fails, `body` is `{}`, and every field below
+					// quietly takes its fallback — a panel that looks like a
+					// logged-out install while nothing works. A real status payload
+					// always carries `phase`, so its absence IS the broken signal.
+					if (!r.ok || typeof body.phase !== "string") {
+						// HTTP 200 with a foreign body is the common case here, so
+						// say which of the two happened instead of printing "HTTP 200"
+						// as if it were the failure.
+						setLinkError(`接口不通：${apiUrl("/status")}（HTTP ${r.status}${r.ok ? "，返回的不是本插件的响应" : ""}）`);
+						return;
+					}
+					setLinkError("");
+					setStatus(body);
 					// Fill the form once — only when first entering the page.
 					// Polling below only ever calls setStatus; user edits stay
 					// locally until Save, and are only re-synced when the user
@@ -747,7 +892,9 @@ window.__ModuleLoader__.load({
 						allowedUsers: (r.body.config?.allowedUsers ?? []).join("\n"),
 						statusMode: r.body.config?.statusMode === "full" ? "full" : "brief",
 					});
-				}).catch(() => {});
+				}).catch((e) => {
+					setLinkError(`接口不通：${apiUrl("/status")}（${String(e)}）`);
+				});
 			}, []);
 			react.useEffect(() => {
 				refresh();
@@ -820,6 +967,29 @@ window.__ModuleLoader__.load({
 				setBusy("");
 			};
 
+			/**
+			 * Re-point every panel request at a new mount prefix and retry once.
+			 * `""` restores auto detection. Stored per browser (see `api-base`),
+			 * because it describes this browser's route to the host, not the
+			 * host's own configuration.
+			 */
+			const applyApiBase = (raw) => {
+				const normalized = normalizeApiBase(raw);
+				writeStore(API_BASE_KEY, normalized);
+				apiBaseState = pickApiBase(normalized, __dshWechatBundleSrc);
+				setBaseDraft(apiBaseState.base);
+				setBaseOpen(false);
+				setLinkError("");
+				setMsg({ kind: "ok", text: `接口前缀已改为 ${apiBaseState.base || "根路径"}，正在重新连接…` });
+				refresh();
+			};
+
+			// A wrong prefix is the one failure the operator can repair from this
+			// page, so open the editor instead of leaving them to hunt for it.
+			react.useEffect(() => {
+				if (linkError && !status) setBaseOpen(true);
+			}, [linkError, status]);
+
 			const toggleGroup = (id) => {
 				setOpenGroups((prev) => {
 					const next = { ...prev, [id]: !prev[id] };
@@ -829,7 +999,9 @@ window.__ModuleLoader__.load({
 			};
 
 			const phase = status?.phase ?? "idle";
-			const badgeClass = phase === "logged-in" ? "ok" : phase === "failed" ? "err" : "wait";
+			const badgeClass = linkError ? "err" : phase === "logged-in" ? "ok" : phase === "failed" ? "err" : "wait";
+			// "未登录" would be a lie when the panel never reached the host.
+			const badgeLabel = linkError ? "接口不通" : (PHASE_LABEL[phase] ?? phase);
 			const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 			const isOpen = (id) => !!openGroups[id];
 			const dirty = !!form && baselineRef.current !== null && JSON.stringify(payloadOf(form)) !== baselineRef.current;
@@ -892,6 +1064,10 @@ window.__ModuleLoader__.load({
 				: "";
 			const connectionSummary = form
 				? `${form.cwd || "未设置目录"} · 限流 ${form.sendWechatRateLimitPerMinute || "不限"}/分 · ${allowlistSummary(form.allowedUsers)}`
+					// A manual override is worth surfacing: it is the one setting in
+					// this group the operator set to work around their gateway, and
+					// a collapsed group would otherwise hide it completely.
+					+ (apiBaseState.source === "manual" ? ` · 前缀 ${apiBaseState.base || "根路径"}` : "")
 				: "";
 			const promptSummary = form
 				? (form.surfacePromptEnabled ? `已开启 · ${form.surfacePrompt.trim().length} 字` : "已关闭 · 不注入")
@@ -928,12 +1104,51 @@ window.__ModuleLoader__.load({
 				);
 			};
 
+			/**
+			 * The 接口前缀 control.
+			 *
+			 * One definition, two homes: the 连接与默认行为 group (where the
+			 * setting belongs) and the broken-page fallback above the divider
+			 * (where it is the only thing that can still be reached). Two copies
+			 * would drift, and the copy that drifts is the unreachable one.
+			 */
+			const renderApiBase = () => createElement("div", { className: "wx_sub" },
+				createElement("div", { className: "wx_row" },
+					createElement("span", { className: "wx_meta" },
+						`当前：${apiBaseState.base || "根路径"}`,
+						apiBaseState.source === "manual" ? "（手动）" : apiBaseState.source === "auto" ? "（自动识别）" : "",
+					),
+					createElement("div", { className: "wx_actions" },
+						createElement("button", {
+							type: "button",
+							className: "wx_btn",
+							onClick: () => setBaseOpen(!baseOpen),
+							"aria-expanded": baseOpen,
+						}, baseOpen ? "收起" : "修改"),
+					),
+				),
+				baseOpen ? createElement("div", null,
+					createElement("input", {
+						className: "wx_base_input",
+						value: baseDraft,
+						onChange: (e) => setBaseDraft(e.target.value),
+						placeholder: "/app/Harness/dsh（也可直接粘贴完整网址）",
+						"aria-label": "接口前缀",
+					}),
+					createElement("div", { className: "wx_row" },
+						createElement("button", { type: "button", className: "wx_btn primary", onClick: () => applyApiBase(baseDraft) }, "应用"),
+						createElement("button", { type: "button", className: "wx_btn", onClick: () => applyApiBase("") }, "自动识别"),
+						createElement("span", { className: "wx_meta" }, "留空 = 自动识别"),
+					),
+				) : null,
+			);
+
 			return createElement("div", { className: "wx_section" },
 				createElement("div", { className: "wx_card" },
 					// ── Status block: login state, QR, session actions ──
 					createElement("div", { className: "wx_row" },
 						createElement("span", { className: "wx_title" }, "WeChat"),
-						createElement("span", { className: `wx_badge ${badgeClass}` }, PHASE_LABEL[phase] ?? phase),
+						createElement("span", { className: `wx_badge ${badgeClass}` }, badgeLabel),
 						status?.monitorRunning ? createElement("span", { className: "wx_meta" }, "监控运行中") : createElement("span", { className: "wx_meta" }, "监控未运行"),
 						createElement("div", { className: "wx_actions" },
 							createElement("button", {
@@ -952,10 +1167,11 @@ window.__ModuleLoader__.load({
 					status?.botId ? createElement("div", { className: "wx_meta" }, `Bot: ${status.botId}`) : null,
 					status?.userCount ? createElement("div", { className: "wx_meta" }, `已绑定微信用户: ${status.userCount}`) : null,
 					status?.error ? createElement("div", { className: "wx_err" }, status.error) : null,
+					linkError ? createElement("div", { className: "wx_err" }, linkError) : null,
 					phase === "waiting-qr" || phase === "scaned"
 						? createElement("div", { className: "wx_qr" },
 							status?.qrUrl
-								? createElement("img", { src: "/wechat/api/qr-image?v=" + encodeURIComponent(status.qrUrl), alt: "扫码登录二维码" })
+								? createElement("img", { src: assetUrl("/wechat/api/qr-image?v=" + encodeURIComponent(status.qrUrl)), alt: "扫码登录二维码" })
 								: createElement("div", { className: "wx_meta" }, "正在获取二维码…"),
 							createElement("div", { className: "wx_meta" }, "用微信扫描二维码，确认后自动登录"),
 						)
@@ -965,6 +1181,19 @@ window.__ModuleLoader__.load({
 						createElement("button", { className: "wx_btn danger", onClick: () => { if (confirm("确定退出微信登录？")) run("/logout"); }, disabled: busy !== "" }, busy === "/logout" ? "…" : "退出登录"),
 						createElement("span", { className: "wx_meta" }, "新安装或者更新本插件后，建议重启DSH再使用"),
 					),
+
+					// The 接口前缀 control normally lives in 连接与默认行为 (see the
+					// groups below), but a wrong prefix means `/status` never
+					// returns a config, so `form` stays null and NO group renders
+					// at all. This second home is the repair path that has to
+					// survive the failure it repairs — same control, one
+					// definition (renderApiBase), so the two cannot drift apart.
+					linkError && !form
+						? createElement("div", null,
+							createElement("div", { className: "wx_meta" }, "接口连不上宿主。如果这个页面挂在 NAS 应用网关的子路径下（地址形如 https://nas.example.com/app/Harness/dsh/），在这里填上那段前缀。"),
+							renderApiBase(),
+						)
+						: null,
 
 					createElement("div", { className: "wx_divider" }),
 
@@ -994,6 +1223,13 @@ window.__ModuleLoader__.load({
 										createElement("code", { className: "wx_key" }, "allowedUsers"),
 										createElement(HelpTip, { text: "只允许这些人用微信指挥你的 AI，一行一个微信号（用逗号分开也行）。留空 = 谁先给它发消息谁绑定。填了之后，名单外的人发什么都被忽略，也不回复。自己的微信号可以发 /status 看。" })),
 									createElement("textarea", { value: form.allowedUsers, onChange: set("allowedUsers"), placeholder: "（留空 = 不限制）" })),
+								createElement("div", { className: "wide" },
+									createElement("div", { className: "wx_setting_title", style: { marginBottom: "6px" } },
+										"接口前缀",
+										createElement("code", { className: "wx_key" }, "apiBase"),
+										createElement(HelpTip, { text: "设置页自己的接口地址前缀。正常部署是根路径；装在飞牛、群晖等 NAS 的应用网关下（网址形如 https://nas.example.com/app/Harness/dsh/）时，接口地址要带上这段前缀。默认从插件自己的脚本地址自动识别，只有识别不出来或者网关改写了地址时才需要手填。改完立刻重新请求，值只存在本浏览器。" })),
+									renderApiBase(),
+								),
 							),
 						),
 

@@ -24,12 +24,12 @@
 
 客户端半部通过 `dsh.client` + `exports["./client"]` 声明（与 dsh-mcp-manager 同款交付），挂载到 `settings.section` slot（nav 顺序 40）：
 
-- **状态区** — 登录阶段（未登录/等待扫码/已扫码，待确认/已登录/登录失败）、Bot ID、监控运行状态、已绑定用户数；未登录时直接显示二维码，扫码确认后自动进入已登录；同一区放 `重新扫码`（清除 token 重新登录）与 `退出登录`
+- **状态区** — 登录阶段（未登录/等待扫码/已扫码，待确认/已登录/登录失败）、Bot ID、监控运行状态、已绑定用户数；未登录时直接显示二维码，扫码确认后自动进入已登录；同一区放 `重新扫码`（清除 token 重新登录）与 `退出登录`。接口连不上宿主时（`linkError` 且没有 `form`），这一区还会顶上「接口前缀」的备用入口——此时所有分组都渲染不出来，而它正是唯一能修好这件事的控件
 - **可折叠分组** — 设置按用途分成 6 组，**默认全部收起**，收起时右侧显示由当前配置实时算出的摘要（例如「打字合并：已关闭 · 每条消息各自一轮」），展开才编辑：
 
   | 分组 | 包含 |
   |---|---|
-  | 连接与默认行为 | `cwd` / `sendWechatRateLimitPerMinute` / `allowedUsers` |
+  | 连接与默认行为 | `cwd` / `sendWechatRateLimitPerMinute` / `allowedUsers` / `接口前缀`（`apiBase`，默认自动识别，手填值存本浏览器） |
   | 消息推送 | `工作步骤展示`（极简 / 简洁 / 标准）/ `跨会话决策推送` / `跨会话任务完成提醒` + `完整显示任务完成回复`（完成提醒关闭时置灰）/ `状态详细程度` |
   | 打字合并 | `打字合并` 总开关 + `mergeSilenceMs` / `mergeMaxMsgs` / `mergeForcedReleaseMs` / `合并后缀 .. 与 !!`（总开关关闭时参数置灰，但值仍随保存提交，不会丢配置） |
   | 图片与文件 | `图片/文件与文字合并发送` 总开关 + `mediaHoldMs`（等待上限，总开关关闭时置灰）+ `以 @引用 方式交给 AI`（独立开关，一直可点，因为交付措辞对所有附件生效） |
@@ -42,6 +42,8 @@
 - **已知限制** — 页面底部的告警盒，同样可折叠（默认收起），列出 iLink 的 10 条窗口、24 小时互动窗口，以及「出站语音气泡不可渲染」（见「已知边界」里的语音条目）
 
 与宿主通信走插件自己的 HTTP API（`/wechat/api/status|help|config|relogin|logout`），客户端零 `@deepseek-ai` 依赖。
+
+**子路径部署**（飞牛等 NAS 的应用网关，issue #24）：面板的每个请求都走 `api()` → `apiUrl()`，前缀由 `api-base` 区块算出——页面加载时从插件自己的脚本地址（`<前缀>/plugins/dsh-wechat/client.js`）砍掉 `/plugins/` 之后的尾巴，因为 `document.currentScript` 只在脚本执行那一刻可读（宿主把 `<script>` 插进 `<head>`，在 `load` 事件里就移除了，而 factory 还要更晚才跑）。手填值存浏览器 `dsh-wechat/api-base`，优先于自动识别；不存 `config.json` 是因为它描述「这台浏览器怎么走到宿主」，而且坏掉时正是读不到宿主配置的时候。扫码页 `/wechat/qr` 是精确路由，直接砍掉自己 URL 末尾的 `/wechat/qr` 得到前缀。整条链路由 `tests/subpath-deploy.test.ts` 端到端跑通：用假 React 渲染面板，断言实际发出的 URL。
 
 ### 帮助文案的单一来源（`src/help-catalog.ts`）
 
